@@ -273,13 +273,23 @@ async fn dispatch_matched_route(
             .expect("response builder");
     };
 
-    // Open an inbound exchange on the shared registry.
+    // Open an inbound exchange on the shared registry, bound to a fresh
+    // per-invocation scope so this request's handles are unreachable from
+    // any other tenant's guest (ADR-0156).
     let streams = state.http_stream_registry.clone();
-    let exchange = streams.open_inbound_exchange().await;
+    let scope = streams.mint_scope().await;
+    let exchange = streams.open_inbound_exchange(scope).await;
     let guest_request_body = exchange.guest_request_body;
     let guest_response_body = exchange.guest_response_body;
     let kernel_request_body = exchange.kernel_request_body;
     let kernel_response_body = exchange.kernel_response_body;
+
+    // Own the scope's lifetime from the moment it is opened. Held as a
+    // local so that if this handler future is dropped mid-request (client
+    // disconnect while the guest runs or we await its head), the scope is
+    // still reclaimed; moved into the response body stream on the success
+    // path so it lives until the body finishes draining (ADR-0156).
+    let scope_cleanup = temper_wasm::http_stream::ScopeCleanupGuard::new(streams.clone(), scope);
 
     // Spawn task A: axum body → kernel_request_body handle.
     // Streaming pump: each Frame::data() chunk is forwarded as it
@@ -290,6 +300,7 @@ async fn dispatch_matched_route(
     // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
     tokio::spawn(async move {
+        // determinism-ok: live HTTP-edge request-body pump, not sim-core
         use tokio_stream::StreamExt as _;
         let mut stream = body.into_data_stream();
         while let Some(chunk_result) = stream.next().await {
@@ -366,7 +377,7 @@ async fn dispatch_matched_route(
         .map(|v| v.get_tenant_secrets(tenant_id.as_str()))
         .unwrap_or_default();
     let host: std::sync::Arc<dyn temper_wasm::WasmHost> = std::sync::Arc::new(
-        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone())
+        temper_wasm::ProductionWasmHost::with_shared_streams(secrets, streams.clone(), scope)
             .with_invocation_context(ctx.clone()),
     );
 
@@ -419,6 +430,7 @@ async fn dispatch_matched_route(
                     error = %e,
                     "WASM adapter failed before action bridge dispatch"
                 );
+                streams.close_scope(scope).await;
                 return action_bridge_error_response(
                     &action_bridge.response,
                     &[],
@@ -428,6 +440,9 @@ async fn dispatch_matched_route(
             }
         };
 
+        // Guest invocation is done; the action-bridge response is built
+        // from its buffered result, not the streaming exchange.
+        streams.close_scope(scope).await;
         return dispatch_action_bridge_result(
             state,
             tenant_id,
@@ -441,6 +456,7 @@ async fn dispatch_matched_route(
     }
 
     let invoke_task = tokio::spawn(async move {
+        // determinism-ok: live HTTP-edge guest invocation, not sim-core
         match engine
             .invoke_with_blobs(
                 &invoke_hash,
@@ -484,6 +500,7 @@ async fn dispatch_matched_route(
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "HttpEndpoint: guest did not submit response head");
             invoke_task.abort();
+            streams.close_scope(scope).await;
             return axum::http::Response::builder()
                 .status(axum::http::StatusCode::BAD_GATEWAY)
                 .body(Body::from(format!(
@@ -497,6 +514,7 @@ async fn dispatch_matched_route(
                 "HttpEndpoint: guest timed out before submitting response head"
             );
             invoke_task.abort();
+            streams.close_scope(scope).await;
             return axum::http::Response::builder()
                 .status(axum::http::StatusCode::GATEWAY_TIMEOUT)
                 .body(Body::from(
@@ -506,10 +524,13 @@ async fn dispatch_matched_route(
         }
     };
 
-    // Build the axum response whose body drains the
-    // kernel_response_body handle.
+    // Build the axum response whose body drains the kernel_response_body
+    // handle. The scope cleanup guard (opened alongside the exchange) is
+    // moved into the stream so the invocation's handles are reclaimed when
+    // the body finishes draining or the client disconnects (ADR-0156).
     let drain_streams = streams.clone();
     let body_stream = async_stream::stream! {
+        let _scope_cleanup = scope_cleanup;
         loop {
             match drain_streams.read(kernel_response_body).await {
                 Ok(chunk) if chunk.is_empty() => break,
