@@ -299,8 +299,8 @@ async fn dispatch_matched_route(
     // ADR-0057 inbound exchange end-to-end streaming — without it,
     // even SDK-streaming guests are bounded by the buffered limit.
     let pump_streams = streams.clone();
-    tokio::spawn(async move {
-        // determinism-ok: live HTTP-edge request-body pump, not sim-core
+    #[rustfmt::skip]
+    tokio::spawn(async move { // determinism-ok: live HTTP-edge request-body pump, not sim-core
         use tokio_stream::StreamExt as _;
         let mut stream = body.into_data_stream();
         while let Some(chunk_result) = stream.next().await {
@@ -455,8 +455,8 @@ async fn dispatch_matched_route(
         .await;
     }
 
-    let invoke_task = tokio::spawn(async move {
-        // determinism-ok: live HTTP-edge guest invocation, not sim-core
+    #[rustfmt::skip]
+    let invoke_task = tokio::spawn(async move { // determinism-ok: live HTTP-edge guest invocation, not sim-core
         match engine
             .invoke_with_blobs(
                 &invoke_hash,
