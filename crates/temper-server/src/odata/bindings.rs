@@ -8,7 +8,7 @@ use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use temper_authz::SecurityContext;
+use temper_authz::{PrincipalKind, SecurityContext};
 
 use super::account_verification::enforce_commons_account_verified_for_action;
 use super::common::run_write_prechecks;
@@ -83,11 +83,23 @@ pub(super) async fn dispatch_bound_action(
             "agent.type",
             identity.agent_type_name.clone(),
         ));
-        SecurityContext::from_resolved_identity(
-            &identity.agent_instance_id,
-            &identity.agent_type_name,
-            agent_ctx.session_id.as_deref(),
-        )
+        if identity.from_jwt {
+            // Trusted-issuer JWT: an agent acting for the owning human (`sub`).
+            SecurityContext::from_verified_jwt(
+                &identity.agent_instance_id,
+                PrincipalKind::Agent,
+                Some(&identity.agent_type_name),
+                identity.acting_for.as_deref(),
+                None,
+                agent_ctx.session_id.as_deref(),
+            )
+        } else {
+            SecurityContext::from_resolved_identity(
+                &identity.agent_instance_id,
+                &identity.agent_type_name,
+                agent_ctx.session_id.as_deref(),
+            )
+        }
     } else {
         // No credential resolved — operator/admin access via global API key.
         // Build SecurityContext from X-Temper-Principal-Kind header (admin/system)

@@ -12,10 +12,14 @@ use sha2::{Digest, Sha256};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
+use crate::identity::jwt;
 use crate::state::ServerState;
 
 /// Cache entry TTL in seconds.
 const CACHE_TTL_SECS: i64 = 60;
+
+/// Clock-skew tolerance (seconds) for JWT `exp`/`nbf` validation.
+const JWT_LEEWAY_SECS: i64 = 60;
 
 /// A platform-resolved agent identity.
 ///
@@ -23,14 +27,27 @@ const CACHE_TTL_SECS: i64 = 60;
 /// self-declared headers or client-reported values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedIdentity {
-    /// Platform-assigned unique agent instance ID (UUIDv7).
+    /// Platform-assigned unique agent instance ID (UUIDv7) for the credential
+    /// path; the token's `client_id` (acting agent) for the JWT path.
     pub agent_instance_id: String,
-    /// The AgentType entity ID this credential is linked to.
+    /// The AgentType entity ID this credential is linked to. Empty for the JWT
+    /// path, which takes its type name straight from a verified claim.
     pub agent_type_id: String,
     /// The AgentType's human-readable name (e.g., "claude-code").
     pub agent_type_name: String,
-    /// Whether this identity was verified through the credential registry.
+    /// Whether this identity was verified (registry or trusted-issuer JWT).
     pub verified: bool,
+    /// JWT path only: the owning human (the agent's `acting_for` / token `sub`).
+    #[serde(default)]
+    pub acting_for: Option<String>,
+    /// JWT path only: the sign-out-everywhere generation carried by the token,
+    /// for the follow-up revocation check.
+    #[serde(default)]
+    pub auth_generation: Option<i64>,
+    /// True when this identity came from a verified JWT rather than an
+    /// `AgentCredential`. Selects the security-context constructor downstream.
+    #[serde(default)]
+    pub from_jwt: bool,
 }
 
 /// Cached resolution result with expiry.
@@ -63,15 +80,11 @@ impl IdentityResolver {
         }
     }
 
-    /// Resolve a bearer token to a verified agent identity.
+    /// Resolve a bearer token to a verified identity.
     ///
-    /// 1. Hash the token (SHA-256)
-    /// 2. Check cache (hit → return immediately)
-    /// 3. Look up `AgentCredential` entity by using key_hash as entity ID
-    /// 4. Verify credential is `Active`
-    /// 5. Look up linked `AgentType` entity
-    /// 6. Verify AgentType is `Active`
-    /// 7. Cache and return `ResolvedIdentity`
+    /// JWT-shaped tokens (`header.payload.signature`) are verified against a
+    /// registered [`TrustedIssuer`]; opaque tokens are looked up in the
+    /// `AgentCredential` registry. Both paths share the in-memory cache.
     pub async fn resolve(
         &self,
         state: &ServerState,
@@ -86,15 +99,38 @@ impl IdentityResolver {
             return Some(cached);
         }
 
-        // Look up AgentCredential entity. We use the key_hash as entity ID
-        // for O(1) lookup — the Issue action must use the key_hash as the
-        // entity ID when creating credentials.
+        if looks_like_jwt(bearer_token) {
+            // JWT path: verify against the token's registered issuer. Cache no
+            // longer than the token's own expiry so an expired token is never
+            // served from cache.
+            let (identity, exp_unix) = self.resolve_jwt(state, tenant, bearer_token).await?;
+            let cap = sim_now() + chrono::Duration::seconds(CACHE_TTL_SECS);
+            let token_exp = chrono::DateTime::from_timestamp(exp_unix, 0).unwrap_or(cap);
+            self.put_cached_until(cache_key, identity.clone(), cap.min(token_exp));
+            Some(identity)
+        } else {
+            let identity = self.resolve_credential(state, tenant, &key_hash).await?;
+            self.put_cached(cache_key, identity.clone());
+            Some(identity)
+        }
+    }
+
+    /// Opaque-token path: look up the `AgentCredential` registry.
+    ///
+    /// key_hash is the entity ID (the `Issue` action uses it as such), giving
+    /// an O(1) lookup. Verifies the credential and its linked `AgentType` are
+    /// both `Active`.
+    async fn resolve_credential(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        key_hash: &str,
+    ) -> Option<ResolvedIdentity> {
         let cred_response = state
-            .get_tenant_entity_state(tenant, "AgentCredential", &key_hash)
+            .get_tenant_entity_state(tenant, "AgentCredential", key_hash)
             .await
             .ok()?;
 
-        // Verify credential is Active.
         if cred_response.state.status != "Active" {
             return None;
         }
@@ -107,13 +143,11 @@ impl IdentityResolver {
             return None;
         }
 
-        // Look up linked AgentType entity.
         let type_response = state
             .get_tenant_entity_state(tenant, "AgentType", agent_type_id)
             .await
             .ok()?;
 
-        // Verify AgentType is Active.
         if type_response.state.status != "Active" {
             return None;
         }
@@ -126,17 +160,74 @@ impl IdentityResolver {
             .unwrap_or("")
             .to_string();
 
-        let identity = ResolvedIdentity {
+        Some(ResolvedIdentity {
             agent_instance_id: agent_instance_id.to_string(),
             agent_type_id: agent_type_id.to_string(),
             agent_type_name,
             verified: true,
+            acting_for: None,
+            auth_generation: None,
+            from_jwt: false,
+        })
+    }
+
+    /// JWT path: verify an ES256 token against its registered `TrustedIssuer`.
+    ///
+    /// Returns the resolved identity and the token's `exp` (used to cap cache
+    /// TTL). The unverified `iss` claim only selects which issuer's keys to
+    /// check against; the signature is the gate.
+    async fn resolve_jwt(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        token: &str,
+    ) -> Option<(ResolvedIdentity, i64)> {
+        // Read `iss` from the unverified payload to pick the issuer entity.
+        let unverified = jwt::decode_claims_unverified(token).ok()?;
+        let issuer_id = unverified.iss;
+
+        let issuer_response = state
+            .get_tenant_entity_state(tenant, "TrustedIssuer", &issuer_id)
+            .await
+            .ok()?;
+        if issuer_response.state.status != "Active" {
+            return None;
+        }
+
+        let fields = &issuer_response.state.fields;
+        let jwks_json = fields.get("jwks_json")?.as_str()?;
+        let audience = fields.get("audience")?.as_str()?;
+        let jwks: jwt::Jwks = serde_json::from_str(jwks_json).ok()?;
+
+        let now_unix = sim_now().timestamp();
+        let claims = jwt::verify(
+            token,
+            &jwks,
+            &issuer_id,
+            audience,
+            now_unix,
+            JWT_LEEWAY_SECS,
+        )
+        .ok()?;
+
+        // Map verified claims → identity. The acting agent is `client_id`; the
+        // owning human is `sub`; the type name is `agent_type`.
+        let client_id = claims.client_id.clone().unwrap_or_default();
+        let agent_type = claims.agent_type.clone().unwrap_or_default();
+        if client_id.is_empty() || agent_type.is_empty() {
+            return None;
+        }
+
+        let identity = ResolvedIdentity {
+            agent_instance_id: client_id,
+            agent_type_id: String::new(),
+            agent_type_name: agent_type,
+            verified: true,
+            acting_for: claims.sub.clone(),
+            auth_generation: claims.auth_generation,
+            from_jwt: true,
         };
-
-        // Cache the result.
-        self.put_cached(cache_key, identity.clone());
-
-        Some(identity)
+        Some((identity, claims.expiry()))
     }
 
     /// Invalidate all cached entries (e.g., after credential rotation/revocation).
@@ -178,6 +269,16 @@ impl IdentityResolver {
 
     fn put_cached(&self, cache_key: String, identity: ResolvedIdentity) {
         let expires_at = sim_now() + chrono::Duration::seconds(CACHE_TTL_SECS);
+        self.put_cached_until(cache_key, identity, expires_at);
+    }
+
+    /// Cache with an explicit expiry (JWT path caps this at the token's `exp`).
+    fn put_cached_until(
+        &self,
+        cache_key: String,
+        identity: ResolvedIdentity,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) {
         let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
 
         // Evict expired entries opportunistically (bounded work: max 32 per insert).
@@ -206,6 +307,19 @@ fn cache_key(tenant: &TenantId, key_hash: &str) -> String {
     format!("{}:{key_hash}", tenant.as_str())
 }
 
+/// Heuristic: does this bearer token have JWS compact form
+/// (`header.payload.signature`, three non-empty dot-separated segments)?
+///
+/// Opaque `AgentCredential` tokens are single-segment, so this cleanly
+/// separates the two paths without decoding anything.
+fn looks_like_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(h), Some(p), Some(s), None) if !h.is_empty() && !p.is_empty() && !s.is_empty()
+    )
+}
+
 /// Hash a bearer token with SHA-256 for credential lookup.
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
@@ -231,5 +345,20 @@ mod tests {
         let h1 = hash_token("token-a");
         let h2 = hash_token("token-b");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn jwt_shape_detection_routes_correctly() {
+        // JWS compact form → JWT path.
+        assert!(looks_like_jwt("eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJ4In0.c2ln"));
+        // Opaque credential tokens → registry path.
+        assert!(!looks_like_jwt("kc_3f2a9b8c7d6e5f4a"));
+        assert!(!looks_like_jwt(""));
+        // Wrong segment counts or empty segments are not JWTs.
+        assert!(!looks_like_jwt("a.b"));
+        assert!(!looks_like_jwt("a.b.c.d"));
+        assert!(!looks_like_jwt("a..c"));
+        assert!(!looks_like_jwt(".b.c"));
+        assert!(!looks_like_jwt("a.b."));
     }
 }

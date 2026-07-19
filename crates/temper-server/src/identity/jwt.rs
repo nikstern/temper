@@ -94,6 +94,14 @@ enum Audience {
     Many(Vec<String>),
 }
 
+impl Claims {
+    /// The `exp` claim (seconds since epoch). Used by the resolver to cap how
+    /// long a verified token may be cached — never past its own expiry.
+    pub fn expiry(&self) -> i64 {
+        self.exp
+    }
+}
+
 impl Audience {
     fn contains(&self, expected: &str) -> bool {
         match self {
@@ -217,10 +225,10 @@ pub fn verify(
     if now_unix > claims.exp + leeway_secs {
         return Err(JwtError::Expired);
     }
-    if let Some(nbf) = claims.nbf {
-        if now_unix < nbf - leeway_secs {
-            return Err(JwtError::NotYetValid);
-        }
+    if let Some(nbf) = claims.nbf
+        && now_unix < nbf - leeway_secs
+    {
+        return Err(JwtError::NotYetValid);
     }
 
     Ok(claims)
@@ -247,8 +255,12 @@ fn verifying_key_from_jwk(jwk: &Jwk) -> Result<VerifyingKey, JwtError> {
     if jwk.kty != "EC" || jwk.crv != "P-256" {
         return Err(JwtError::BadKey);
     }
-    let x = URL_SAFE_NO_PAD.decode(&jwk.x).map_err(|_| JwtError::BadKey)?;
-    let y = URL_SAFE_NO_PAD.decode(&jwk.y).map_err(|_| JwtError::BadKey)?;
+    let x = URL_SAFE_NO_PAD
+        .decode(&jwk.x)
+        .map_err(|_| JwtError::BadKey)?;
+    let y = URL_SAFE_NO_PAD
+        .decode(&jwk.y)
+        .map_err(|_| JwtError::BadKey)?;
     if x.len() != 32 || y.len() != 32 {
         return Err(JwtError::BadKey);
     }
