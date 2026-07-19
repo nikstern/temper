@@ -9,6 +9,17 @@
 #   4. a token from an unregistered issuer is rejected (401)
 #   5. opaque AgentCredential bearers still work (additive: nothing broke)
 #
+# NOTE ON AUTHORIZATION: registering a TrustedIssuer is an admin-gated action,
+# so this script needs the target tenant to carry a Cedar policy permitting
+# admin management of TrustedIssuer (RegisterIssuer/Suspend/...). A bare
+# `temper serve` tenant is default-deny with no seeded permits, so RegisterIssuer
+# returns 403 there — as does AgentCredential.Issue; it is not specific to this
+# entity. Point this script at a tenant provisioned with that policy. The
+# resolver logic itself (verify -> principal, and rejection of bad tokens) is
+# covered without that dependency by the integration test
+# `crates/temper-platform/tests/trusted_issuer_resolve.rs`, which seeds the
+# issuer through the internal dispatch path and asserts the same five outcomes.
+#
 # Requires: cargo (workspace built), python3 with 'cryptography', jq, curl.
 # Usage: scripts/e2e-trusted-issuer.sh [port]   (default 3467)
 set -euo pipefail
@@ -64,15 +75,15 @@ PY
 
 # --- 2. Boot the server ------------------------------------------------------
 say "Starting local temper server on :$PORT"
-TEMPER_API_KEY="$API_KEY" cargo run -p temper-server --bin temper-server -- --port "$PORT" \
+TEMPER_API_KEY="$API_KEY" cargo run -p temper-cli --bin temper -- serve --port "$PORT" --no-observe \
   >"$WORKDIR/server.log" 2>&1 &
 SERVER_PID=$!
-for i in $(seq 1 60); do
-  curl -sf "$BASE/health" >/dev/null 2>&1 && break
+for i in $(seq 1 120); do
+  curl -sf "$BASE/healthz" >/dev/null 2>&1 && break
   sleep 2
-  kill -0 "$SERVER_PID" 2>/dev/null || { echo "server died; log tail:"; tail -30 "$WORKDIR/server.log"; exit 1; }
+  kill -0 "$SERVER_PID" 2>/dev/null || { echo "server died; log tail:"; tail -40 "$WORKDIR/server.log"; exit 1; }
 done
-curl -sf "$BASE/health" >/dev/null || { echo "server never became healthy"; tail -30 "$WORKDIR/server.log"; exit 1; }
+curl -sf "$BASE/healthz" >/dev/null || { echo "server never became healthy"; tail -40 "$WORKDIR/server.log"; exit 1; }
 
 # --- 3. Register the TrustedIssuer (operator key) ---------------------------
 say "Registering TrustedIssuer https://e2e.issuer.local"

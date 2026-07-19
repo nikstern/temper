@@ -40,3 +40,6 @@ tower = { workspace = true }
 hyper = { workspace = true }
 wiremock = { workspace = true }
 tempfile = "3.27.0"
+# ES256 token minting for the TrustedIssuer resolver integration test.
+p256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.22"

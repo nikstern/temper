@@ -6712,6 +6712,7 @@ dependencies = [
  "chrono",
  "hyper 1.8.1",
  "opentelemetry",
+ "p256",
  "reqwest",
  "serde",
  "serde_json",
