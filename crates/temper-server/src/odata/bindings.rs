@@ -84,13 +84,22 @@ pub(super) async fn dispatch_bound_action(
             identity.agent_type_name.clone(),
         ));
         if identity.from_jwt {
-            // Trusted-issuer JWT: an agent acting for the owning human (`sub`).
+            // Trusted-issuer JWT. A human token yields a Customer principal; an
+            // agent token yields an Agent acting for the owning human (`sub`).
+            let (kind, agent_type) = if identity.is_human {
+                (PrincipalKind::Customer, None)
+            } else {
+                (
+                    PrincipalKind::Agent,
+                    Some(identity.agent_type_name.as_str()),
+                )
+            };
             SecurityContext::from_verified_jwt(
                 &identity.agent_instance_id,
-                PrincipalKind::Agent,
-                Some(&identity.agent_type_name),
+                kind,
+                agent_type,
                 identity.acting_for.as_deref(),
-                None,
+                identity.role.as_deref(),
                 agent_ctx.session_id.as_deref(),
             )
         } else {

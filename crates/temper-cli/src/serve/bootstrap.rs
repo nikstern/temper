@@ -486,6 +486,11 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
     if let Some(ref api_key) = state.api_token {
         temper_platform::bootstrap_operator_credential(state, api_key, "default").await;
     }
+
+    // Register a trusted JWT issuer from env config, if provided (ARN-255).
+    // This is how a deployment activates the platform-issued-token path without
+    // an authenticated API call.
+    temper_platform::bootstrap_trusted_issuer_from_env(state, "default").await;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

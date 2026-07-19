@@ -153,6 +153,13 @@
         <Property Name="created_by" Type="Edm.String"/>
       </EntityType>
 
+      <EntityType Name="PrincipalGeneration">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="generation" Type="Edm.Int64"/>
+      </EntityType>
+
       <Action Name="Issue" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.AgentCredential"/>
         <Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/>
@@ -210,6 +217,11 @@
         <ReturnType Type="Temper.TrustedIssuer"/>
       </Action>
 
+      <Action Name="BumpGeneration" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.PrincipalGeneration"/>
+        <ReturnType Type="Temper.PrincipalGeneration"/>
+      </Action>
+
       <EntityContainer Name="Service">
         <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>
         <EntitySet Name="Schedules" EntityType="Temper.Schedule">
@@ -236,6 +248,7 @@
           <NavigationPropertyBinding Path="AgentType" Target="AgentTypes"/>
         </EntitySet>
         <EntitySet Name="TrustedIssuers" EntityType="Temper.TrustedIssuer"/>
+        <EntitySet Name="PrincipalGenerations" EntityType="Temper.PrincipalGeneration"/>
       </EntityContainer>
 
     </Schema>

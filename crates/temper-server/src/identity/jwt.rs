@@ -130,6 +130,10 @@ pub struct Claims {
     pub client_id: Option<String>,
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// The owning human's role (owner/curator/contributor), set by the AS from
+    /// the Member record. Carried onto the principal for Cedar evaluation.
+    #[serde(default)]
+    pub role: Option<String>,
     #[serde(default)]
     pub grant_id: Option<String>,
     #[serde(default)]

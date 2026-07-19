@@ -48,6 +48,14 @@ pub struct ResolvedIdentity {
     /// `AgentCredential`. Selects the security-context constructor downstream.
     #[serde(default)]
     pub from_jwt: bool,
+    /// JWT path only: true when the token represents a human (Customer) rather
+    /// than an agent — i.e. it carries a `sub` but no `agent_type`.
+    #[serde(default)]
+    pub is_human: bool,
+    /// JWT path only: the principal's role (owner/curator/contributor) from a
+    /// verified token claim, for Cedar evaluation.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Cached resolution result with expiry.
@@ -168,6 +176,8 @@ impl IdentityResolver {
             acting_for: None,
             auth_generation: None,
             from_jwt: false,
+            is_human: false,
+            role: None,
         })
     }
 
@@ -210,24 +220,77 @@ impl IdentityResolver {
         )
         .ok()?;
 
-        // Map verified claims → identity. The acting agent is `client_id`; the
-        // owning human is `sub`; the type name is `agent_type`.
-        let client_id = claims.client_id.clone().unwrap_or_default();
-        let agent_type = claims.agent_type.clone().unwrap_or_default();
-        if client_id.is_empty() || agent_type.is_empty() {
+        // Sign-out-everywhere: reject a token whose generation is older than the
+        // principal's current generation (RFC-0002, ARN-255 option A). The
+        // generation is keyed on the human `sub`, so signing out a human also
+        // invalidates the tokens of agents acting for them.
+        if let Some(token_gen) = claims.auth_generation
+            && let Some(sub) = claims.sub.as_deref()
+            && token_gen < self.current_generation(state, tenant, sub).await
+        {
             return None;
         }
 
-        let identity = ResolvedIdentity {
-            agent_instance_id: client_id,
-            agent_type_id: String::new(),
-            agent_type_name: agent_type,
-            verified: true,
-            acting_for: claims.sub.clone(),
-            auth_generation: claims.auth_generation,
-            from_jwt: true,
+        // Map verified claims → identity. A token with an `agent_type` is an
+        // agent acting for the human `sub`; a token with only a `sub` is the
+        // human themselves (a Customer principal).
+        let identity = match claims.agent_type.as_deref().filter(|s| !s.is_empty()) {
+            Some(agent_type) => {
+                let client_id = claims.client_id.clone().unwrap_or_default();
+                if client_id.is_empty() {
+                    return None;
+                }
+                ResolvedIdentity {
+                    agent_instance_id: client_id,
+                    agent_type_id: String::new(),
+                    agent_type_name: agent_type.to_string(),
+                    verified: true,
+                    acting_for: claims.sub.clone(),
+                    auth_generation: claims.auth_generation,
+                    from_jwt: true,
+                    is_human: false,
+                    role: claims.role.clone(),
+                }
+            }
+            None => {
+                let sub = claims.sub.clone().unwrap_or_default();
+                if sub.is_empty() {
+                    return None;
+                }
+                ResolvedIdentity {
+                    agent_instance_id: sub,
+                    agent_type_id: String::new(),
+                    agent_type_name: String::new(),
+                    verified: true,
+                    acting_for: None,
+                    auth_generation: claims.auth_generation,
+                    from_jwt: true,
+                    is_human: true,
+                    role: claims.role.clone(),
+                }
+            }
         };
         Some((identity, claims.expiry()))
+    }
+
+    /// Read a principal's current sign-out-everywhere generation.
+    ///
+    /// Missing entity ⇒ generation 0 (never signed out everywhere). The counter
+    /// lives in the kernel's `PrincipalGeneration` entity, so this check is
+    /// generic across apps.
+    async fn current_generation(&self, state: &ServerState, tenant: &TenantId, sub: &str) -> i64 {
+        match state
+            .get_tenant_entity_state(tenant, "PrincipalGeneration", sub)
+            .await
+        {
+            Ok(resp) => resp
+                .state
+                .counters
+                .get("generation")
+                .map(|c| *c as i64)
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
     }
 
     /// Invalidate all cached entries (e.g., after credential rotation/revocation).

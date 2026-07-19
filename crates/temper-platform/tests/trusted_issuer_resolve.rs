@@ -229,3 +229,88 @@ async fn suspended_issuer_stops_resolving() {
         "token must not resolve once its issuer is Suspended"
     );
 }
+
+#[tokio::test]
+async fn human_token_resolves_to_customer_with_role() {
+    let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
+    let state = state_with_issuer(&sk).await;
+
+    // A human token: `sub` + `role`, no `agent_type`/`client_id`.
+    let claims = serde_json::json!({
+        "iss": ISSUER, "aud": AUD, "sub": "human-owner",
+        "role": "owner", "auth_generation": 0,
+        "nbf": 0, "exp": 4_102_444_800i64,
+    });
+    let token = mint(&sk, header(), claims);
+
+    let resolver = IdentityResolver::new();
+    let id = resolver
+        .resolve(&state.server, &TenantId::new("default"), &token)
+        .await
+        .expect("human token should resolve");
+
+    assert!(id.from_jwt);
+    assert!(id.is_human);
+    assert_eq!(id.agent_instance_id, "human-owner");
+    assert_eq!(id.role.as_deref(), Some("owner"));
+    assert!(id.acting_for.is_none());
+}
+
+#[tokio::test]
+async fn bumping_generation_invalidates_older_tokens() {
+    let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
+    let state = state_with_issuer(&sk).await;
+    let tenant = TenantId::new("default");
+
+    // Token minted at generation 0 (contributor_claims stamps auth_generation=3;
+    // build one at gen 0 for clarity).
+    let gen0 = {
+        let mut c = contributor_claims();
+        c["auth_generation"] = serde_json::json!(0);
+        mint(&sk, header(), c)
+    };
+
+    // Valid before any bump.
+    let resolver = IdentityResolver::new();
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, &gen0)
+            .await
+            .is_some(),
+        "gen-0 token valid before sign-out-everywhere"
+    );
+
+    // Sign out everywhere: bump the human's generation to 1. The generation is
+    // keyed on the human `sub`, which contributor_claims sets to "human-e2e".
+    let ctx = AgentContext::for_service("signout-e2e");
+    state
+        .server
+        .dispatch_tenant_action(
+            &tenant,
+            "PrincipalGeneration",
+            "human-e2e",
+            "BumpGeneration",
+            serde_json::json!({}),
+            &ctx,
+        )
+        .await
+        .expect("bump generation");
+
+    // A fresh resolver must now reject the gen-0 token (0 < current 1)...
+    let fresh = IdentityResolver::new();
+    assert!(
+        fresh.resolve(&state.server, &tenant, &gen0).await.is_none(),
+        "gen-0 token must be rejected after the generation is bumped"
+    );
+
+    // ...but a token minted at the new generation (1) still resolves.
+    let gen1 = {
+        let mut c = contributor_claims();
+        c["auth_generation"] = serde_json::json!(1);
+        mint(&sk, header(), c)
+    };
+    assert!(
+        fresh.resolve(&state.server, &tenant, &gen1).await.is_some(),
+        "a token minted at the current generation must still resolve"
+    );
+}
