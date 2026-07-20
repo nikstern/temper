@@ -760,3 +760,118 @@ fn candidate_filter_preserves_named_forbid_policy_ids() {
         "candidate filtering must preserve named policy diagnostics, got: {policy_ids:?}"
     );
 }
+
+// --- Spec-declared authorization overlays actually enforce (ARN-255) ---------
+
+fn role_context(id: &str, role: &str) -> SecurityContext {
+    SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), id.to_string()),
+        (
+            "X-Temper-Principal-Kind".to_string(),
+            "customer".to_string(),
+        ),
+        ("X-Temper-Agent-Role".to_string(), role.to_string()),
+    ])
+}
+
+/// A generated `forbid … unless role` overlay must restrict even on top of an
+/// app's blanket permit-all base (Cedar forbid-overrides-permit).
+#[test]
+fn generated_role_overlay_enforces_on_permit_all_base() {
+    let base = "permit(principal, action, resource is DesignLanguage);";
+    let overlay = crate::policy_gen::generate_authz_overlays(
+        "DesignLanguage",
+        &[crate::policy_gen::ActionAuthz {
+            name: "Publish".to_string(),
+            requires_role: vec!["owner".to_string(), "curator".to_string()],
+            requires: None,
+        }],
+    );
+    let engine = AuthzEngine::new(&format!("{base}\n{overlay}")).expect("policy parses");
+    let attrs = HashMap::new();
+
+    // Owner and curator may Publish; contributor and role-less may not.
+    assert!(
+        engine
+            .authorize(
+                &role_context("u1", "owner"),
+                "Publish",
+                "DesignLanguage",
+                &attrs
+            )
+            .is_allowed()
+    );
+    assert!(
+        engine
+            .authorize(
+                &role_context("u2", "curator"),
+                "Publish",
+                "DesignLanguage",
+                &attrs
+            )
+            .is_allowed()
+    );
+    assert!(
+        !engine
+            .authorize(
+                &role_context("u3", "contributor"),
+                "Publish",
+                "DesignLanguage",
+                &attrs
+            )
+            .is_allowed(),
+        "contributor must be forbidden from Publish"
+    );
+    assert!(
+        !engine
+            .authorize(&customer_context("u4"), "Publish", "DesignLanguage", &attrs)
+            .is_allowed(),
+        "a role-less principal must be forbidden from Publish"
+    );
+
+    // A different action on the same resource is unaffected by the overlay.
+    assert!(
+        engine
+            .authorize(
+                &customer_context("u5"),
+                "SetCreator",
+                "DesignLanguage",
+                &attrs
+            )
+            .is_allowed(),
+        "unannotated actions stay allowed by the permit-all base"
+    );
+}
+
+/// A generated `requires = "creator"` overlay must restrict to the resource
+/// owner (`resource.creator_sub == principal.id`).
+#[test]
+fn generated_creator_overlay_enforces_ownership() {
+    let base = "permit(principal, action, resource is Remix);";
+    let overlay = crate::policy_gen::generate_authz_overlays(
+        "Remix",
+        &[crate::policy_gen::ActionAuthz {
+            name: "Withdraw".to_string(),
+            requires_role: vec![],
+            requires: Some("creator".to_string()),
+        }],
+    );
+    let engine = AuthzEngine::new(&format!("{base}\n{overlay}")).expect("policy parses");
+
+    let mut owned_by_u1 = HashMap::new();
+    owned_by_u1.insert("creator_sub".to_string(), serde_json::json!("u1"));
+
+    // The owner may Withdraw; a different principal may not.
+    assert!(
+        engine
+            .authorize(&customer_context("u1"), "Withdraw", "Remix", &owned_by_u1)
+            .is_allowed(),
+        "the creator may Withdraw their own resource"
+    );
+    assert!(
+        !engine
+            .authorize(&customer_context("u2"), "Withdraw", "Remix", &owned_by_u1)
+            .is_allowed(),
+        "a non-creator must be forbidden from Withdraw"
+    );
+}

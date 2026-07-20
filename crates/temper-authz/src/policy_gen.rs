@@ -223,6 +223,103 @@ pub fn generate_cedar_from_matrix(
     )
 }
 
+// --- Spec-declared authorization (RFC-0002, ARN-255) ------------------------
+
+/// One action's declared authorization requirements, extracted from its IOA
+/// spec. Kept as primitives so this module needs no dependency on temper-spec.
+#[derive(Debug, Clone)]
+pub struct ActionAuthz {
+    /// Action name (e.g. "Publish").
+    pub name: String,
+    /// Roles allowed to invoke it (`requires_role`); empty = no role gate.
+    pub requires_role: Vec<String>,
+    /// `"creator"` restricts to the resource owner; None = no ownership gate.
+    pub requires: Option<String>,
+}
+
+/// Escape a string for use inside a Cedar double-quoted string literal.
+///
+/// App-authored identifiers (action names, role values) flow into generated
+/// policy text; without escaping a `"` or `\` would break the policy or inject
+/// clauses (the ARN-172 class). Cedar string escapes are backslash-based.
+fn cedar_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A Cedar entity-type name is an unquoted identifier, not a string literal, so
+/// it cannot be escaped — it must already be a valid identifier. Reject
+/// anything else rather than emit broken/injectable policy text.
+fn is_valid_cedar_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Compile an entity's action authorization annotations into Cedar
+/// `forbid … unless` overlays.
+///
+/// A **forbid** overlay is used (not a permit) so the requirement composes on
+/// top of an app's existing broad `permit(principal, action, resource is X)`
+/// base: Cedar's forbid-overrides-permit semantics mean the overlay restricts
+/// even when a blanket permit exists. Both requirements on one action emit two
+/// forbids (role AND ownership must both hold to invoke).
+///
+/// Returns `""` when no action carries a requirement, or when the entity type
+/// is not a valid Cedar identifier (defensive — never emit broken policy text).
+pub fn generate_authz_overlays(entity_type: &str, actions: &[ActionAuthz]) -> String {
+    if !is_valid_cedar_ident(entity_type) {
+        return String::new();
+    }
+    let mut out = String::new();
+    for a in actions {
+        let action_lit = cedar_escape(&a.name);
+        // The comment sits after `//`; strip line breaks so a newline in an
+        // app-authored name cannot break out of the comment and inject a clause.
+        let comment_name = comment_safe(&a.name);
+
+        if !a.requires_role.is_empty() {
+            let roles = a
+                .requires_role
+                .iter()
+                .map(|r| format!("\"{}\"", cedar_escape(r)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "// generated from spec: {entity_type}.{comment_name} requires_role\n\
+                 forbid(\n  principal,\n  action == Action::\"{action_lit}\",\n  resource is {entity_type}\n)\nunless {{ principal has role && [{roles}].contains(principal.role) }};\n\n",
+            ));
+        }
+
+        if a.requires.as_deref() == Some("creator") {
+            out.push_str(&format!(
+                "// generated from spec: {entity_type}.{comment_name} requires creator\n\
+                 forbid(\n  principal,\n  action == Action::\"{action_lit}\",\n  resource is {entity_type}\n)\nunless {{ resource has creator_sub && resource.creator_sub == principal.id }};\n\n",
+            ));
+        }
+    }
+    out
+}
+
+/// Collapse line breaks to spaces so a value is safe inside a `//` comment.
+fn comment_safe(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +511,66 @@ mod tests {
             session_id: None,
         };
         assert!(validate_policy_scope_matrix(&m).is_err());
+    }
+
+    // --- Spec-declared authorization overlays -------------------------------
+
+    fn authz(name: &str, roles: &[&str], requires: Option<&str>) -> ActionAuthz {
+        ActionAuthz {
+            name: name.to_string(),
+            requires_role: roles.iter().map(|s| s.to_string()).collect(),
+            requires: requires.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn no_annotations_emits_nothing() {
+        let out = generate_authz_overlays("DesignLanguage", &[authz("Publish", &[], None)]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn requires_role_emits_forbid_unless_role() {
+        let out = generate_authz_overlays(
+            "DesignLanguage",
+            &[authz("Publish", &["owner", "curator"], None)],
+        );
+        assert!(out.contains("forbid("));
+        assert!(out.contains("action == Action::\"Publish\""));
+        assert!(out.contains("resource is DesignLanguage"));
+        assert!(out.contains("principal has role"));
+        assert!(out.contains("[\"owner\", \"curator\"].contains(principal.role)"));
+        // It is a forbid overlay, never a permit.
+        assert!(!out.contains("permit("));
+    }
+
+    #[test]
+    fn requires_creator_emits_ownership_forbid() {
+        let out = generate_authz_overlays("Remix", &[authz("Withdraw", &[], Some("creator"))]);
+        assert!(out.contains("resource has creator_sub && resource.creator_sub == principal.id"));
+        assert!(out.contains("action == Action::\"Withdraw\""));
+    }
+
+    #[test]
+    fn both_requirements_emit_two_forbids() {
+        let out = generate_authz_overlays("Doc", &[authz("Edit", &["owner"], Some("creator"))]);
+        assert_eq!(out.matches("forbid(").count(), 2);
+    }
+
+    #[test]
+    fn identifiers_are_escaped_against_injection() {
+        // A malicious action name trying to close the string and inject a permit.
+        let evil = "X\") };\npermit(principal, action, resource);\n//";
+        let out = generate_authz_overlays("Doc", &[authz(evil, &["owner"], None)]);
+        // The injected permit text must not appear as a live clause — the quote
+        // is escaped, so it stays inside the Action string literal.
+        assert!(!out.contains("\npermit(principal, action, resource);"));
+        assert!(out.contains("\\\""));
+    }
+
+    #[test]
+    fn invalid_entity_type_emits_nothing() {
+        let out = generate_authz_overlays("Bad Name", &[authz("Publish", &["owner"], None)]);
+        assert!(out.is_empty());
     }
 }

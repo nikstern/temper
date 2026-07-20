@@ -226,6 +226,18 @@ pub struct Action {
     /// Declared sub-write contract for Composite actions (ADR-0040).
     #[serde(default, rename = "sub_writes")]
     pub sub_writes: Vec<SubWriteSpec>,
+    /// Spec-declared authorization: the principal roles allowed to invoke this
+    /// action (e.g. `["owner", "curator"]`). Compiled to a Cedar `forbid …
+    /// unless principal.role in […]` overlay at install (RFC-0002, ARN-255).
+    /// Empty = no role restriction.
+    #[serde(default)]
+    pub requires_role: Vec<String>,
+    /// Spec-declared authorization: `"creator"` restricts this action to the
+    /// principal who owns the resource (`resource.creator_sub == principal.id`).
+    /// Compiled to a Cedar `forbid … unless` overlay at install. None = no
+    /// ownership restriction. See RFC-0002.
+    #[serde(default)]
+    pub requires: Option<String>,
 }
 
 fn default_internal() -> String {

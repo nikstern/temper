@@ -324,6 +324,23 @@ fn app_relative_path(app_dir: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// Compile an automaton's spec-declared authorization (`requires_role` /
+/// `requires`) into Cedar `forbid … unless` overlays (RFC-0002, ARN-255).
+/// Returns `""` when no action carries a requirement.
+fn spec_authz_overlay(entity_type: &str, automaton: &temper_spec::automaton::Automaton) -> String {
+    let actions: Vec<temper_authz::ActionAuthz> = automaton
+        .actions
+        .iter()
+        .filter(|a| !a.requires_role.is_empty() || a.requires.is_some())
+        .map(|a| temper_authz::ActionAuthz {
+            name: a.name.clone(),
+            requires_role: a.requires_role.clone(),
+            requires: a.requires.clone(),
+        })
+        .collect();
+    temper_authz::generate_authz_overlays(entity_type, &actions)
+}
+
 fn effective_app_deployment_mode(manifest: &AppManifest) -> AppDeploymentMode {
     let app_key = manifest
         .name
@@ -942,11 +959,23 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let ioa_files = find_ioa_files(app_dir);
 
     // Read IOA specs, extracting entity type from the parsed automaton name.
+    // While each automaton is parsed, compile any spec-declared authorization
+    // (`requires_role` / `requires`) into Cedar `forbid … unless` overlays
+    // (RFC-0002, ARN-255) — collected alongside hand-written policies below.
     let mut specs = Vec::new();
+    let mut generated_authz: Vec<CedarPolicySource> = Vec::new();
     for (_hint, path) in &ioa_files {
         let source = std::fs::read_to_string(path).ok()?;
         let parsed = automaton::parse_automaton(&source).ok()?;
-        specs.push((parsed.automaton.name, source));
+        let entity = parsed.automaton.name.clone();
+        let overlay = spec_authz_overlay(&entity, &parsed);
+        if !overlay.is_empty() {
+            generated_authz.push(CedarPolicySource {
+                relative_path: format!("policies/_generated/{entity}.cedar"),
+                text: overlay,
+            });
+        }
+        specs.push((entity, source));
     }
 
     // Read CSDL (optional — apps without specs won't have CSDL).
@@ -959,7 +988,7 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     if deployment_mode == AppDeploymentMode::Commons {
         cedar_policy_files.extend(find_commons_cedar_policies(app_dir));
     }
-    let cedar_policy_sources: Vec<CedarPolicySource> = cedar_policy_files
+    let mut cedar_policy_sources: Vec<CedarPolicySource> = cedar_policy_files
         .into_iter()
         .filter_map(|path| {
             let text = std::fs::read_to_string(&path).ok()?;
@@ -969,6 +998,10 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
             })
         })
         .collect();
+    // Generated authorization overlays compose with (append after) any
+    // hand-written policies, so a spec annotation restricts even an entity
+    // whose hand-written policy is permit-all.
+    cedar_policy_sources.extend(generated_authz);
     let cedar_policies: Vec<String> = cedar_policy_sources
         .iter()
         .map(|source| source.text.clone())

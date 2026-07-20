@@ -230,6 +230,8 @@ impl ParseState {
             },
             "guard" => parse_guard_value(value, &mut action.guard)?,
             "effect" => parse_effect_value(value, &mut action.effect)?,
+            "requires_role" => action.requires_role = parse_string_array(value),
+            "requires" => action.requires = Some(value.to_string()),
             _ => {}
         }
 
@@ -353,6 +355,8 @@ impl ParseState {
             triggers: Vec::new(),
             cedar_gate: None,
             sub_writes: Vec::new(),
+            requires_role: Vec::new(),
+            requires: None,
         });
         self.current_section = Section::Action;
         true

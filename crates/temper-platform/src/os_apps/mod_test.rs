@@ -3422,3 +3422,69 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
     let _ = fs::remove_file(format!("{db_path}-wal"));
     let _ = fs::remove_file(format!("{db_path}-shm"));
 }
+
+#[test]
+fn spec_authz_overlay_compiles_action_annotations_to_forbid_overlays() {
+    // A minimal spec whose actions carry spec-declared authorization.
+    let ioa_source = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published"]
+initial = "Draft"
+
+[[state]]
+name = "creator_sub"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Publish"
+kind = "input"
+from = ["Draft"]
+to = "Published"
+requires_role = ["owner", "curator"]
+
+[[action]]
+name = "Withdraw"
+kind = "input"
+from = ["Published"]
+to = "Draft"
+requires = "creator"
+
+[[action]]
+name = "SetCreator"
+kind = "input"
+from = ["Draft"]
+params = ["creator_sub"]
+"#;
+
+    let parsed = automaton::parse_automaton(ioa_source).expect("spec parses");
+    let overlay = spec_authz_overlay("DesignLanguage", &parsed);
+
+    // Publish → role overlay; Withdraw → creator overlay; SetCreator → nothing.
+    assert!(overlay.contains("action == Action::\"Publish\""));
+    assert!(overlay.contains("[\"owner\", \"curator\"].contains(principal.role)"));
+    assert!(overlay.contains("action == Action::\"Withdraw\""));
+    assert!(overlay.contains("resource.creator_sub == principal.id"));
+    assert!(!overlay.contains("SetCreator"));
+    // Overlays are forbids that compose with the app's permit-all base.
+    assert_eq!(overlay.matches("forbid(").count(), 2);
+    assert!(!overlay.contains("permit("));
+}
+
+#[test]
+fn spec_authz_overlay_empty_without_annotations() {
+    let ioa_source = r#"
+[automaton]
+name = "Plain"
+states = ["A"]
+initial = "A"
+
+[[action]]
+name = "Touch"
+kind = "input"
+from = ["A"]
+"#;
+    let parsed = automaton::parse_automaton(ioa_source).expect("spec parses");
+    assert!(spec_authz_overlay("Plain", &parsed).is_empty());
+}
