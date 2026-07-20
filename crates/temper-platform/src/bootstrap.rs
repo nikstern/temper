@@ -495,7 +495,9 @@ pub async fn bootstrap_trusted_issuer_from_env(state: &PlatformState, tenant: &s
     };
 
     let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
-    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
+    // Registering a trusted issuer is System-only (system-platform Cedar policy);
+    // the platform seeding itself acts as System.
+    let agent_ctx = temper_server::request_context::AgentContext::system();
     let algorithms =
         std::env::var("TEMPER_TRUSTED_ISSUER_ALGS").unwrap_or_else(|_| "ES256".to_string());
 

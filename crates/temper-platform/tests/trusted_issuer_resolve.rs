@@ -71,7 +71,7 @@ async fn state_with_issuer(sk: &SigningKey) -> PlatformState {
     bootstrap_agent_specs(&state, "default", false, &cache);
 
     let tenant = TenantId::new("default");
-    let ctx = AgentContext::for_service("trusted-issuer-e2e");
+    let ctx = AgentContext::system();
     state
         .server
         .dispatch_tenant_action(
@@ -205,7 +205,7 @@ async fn suspended_issuer_stops_resolving() {
     );
 
     // Suspend the issuer.
-    let ctx = AgentContext::for_service("trusted-issuer-e2e");
+    let ctx = AgentContext::system();
     state
         .server
         .dispatch_tenant_action(
@@ -282,7 +282,7 @@ async fn bumping_generation_invalidates_older_tokens() {
 
     // Sign out everywhere: bump the human's generation to 1. The generation is
     // keyed on the human `sub`, which contributor_claims sets to "human-e2e".
-    let ctx = AgentContext::for_service("signout-e2e");
+    let ctx = AgentContext::system();
     state
         .server
         .dispatch_tenant_action(

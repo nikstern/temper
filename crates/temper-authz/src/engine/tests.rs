@@ -875,3 +875,89 @@ fn generated_creator_overlay_enforces_ownership() {
         "a non-creator must be forbidden from Withdraw"
     );
 }
+
+// --- Platform gate on the god-mode identity entities (ARN-255) ---------------
+
+fn agent_context(id: &str) -> SecurityContext {
+    SecurityContext::from_headers(&[
+        ("X-Temper-Principal-Id".to_string(), id.to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "agent".to_string()),
+    ])
+}
+
+/// RegisterIssuer / BumpGeneration must be System/Admin-only even when the
+/// tenant base is permit-all (the ARN-230 fail-open scenario) — the
+/// system-platform forbid overrides it. This is the fix for the "an agent
+/// registers its own signing key → mints owner tokens" takeover.
+#[test]
+fn issuer_registry_is_admin_system_only_even_on_permit_all() {
+    let engine = AuthzEngine::permissive(); // permit(principal, action, resource) + system-platform
+    let attrs = HashMap::new();
+
+    // Allowed: System (platform) and Admin (operator key / the AS).
+    assert!(
+        engine
+            .authorize(
+                &SecurityContext::system(),
+                "RegisterIssuer",
+                "TrustedIssuer",
+                &attrs
+            )
+            .is_allowed()
+    );
+    assert!(
+        engine
+            .authorize(&admin_context(), "RegisterIssuer", "TrustedIssuer", &attrs)
+            .is_allowed()
+    );
+
+    // Forbidden: a verified agent or human — the takeover path.
+    for action in ["RegisterIssuer", "RotateIssuerKeys", "RevokeIssuer"] {
+        assert!(
+            !engine
+                .authorize(
+                    &agent_context("kc_attacker"),
+                    action,
+                    "TrustedIssuer",
+                    &attrs
+                )
+                .is_allowed(),
+            "agent must be forbidden from {action} on TrustedIssuer"
+        );
+        assert!(
+            !engine
+                .authorize(
+                    &customer_context("human-x"),
+                    action,
+                    "TrustedIssuer",
+                    &attrs
+                )
+                .is_allowed(),
+            "customer must be forbidden from {action} on TrustedIssuer"
+        );
+    }
+
+    // BumpGeneration (per-user sign-out DoS) is likewise gated.
+    assert!(
+        engine
+            .authorize(
+                &admin_context(),
+                "BumpGeneration",
+                "PrincipalGeneration",
+                &attrs
+            )
+            .is_allowed(),
+        "the AS (Admin) must be able to BumpGeneration"
+    );
+    assert!(
+        !engine
+            .authorize(
+                &agent_context("kc_attacker"),
+                "BumpGeneration",
+                "PrincipalGeneration",
+                &attrs
+            )
+            .is_allowed(),
+        "an agent must not be able to sign out arbitrary users"
+    );
+}

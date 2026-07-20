@@ -221,14 +221,16 @@ impl IdentityResolver {
         .ok()?;
 
         // Sign-out-everywhere: reject a token whose generation is older than the
-        // principal's current generation (RFC-0002, ARN-255 option A). The
-        // generation is keyed on the human `sub`, so signing out a human also
-        // invalidates the tokens of agents acting for them.
-        if let Some(token_gen) = claims.auth_generation
-            && let Some(sub) = claims.sub.as_deref()
-            && token_gen < self.current_generation(state, tenant, sub).await
-        {
-            return None;
+        // principal's current generation (RFC-0002, ARN-255 option A). Keyed on
+        // the human `sub`, so signing out a human also invalidates the tokens of
+        // agents acting for them. A token that omits the claim is treated as
+        // generation 0 — revocation must NOT be skippable by an issuer that fails
+        // to stamp it, so a single BumpGeneration still invalidates it.
+        if let Some(sub) = claims.sub.as_deref() {
+            let token_gen = claims.auth_generation.unwrap_or(0);
+            if token_gen < self.current_generation(state, tenant, sub).await {
+                return None;
+            }
         }
 
         // Map verified claims → identity. A token with an `agent_type` is an
