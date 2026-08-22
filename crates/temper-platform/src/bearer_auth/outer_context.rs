@@ -24,16 +24,16 @@ async fn declared_public_http_endpoint_gets_anonymous_typed_context() {
             HttpRequest::get("/repo.git/info/refs")
                 .header("authorization", "Basic malformed")
                 .body(Body::empty())
-                .unwrap(),
+                .expect("build public endpoint request"),
         )
         .await
-        .unwrap();
+        .expect("dispatch public endpoint request");
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
-        .unwrap();
+        .expect("read public endpoint response body");
     assert_eq!(
-        String::from_utf8(body.to_vec()).unwrap(),
+        String::from_utf8(body.to_vec()).expect("public endpoint body is utf-8"),
         "default:Customer:anonymous:false"
     );
 }
@@ -53,10 +53,10 @@ async fn private_http_endpoint_challenges_basic_credentials_before_guest_dispatc
         .oneshot(
             HttpRequest::get("/repo.git/info/refs")
                 .body(Body::empty())
-                .unwrap(),
+                .expect("build private endpoint request"),
         )
         .await
-        .unwrap();
+        .expect("dispatch private endpoint request");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         response
@@ -76,17 +76,17 @@ async fn matching_tenant_typed_outer_context_completes_authentication() {
                 .header("x-tenant-id", "default")
                 .header("authorization", "Bearer must-not-reach-handler")
                 .body(Body::empty())
-                .unwrap(),
+                .expect("build typed-context request"),
         )
         .await
-        .unwrap();
+        .expect("dispatch typed-context request");
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
-        .unwrap();
+        .expect("read typed-context response body");
     assert_eq!(
-        String::from_utf8(body.to_vec()).unwrap(),
+        String::from_utf8(body.to_vec()).expect("typed-context body is utf-8"),
         "default:Agent:outer-user:false"
     );
 }
@@ -99,13 +99,17 @@ async fn typed_outer_context_cannot_cross_tenants_on_protected_or_public_routes(
         HttpRequest::get("/whoami")
             .header("x-tenant-id", "tenant-b")
             .body(Body::empty())
-            .unwrap(),
+            .expect("build protected cross-tenant request"),
         HttpRequest::get("/healthz")
             .header("x-tenant-id", "tenant-b")
             .body(Body::empty())
-            .unwrap(),
+            .expect("build public cross-tenant request"),
     ] {
-        let response = router.clone().oneshot(request).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("dispatch cross-tenant request");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
@@ -138,15 +142,18 @@ async fn typed_outer_context_strips_authorization_on_public_routes() {
             HttpRequest::get("/healthz")
                 .header("authorization", "Bearer must-not-reach-handler")
                 .body(Body::empty())
-                .unwrap(),
+                .expect("build public typed-context request"),
         )
         .await
-        .unwrap();
+        .expect("dispatch public typed-context request");
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
-        .unwrap();
-    assert_eq!(String::from_utf8(body.to_vec()).unwrap(), "absent");
+        .expect("read public typed-context response body");
+    assert_eq!(
+        String::from_utf8(body.to_vec()).expect("public typed-context body is utf-8"),
+        "absent"
+    );
 }
 
 #[tokio::test]
@@ -186,16 +193,16 @@ async fn typed_outer_context_preserves_protocol_route_admission() {
             HttpRequest::get("/repo.git/info/refs")
                 .header("x-tenant-id", "default")
                 .body(Body::empty())
-                .unwrap(),
+                .expect("build admitted protocol request"),
         )
         .await
-        .unwrap();
+        .expect("dispatch admitted protocol request");
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
-        .unwrap();
+        .expect("read admitted protocol response body");
     assert_eq!(
-        String::from_utf8(body.to_vec()).unwrap(),
+        String::from_utf8(body.to_vec()).expect("admitted protocol body is utf-8"),
         "default:he-protocol"
     );
 }
