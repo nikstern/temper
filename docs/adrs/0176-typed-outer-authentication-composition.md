@@ -1,0 +1,121 @@
+# ADR-0176: Typed Outer Authentication Composition
+
+- Status: Proposed
+- Date: 2026-08-22
+- Deciders: Temper core maintainers
+- Related:
+  - ADR-0157: Credential-Bound Class A Authentication Edge
+  - `crates/temper-authz/src/context.rs`
+  - `crates/temper-platform/src/bearer_auth.rs`
+
+## Context
+
+Temper can be embedded behind an application-owned authentication middleware.
+TemperPaw verifies a local account session cookie before requests reach the
+embedded platform router. ADR-0157 correctly removed the old
+`PreAuthenticatedRequest` marker because it paired a forgeable marker with raw
+principal headers. That removal also left no supported way for a trusted outer
+middleware to pass the already-authenticated authority into the kernel.
+
+Reconstructing identity from headers, minting a reusable deployment credential,
+or weakening the no-credential failure path would reopen the Class A boundary.
+The existing `AuthenticatedRequestContext` already carries an immutable
+security context and tenant as one typed value, but the bearer edge currently
+ignores a context installed by an in-process outer layer.
+
+## Decision
+
+### Typed context is the only composition primitive
+
+The bearer edge accepts an existing `AuthenticatedRequestContext` request
+extension as completed authentication. It does not inspect principal headers or
+restore `PreAuthenticatedRequest`.
+
+The existing context's tenant must exactly equal the validated requested tenant.
+A mismatch returns `401 Unauthorized`. The edge removes any authorization
+header before dispatch so an outer-authenticated request cannot forward a
+second credential downstream.
+
+**Why this approach**: an HTTP client cannot construct an axum extension. The
+outer middleware is already part of the trusted in-process computing base, and
+the typed context binds tenant and authority without splitting them across
+headers or markers.
+
+### Protocol routes retain normal admission
+
+The platform still matches configured HTTP endpoint routes. When a matching
+route exists, a typed outer context receives the same
+`AdmittedHttpEndpoint` extension as a bearer-resolved context before dispatch.
+Route admission therefore does not depend on which trusted authentication edge
+produced the context.
+
+### Legacy header-only internal calls stay rejected
+
+Raw `x-temper-principal-*` headers never satisfy authentication. Internal WASM
+HTTP fallthrough continues to use the single-use, tenant/method/path-bound
+internal bearer defined by ADR-0157.
+
+## Rollout Plan
+
+1. Add focused platform tests and the typed-context acceptance path.
+2. Update TemperPaw's verified cookie middleware to construct the typed admin
+   context and remove its obsolete marker/header-only bypass.
+3. Build and exercise the pinned TemperPaw development image before either
+   dependency pin is eligible for production.
+
+## Readiness Gates
+
+- Matching-tenant typed contexts pass and authorization headers are stripped.
+- Cross-tenant typed contexts return 401.
+- Raw principal headers remain insufficient.
+- TemperPaw cookie-session and internal-bearer flows pass end to end.
+
+## Consequences
+
+### Positive
+
+- Embedded applications can compose independent authentication with Temper's
+  typed authorization boundary.
+- No reusable kernel credential is needed for a verified application session.
+- Tenant identity remains bound to authority at the edge.
+
+### Negative
+
+- Every outer authentication middleware becomes trusted code responsible for
+  constructing the complete context correctly.
+- Embedded hosts must migrate from the removed marker rather than receiving a
+  compatibility shim.
+
+### Risks
+
+- Incorrect middleware ordering could install the context after bearer
+  authentication. End-to-end embedding tests cover the production order.
+- Accepting a mismatched context could cross tenants. The edge checks equality
+  before route admission or dispatch.
+
+### DST Compliance
+
+This changes only HTTP request admission in `temper-platform`. It introduces no
+time, randomness, task spawning, storage, or simulation-visible ordering.
+
+## Non-Goals
+
+- Deriving authority from HTTP headers.
+- Treating loopback transport as authentication.
+- Allowing System authority over an HTTP boundary.
+- Replacing internal invocation capabilities.
+
+## Alternatives Considered
+
+1. **Restore `PreAuthenticatedRequest`** — rejected because the marker/header
+   split was the vulnerability ADR-0157 removed.
+2. **Mint a platform credential for every application cookie** — rejected
+   because it creates unnecessary durable secrets and lifecycle coupling.
+3. **Trust principal headers only on loopback** — rejected because transport
+   location is not identity and WASM guests can reach loopback paths.
+
+## Rollback Policy
+
+Remove the typed-context branch from bearer authentication and require every
+embedded host to present a normal credential. Do not restore marker or header
+compatibility.
