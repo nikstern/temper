@@ -49,12 +49,28 @@ as a failure; it is never reported as quiescence. The scheduler-level
 non-empty mailbox quiescent without consuming messages, which belongs to the
 driver.
 
+Drivers permit at most one in-flight action per actor. This prevents a later
+action from being selected against state that an earlier scheduled action has
+not updated yet.
+
+### Crash and restart boundaries preserve single ownership
+
+Restart injection runs at the beginning of a tick, independently of whether a
+message is due for the actor. Runtime drivers reconstruct restarted actor state
+before draining that tick's mailboxes. Post-delivery crash injection runs in a
+separate `finish_tick` boundary after drained messages have been applied, so a
+handler never executes while its actor is marked crashed.
+
 ### Failed consumption is observable
 
 A drained message that names an unknown actor or whose handler rejects it becomes
 a simulation violation. A configured integration callback that is rejected also
 becomes a violation. Deliberate scheduler drops caused by drop, crash, or unknown
 target fault behavior remain recorded in the scheduler's dropped log and counts.
+
+Integration callbacks are scheduled into the same mailbox path as actor actions.
+They therefore share the delay, drop, crash/restart, ordering, and quiescence
+budget semantics instead of bypassing the scheduler through a separate vector.
 
 ### L2 reaches means visited during the trace
 
