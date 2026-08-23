@@ -19,6 +19,8 @@ use temper_store_turso::TursoEventStore;
 /// Pre-built echo integration WASM binary.
 const ECHO_WASM: &[u8] =
     include_bytes!("../../../crates/temper-wasm/tests/fixtures/echo_integration.wasm");
+const LOCAL_TDATA_WASM: &[u8] =
+    include_bytes!("../../../crates/temper-wasm/tests/fixtures/local_tdata_integration.wasm");
 
 /// IOA spec with a `trigger echo_call` effect and WASM integration.
 const ECHO_IOA: &str = r#"
@@ -321,6 +323,92 @@ async fn wasm_integration_dispatches_callback() {
         final_status, "Done",
         "entity should transition to Done after WASM callback (echo module returns success even on HTTP failure)"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn triggered_wasm_local_tdata_uses_module_not_ambient_authority() {
+    let state = build_echo_test_state();
+    let tenant = TenantId::default();
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(LOCAL_TDATA_WASM)
+        .expect("local TData module should compile");
+    state
+        .wasm_module_registry
+        .write()
+        .expect("wasm registry lock")
+        .register(&tenant, "echo_integration", &hash);
+
+    let module_http_permit = r#"
+        permit(principal is Agent, action == Action::"http_call", resource is HttpEndpoint) when {
+            principal has role && principal.id == "echo_integration" && principal.role == "wasm_module"
+        };
+    "#;
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            &format!(
+                r#"{module_http_permit}
+                permit(principal is Agent, action == Action::"list", resource is EchoTest) when {{
+                    principal.id == "ambient-operator"
+                }};"#
+            ),
+        )
+        .expect("ambient-only local TData policy should parse");
+    let mut ambient = AgentContext::default();
+    ambient.agent_id = Some("ambient-operator".to_string());
+    ambient.agent_type = Some("operator".to_string());
+    ambient.security_ctx = Some(temper_authz::SecurityContext::from_resolved_identity(
+        "ambient-operator",
+        "operator",
+        None,
+    ));
+    let denied = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "triggered-local-denied",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &ambient,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("triggered integration should report local denial");
+    assert_eq!(denied.state.status, "Failed");
+
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            &format!(
+                r#"{module_http_permit}
+                permit(principal is Agent, action == Action::"list", resource is EchoTest) when {{
+                    principal has role && principal.id == "echo_integration" && principal.role == "wasm_module"
+                }};"#
+            ),
+        )
+        .expect("module-only local TData policy should parse");
+    let allowed = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            "triggered-local-allowed",
+            "TriggerEcho",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &ambient,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("triggered integration should use module authority");
+    assert_eq!(allowed.state.status, "Done");
 }
 
 #[tokio::test(flavor = "multi_thread")]

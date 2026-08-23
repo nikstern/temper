@@ -55,6 +55,20 @@ Raw `x-temper-principal-*` headers never satisfy authentication. Internal WASM
 HTTP fallthrough continues to use the single-use, tenant/method/path-bound
 internal bearer defined by ADR-0157.
 
+### WASM-local OData re-entry uses module authority
+
+Triggered and HTTP-endpoint WASM calls that take the in-process local TData
+optimization enter the OData handlers with the same immutable module principal
+used by the WASM host gate: the exact module ID, `wasm_module` role, and
+host-derived invocation context. They do not inherit the ambient action caller
+or the generic `service:wasm-runtime` relay identity. Direct `blob_adapter`
+invocations retain their caller-bound authority contract from ADR-0157.
+
+**Why this approach**: network fallthrough and the in-process optimization are
+transport variants of the same guest call. Cedar must observe the same
+host-derived module authority on either path, and app policy must not need a
+broad permit for a generic relay service.
+
 ## Rollout Plan
 
 1. Add focused platform tests and the typed-context acceptance path.
@@ -69,6 +83,9 @@ internal bearer defined by ADR-0157.
 - Cross-tenant typed contexts return 401.
 - Raw principal headers remain insufficient.
 - TemperPaw cookie-session and internal-bearer flows pass end to end.
+- Triggered and HTTP-endpoint local TData calls resolve to the exact module ID
+  and `wasm_module` role; relay-service and caller authority do not leak across
+  that boundary.
 
 ## Consequences
 

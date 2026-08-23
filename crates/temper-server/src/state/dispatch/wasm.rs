@@ -89,7 +89,6 @@ pub(crate) fn authorized_http_endpoint_host(
     module_name: &str,
     invocation_context: &WasmInvocationContext,
     http_streams: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
-    security_context: &SecurityContext,
 ) -> Result<Arc<dyn WasmHost>, String> {
     let gate = state.wasm_authz_gate();
     let authz_context = WasmAuthzContext {
@@ -140,10 +139,10 @@ pub(crate) fn authorized_http_endpoint_host(
     }
 
     let production_host: Arc<dyn WasmHost> = Arc::new(base_host);
-    let local_host: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+    let local_host: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new_for_wasm(
         state.clone(),
         tenant.clone(),
-        Some(security_context),
+        &authz_context,
         production_host,
     ));
     Ok(Arc::new(AuthorizedWasmHost::new(
@@ -846,10 +845,10 @@ impl crate::state::ServerState {
                         .with_temper_data_service(data, read, write, &budgets);
                 }
                 let production_host: Arc<dyn WasmHost> = Arc::new(production_host_builder);
-                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
+                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new_for_wasm(
                     self.clone(),
                     ctx.entity_ref.tenant.clone(),
-                    ctx.agent_ctx.security_ctx.as_ref(),
+                    &authz_ctx,
                     production_host,
                 ));
                 let host: Arc<dyn WasmHost> =
