@@ -553,14 +553,16 @@ async fn triggered_wasm_local_tdata_uses_module_not_ambient_authority() {
             ),
         )
         .expect("ambient-only local TData policy should parse");
-    let mut ambient = AgentContext::default();
-    ambient.agent_id = Some("ambient-operator".to_string());
-    ambient.agent_type = Some("operator".to_string());
-    ambient.security_ctx = Some(temper_authz::SecurityContext::from_resolved_identity(
-        "ambient-operator",
-        "operator",
-        None,
-    ));
+    let ambient = AgentContext {
+        agent_id: Some("ambient-operator".to_string()),
+        agent_type: Some("operator".to_string()),
+        security_ctx: Some(temper_authz::SecurityContext::from_resolved_identity(
+            "ambient-operator",
+            "operator",
+            None,
+        )),
+        ..AgentContext::default()
+    };
     let denied = state
         .dispatch_tenant_action_ext(
             &tenant,
