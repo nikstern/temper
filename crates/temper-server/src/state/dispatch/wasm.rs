@@ -470,9 +470,16 @@ impl crate::state::ServerState {
         );
         let integrations = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-            registry
-                .get_spec(req.tenant, req.entity_type)
-                .map(|spec| spec.integrations.clone())
+            let spec = match req.agent_ctx.schema_pin.as_ref() {
+                Some(pin) => registry.get_scoped_spec_at_digest(
+                    req.tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    req.entity_type,
+                ),
+                None => registry.get_spec(req.tenant, req.entity_type),
+            };
+            spec.map(|spec| spec.integrations.clone())
                 .unwrap_or_default()
         };
         let base_gate = self.wasm_authz_gate();

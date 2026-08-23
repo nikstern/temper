@@ -69,6 +69,17 @@ transport variants of the same guest call. Cedar must observe the same
 host-derived module authority on either path, and app policy must not need a
 broad permit for a generic relay service.
 
+### Scoped integration dispatch preserves the execution pin
+
+When a scoped entity emits a WASM custom effect, integration metadata is
+resolved from the exact immutable bundle named by its `SchemaExecutionPin`,
+not from the tenant-global spec registry. The same pinned agent context is
+then carried into the callback dispatch.
+
+**Why this approach**: a scoped transition and its reaction are one governed
+execution. Falling back to global integration metadata can silently strand a
+durable intermediate state or invoke an unrelated module definition.
+
 ## Rollout Plan
 
 1. Add focused platform tests and the typed-context acceptance path.
@@ -86,6 +97,8 @@ broad permit for a generic relay service.
 - Triggered and HTTP-endpoint local TData calls resolve to the exact module ID
   and `wasm_module` role; relay-service and caller authority do not leak across
   that boundary.
+- A scoped action resolves its WASM integration from the exact pinned bundle
+  and completes its callback without consulting tenant-global metadata.
 
 ## Consequences
 
@@ -112,8 +125,10 @@ broad permit for a generic relay service.
 
 ### DST Compliance
 
-This changes only HTTP request admission in `temper-platform`. It introduces no
-time, randomness, task spawning, storage, or simulation-visible ordering.
+The authentication changes affect HTTP request admission in `temper-platform`.
+Scoped integration lookup changes only which immutable registry snapshot is
+read; it introduces no time, randomness, storage, or simulation-visible
+ordering. Existing background integration scheduling is unchanged.
 
 ## Non-Goals
 
