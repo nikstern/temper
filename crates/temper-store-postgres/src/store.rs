@@ -7,6 +7,10 @@
 use std::time::Instant;
 
 use sqlx::{Acquire, PgPool};
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, scoped_journal_pin_prefix, scoped_journal_pin_suffix,
+    split_scoped_journal_entity_id,
+};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
     PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
@@ -41,6 +45,98 @@ impl PostgresEventStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+pub(crate) async fn assert_scoped_journal_write_fence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    let Some((_, pin)) = split_scoped_journal_entity_id(entity_id) else {
+        return Ok(());
+    };
+    let source_migrations: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT job_json FROM schema_migration_jobs
+         WHERE tenant = $1
+           AND job_json->'command'->>'source_bundle_digest' = $2
+           AND job_json->'command'->'scope'->>'kind' = 'task'
+           AND job_json->'command'->'scope'->>'id' = $3
+           AND job_json->>'status' IN
+               ('submitted', 'migrating', 'validating', 'ready', 'cut_over', 'completed')
+         ORDER BY job_json->'command'->>'job_id' FOR SHARE",
+    )
+    .bind(tenant)
+    .bind(&pin.bundle_digest)
+    .bind(&pin.scope.id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+    if source_migrations.iter().any(|job| {
+        job.0
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| matches!(status, "cut_over" | "completed"))
+    }) {
+        return Err(PersistenceError::Storage(
+            "migrated scoped schema write fence".into(),
+        ));
+    }
+    let active: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT pointer_json FROM schema_active_pointers
+         WHERE tenant = $1
+           AND pointer_json->'scope'->>'kind' = 'task'
+           AND pointer_json->'scope'->>'id' = $2 FOR SHARE",
+    )
+    .bind(tenant)
+    .bind(&pin.scope.id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+    let existing: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM events
+         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3
+         LIMIT 1 FOR SHARE",
+    )
+    .bind(tenant)
+    .bind(entity_type)
+    .bind(entity_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    if active.as_ref().is_some_and(|pointer| {
+        pointer
+            .0
+            .get("bundle_digest")
+            .and_then(serde_json::Value::as_str)
+            == Some(pin.bundle_digest.as_str())
+    }) {
+        return Ok(());
+    }
+    let migration: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT job_json FROM schema_migration_jobs
+         WHERE tenant = $1
+           AND job_json->'command'->>'target_bundle_digest' = $2
+           AND job_json->'command'->'scope'->>'kind' = 'task'
+           AND job_json->'command'->'scope'->>'id' = $3
+           AND job_json->>'status' IN ('submitted', 'migrating', 'validating', 'ready')
+         FOR SHARE",
+    )
+    .bind(tenant)
+    .bind(&pin.bundle_digest)
+    .bind(&pin.scope.id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+    if migration.is_none() {
+        return Err(PersistenceError::Storage(
+            "stale scoped schema write fence".into(),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +214,8 @@ impl EventStore for PostgresEventStore {
                 return Err(PersistenceError::Storage(e.to_string()));
             }
         };
+
+        assert_scoped_journal_write_fence(&mut tx, tenant, entity_type, entity_id).await?;
 
         let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
@@ -683,6 +781,7 @@ impl EventStore for PostgresEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
+            assert_scoped_journal_write_fence(&mut tx, tenant, entity_type, entity_id).await?;
             let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
                 "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -825,6 +924,81 @@ impl EventStore for PostgresEventStore {
                     event_type,
                     payload,
                     metadata,
+                })
+            })
+            .collect()
+    }
+
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr > $4 \
+                 ORDER BY sequence_nr ASC LIMIT $5",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(from_sequence.min(i64::MAX as u64) as i64)
+            .bind(limit.min(i64::MAX as usize) as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        rows.into_iter()
+            .map(|(sequence_nr, event_type, payload, metadata)| {
+                Ok(PersistenceEnvelope {
+                    sequence_nr: sequence_nr as u64,
+                    event_type,
+                    payload,
+                    metadata: serde_json::from_value(metadata)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                })
+            })
+            .collect()
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let mut rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                "SELECT sequence_nr, event_type, payload, metadata FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+                 ORDER BY sequence_nr DESC LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(limit.min(i64::MAX as usize) as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        rows.reverse();
+        rows.into_iter()
+            .map(|(sequence_nr, event_type, payload, metadata)| {
+                Ok(PersistenceEnvelope {
+                    sequence_nr: sequence_nr as u64,
+                    event_type,
+                    payload,
+                    metadata: serde_json::from_value(metadata)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
                 })
             })
             .collect()
@@ -1032,6 +1206,172 @@ impl EventStore for PostgresEventStore {
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
         Ok(rows)
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(i64::MAX as usize) as i64;
+        if let (Some(entity_type), Some((after_type, after_id))) = (entity_type, after)
+            && after_type == entity_type
+        {
+            return crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id > $3 \
+                 ORDER BY entity_type, entity_id LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(after_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()));
+        }
+        if let Some(entity_type) = entity_type
+            && after.is_none_or(|(after_type, _)| after_type < entity_type)
+        {
+            return crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id FROM events \
+                 WHERE tenant = $1 AND entity_type = $2 \
+                 ORDER BY entity_type, entity_id LIMIT $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()));
+        }
+        if entity_type.is_some() {
+            return Ok(Vec::new());
+        }
+        if let Some((after_type, after_id)) = after {
+            return crate::dbm::postgres_query_as!(
+                "SELECT DISTINCT entity_type, entity_id FROM events \
+                 WHERE tenant = $1 AND (entity_type > $2 OR (entity_type = $2 AND entity_id > $3)) \
+                 ORDER BY entity_type, entity_id LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(after_type)
+            .bind(after_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()));
+        }
+        crate::dbm::postgres_query_as!(
+            "SELECT DISTINCT entity_type, entity_id FROM events \
+             WHERE tenant = $1 ORDER BY entity_type, entity_id LIMIT $2",
+        )
+        .bind(tenant)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
+    }
+
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        scope: &SchemaScope,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let pattern = format!("%{suffix}");
+        let after = after_entity_id.unwrap_or("");
+        let suffix_len = i32::try_from(suffix.len())
+            .map_err(|_| PersistenceError::Storage("schema digest suffix too long".to_string()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        crate::dbm::postgres_query_scalar!(
+            "SELECT DISTINCT left(entity_id, length(entity_id) - $3) AS scoped_id \
+             FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id LIKE $4 \
+               AND left(entity_id, length(entity_id) - $3) > $5 \
+             ORDER BY scoped_id LIMIT $6",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(suffix_len)
+        .bind(pattern)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
+    }
+
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        scope: &SchemaScope,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = scoped_journal_pin_prefix(entity_id, scope);
+        let prefix_len = i32::try_from(prefix.chars().count())
+            .map_err(|_| PersistenceError::Storage("scoped entity id is too long".to_string()))?;
+        let requested_limit = limit.min(i64::MAX as usize) as i64;
+        let candidates: Vec<String> = crate::dbm::postgres_query_scalar!(
+            "SELECT DISTINCT substring(entity_id FROM $4 + 1) AS bundle_digest \
+             FROM events \
+             WHERE tenant = $1 AND entity_type = $2 AND left(entity_id, $4) = $3 \
+               AND char_length(entity_id) = $4 + 71 \
+               AND substring(entity_id FROM $4 + 1) ~ '^sha256:[0-9a-f]{64}$' \
+             ORDER BY bundle_digest LIMIT $5",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(prefix)
+        .bind(prefix_len)
+        .bind(requested_limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        Ok(candidates)
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        scope: &SchemaScope,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let pattern = format!("%{suffix}");
+        let count: i64 = crate::dbm::postgres_query_scalar!(
+            "SELECT COUNT(*) FROM events WHERE tenant = $1 AND entity_id LIKE $2",
+        )
+        .bind(tenant)
+        .bind(pattern)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        u64::try_from(count)
+            .map_err(|_| PersistenceError::Storage("invalid schema write version".into()))
     }
 }
 

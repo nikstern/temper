@@ -23,6 +23,7 @@ use crate::state::PlatformState;
 mod agent_bootstrap;
 mod app_catalog;
 mod closure_bootstrap;
+mod data_binding;
 mod entity_aliases;
 mod policy_rows;
 mod reconcile;
@@ -61,7 +62,12 @@ pub use types::*;
 pub(crate) fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     let path = app_dir.join("app.toml");
     let content = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&content).ok()
+    let manifest: AppManifest = toml::from_str(&content).ok()?;
+    if let Err(error) = manifest.validate() {
+        tracing::error!(path = %path.display(), %error, "invalid app manifest");
+        return None;
+    }
+    Some(manifest)
 }
 
 fn cached_or_active_tenant_policy_text(state: &PlatformState, tenant: &str) -> String {
@@ -1115,7 +1121,7 @@ pub(super) async fn install_os_app_with_plan(
             format!("OS app '{app_name}' not found in catalog (known path keys: {known:?})")
         })?
     };
-    install_os_app_from_dir_with_plan(state, tenant, app_name, &app_dir, plan).await
+    install_os_app_from_dir_with_plan(state, tenant, app_name, &app_dir, plan, None).await
 }
 
 /// Install one already-validated app directory without consulting the global catalog.
@@ -1125,6 +1131,7 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
     app_name: &str,
     app_dir: &Path,
     plan: OsAppInstallPlan,
+    canonical_closure_id: Option<&str>,
 ) -> Result<InstallResult, String> {
     let app_version = read_app_manifest(app_dir)
         .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?
@@ -1143,6 +1150,10 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
         uploaded_wasm_replacement_context(state, tenant, app_name, &bundle).await
     } else {
         UploadedWasmReplacementContext::default()
+    };
+    let resolved_dependency_lock_id = match canonical_closure_id {
+        Some(closure_id) => closure_id.to_string(),
+        None => os_app_closure_for_roots(&[app_name.to_string()])?.id,
     };
 
     if bundle.adrs.is_empty() {
@@ -1429,6 +1440,16 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
             let module_started = Instant::now();
             let module_config = bundle.wasm_module_configs.get(module_name);
             let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
+            let activated_binding = match module_config {
+                Some(config) => data_binding::verify_module_config_data_binding(
+                    wasm_bytes,
+                    module_name,
+                    config,
+                    bundle.csdl.as_deref(),
+                    &resolved_dependency_lock_id,
+                )?,
+                None => None,
+            };
             let required = module_config.is_some_and(WasmModuleManifest::is_required);
             let replace_uploaded_module =
                 existing_sources.get(module_name).is_some_and(|existing| {
@@ -1487,6 +1508,9 @@ pub(crate) async fn install_os_app_from_dir_with_plan(
             {
                 let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
                 wasm_reg.register(&tenant_id, module_name, &hash);
+                if let Some(activated) = activated_binding {
+                    wasm_reg.bind_data_manifest(&tenant_id, module_name, &hash, activated);
+                }
             }
 
             if matches!(

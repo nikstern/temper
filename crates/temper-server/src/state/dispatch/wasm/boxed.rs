@@ -117,6 +117,7 @@ pub(in crate::state::dispatch) fn dispatch_tenant_action_core_boxed<'a>(
     params: serde_json::Value,
     agent_context: &'a AgentContext,
     await_integration: bool,
+    reaction_context: Option<crate::trigger::delivery::ReactionCommitContext>,
     expected_authorization_precondition: Option<String>,
 ) -> BoxFuture<'a, Result<EntityResponse, DispatchError>> {
     state
@@ -128,6 +129,7 @@ pub(in crate::state::dispatch) fn dispatch_tenant_action_core_boxed<'a>(
             params,
             agent_context,
             await_integration,
+            reaction_context,
             expected_authorization_precondition,
         )
         .boxed()

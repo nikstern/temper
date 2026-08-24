@@ -7,7 +7,7 @@ use temper_runtime::tenant::TenantId;
 use crate::response::odata_error;
 use crate::state::ServerState;
 
-pub(super) fn owner_id_from_fields(fields: &Value) -> Option<String> {
+pub(crate) fn owner_id_from_fields(fields: &Value) -> Option<String> {
     first_non_empty_string(
         fields,
         &[
@@ -26,7 +26,8 @@ pub(super) fn owner_id_from_action(fields: &Value, params: &Value) -> Option<Str
     owner_id_from_fields(params).or_else(|| owner_id_from_fields(fields))
 }
 
-pub(super) async fn enforce_commons_write_rate_limit(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enforce_commons_write_rate_limit(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,

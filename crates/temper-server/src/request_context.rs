@@ -1,14 +1,12 @@
-//! Shared HTTP request context types.
-//!
-//! Canonical home for request-scoped identity and session types extracted
-//! from HTTP headers. These types are used across OData dispatch, authz,
-//! observability, and reaction modules.
+//! Shared request-scoped identity and session types used by HTTP, OData,
+//! authorization, observability, and reaction dispatch.
 
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use temper_authz::SecurityContext;
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod observation_metadata;
@@ -64,6 +62,13 @@ pub struct AgentContext {
     /// `Idempotency-Key` header. Threaded into `EntityMsg::Action` so the
     /// actor can dedupe duplicate asks produced by dispatch-layer retries.
     pub idempotency_key: Option<String>,
+    /// Host-only optimistic concurrency precondition checked by the actor.
+    pub expected_entity_sequence: Option<u64>,
+    /// Host-resolved immutable task-scoped schema identity.
+    ///
+    /// HTTP adapters validate explicit digests. Scope-only entity requests use
+    /// the entity's durable pin when present and the active pointer for creation.
+    pub schema_pin: Option<SchemaExecutionPin>,
     /// Generic, client-supplied observability metadata.
     ///
     /// Producers should namespace their keys, for example
@@ -91,6 +96,8 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            expected_entity_sequence: None,
+            schema_pin: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -126,6 +133,8 @@ impl AgentContext {
             workflow_root_entity_id: None,
             workflow_run_id: None,
             idempotency_key: None,
+            expected_entity_sequence: None,
+            schema_pin: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -157,6 +166,7 @@ impl AgentContext {
         self.workflow_root_entity_id = parent.workflow_root_entity_id.clone();
         self.workflow_run_id = parent.workflow_run_id.clone();
         self.observation_metadata = parent.observation_metadata.clone();
+        self.schema_pin = parent.schema_pin.clone();
         self
     }
 
@@ -269,6 +279,8 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         workflow_root_entity_id,
         workflow_run_id,
         idempotency_key,
+        expected_entity_sequence: None,
+        schema_pin: None,
         observation_metadata: observation_metadata::extract(headers),
     }
 }
@@ -300,6 +312,10 @@ pub(crate) fn remote_parent_context(agent_ctx: &AgentContext) -> Option<opentele
     );
     Some(opentelemetry::Context::new().with_remote_span_context(span_context))
 }
+
+#[cfg(test)]
+#[path = "request_context_test.rs"]
+mod legacy_tests;
 
 #[cfg(test)]
 #[path = "request_context/mod_test.rs"]

@@ -3,12 +3,16 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use temper_odata::path::{KeyValue, ODataPath};
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, SchemaScopeKind, is_canonical_sha256_digest,
+};
 use temper_runtime::tenant::TenantId;
 
 use super::constraints::{
     ConstraintViolation, post_write_invariant_checks, pre_upsert_field_invariant_checks,
     pre_upsert_relation_checks,
 };
+use super::schema_pin::schema_pin_mismatch_response;
 use crate::state::{ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
@@ -49,6 +53,149 @@ pub(crate) fn extract_tenant(
     // Single-tenant compatibility: deterministic fallback to the well-known
     // default tenant rather than relying on registry registration order.
     Ok(TenantId::default())
+}
+
+/// Resolve an optional task scope to its immutable active bundle.
+///
+/// Both headers are required together. A declared scope never silently falls
+/// back to tenant-global behavior; that path is enabled only by the registry's
+/// explicit compatibility bit.
+pub(crate) async fn extract_schema_pin(
+    headers: &HeaderMap,
+    state: &ServerState,
+    tenant: &TenantId,
+) -> Result<Option<SchemaExecutionPin>, (StatusCode, String)> {
+    let kind = headers.get("x-temper-schema-scope-kind");
+    let id = headers.get("x-temper-schema-scope-id");
+    let requested_digest = headers.get("x-temper-schema-bundle-digest");
+    let (kind, id) = match (kind, id) {
+        (None, None) if requested_digest.is_none() => return Ok(None),
+        (None, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Schema bundle digest requires schema scope kind and id".to_string(),
+            ));
+        }
+        (Some(kind), Some(id)) => {
+            let kind = kind.to_str().map(str::trim).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Schema scope kind must be valid UTF-8".to_string(),
+                )
+            })?;
+            let id = id.to_str().map(str::trim).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Schema scope id must be valid UTF-8".to_string(),
+                )
+            })?;
+            if kind.is_empty() || id.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Schema scope kind and id must be non-empty".to_string(),
+                ));
+            }
+            (kind, id)
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Schema scope kind and id must be supplied together".to_string(),
+            ));
+        }
+    };
+    if kind != "task" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Unsupported schema scope kind".to_string(),
+        ));
+    }
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: id.to_string(),
+    };
+    let requested_digest = requested_digest
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Schema bundle digest must be valid UTF-8".to_string(),
+                    )
+                })
+                .and_then(|digest| {
+                    if is_canonical_sha256_digest(digest) {
+                        Ok(digest.to_string())
+                    } else {
+                        Err((
+                            StatusCode::BAD_REQUEST,
+                            "Schema bundle digest must use canonical sha256:<64 lowercase hex> form"
+                                .to_string(),
+                        ))
+                    }
+                })
+        })
+        .transpose()?;
+    if let Some(bundle_digest) = requested_digest {
+        let exact_bundle_loaded = state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &scope, &bundle_digest)
+            .is_some();
+        if !exact_bundle_loaded {
+            crate::schema_deployment::GovernedSchemaDeploymentService::new(state)
+                .recover_registry_bundle(tenant.as_str(), &scope, &bundle_digest)
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "{} {}",
+                            crate::state::SCHEMA_PIN_MISMATCH_PREFIX,
+                            error.message()
+                        ),
+                    )
+                })?;
+        }
+        return Ok(Some(SchemaExecutionPin {
+            scope,
+            bundle_digest,
+        }));
+    }
+    if state
+        .registry
+        .read()
+        .expect("registry lock poisoned")
+        .active_scope_digest(tenant, &scope)
+        .is_none()
+        && state
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.as_ref())
+            .is_some()
+    {
+        crate::schema_deployment::GovernedSchemaDeploymentService::new(state)
+            .recover_registry_pointer(tenant.as_str(), &scope)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.message().to_string()))?;
+    }
+    let registry = state.registry.read().expect("registry lock poisoned");
+    if let Some(bundle_digest) = registry.active_scope_digest(tenant, &scope) {
+        return Ok(Some(SchemaExecutionPin {
+            scope,
+            bundle_digest: bundle_digest.to_string(),
+        }));
+    }
+    if registry.scope_allows_global_compatibility(tenant, &scope) {
+        return Ok(None);
+    }
+    Err((
+        StatusCode::CONFLICT,
+        "Schema scope has no active bundle".to_string(),
+    ))
 }
 
 pub(super) fn extract_key(key: &KeyValue) -> String {
@@ -104,6 +251,24 @@ pub(super) fn resolve_entity_type(
     result
 }
 
+/// Resolve against an exact immutable bundle when a scoped pin is present.
+pub(super) fn resolve_entity_type_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+    entity_set: &str,
+) -> Option<String> {
+    match schema_pin {
+        Some(pin) => state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            .and_then(|config| config.entity_set_map.get(entity_set).cloned()),
+        None => resolve_entity_type(state, tenant, entity_set),
+    }
+}
+
 /// Get the CSDL XML for a tenant.
 ///
 /// Tries SpecRegistry first, then legacy csdl_xml.
@@ -117,6 +282,22 @@ pub(super) fn tenant_csdl_xml(state: &ServerState, tenant: &TenantId) -> String 
         .unwrap_or_else(|| state.csdl_xml.as_ref().clone())
 }
 
+pub(super) fn tenant_csdl_xml_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> Option<String> {
+    match schema_pin {
+        Some(pin) => state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            .map(|config| config.csdl_xml.as_ref().clone()),
+        None => Some(tenant_csdl_xml(state, tenant)),
+    }
+}
+
 /// List entity sets for a tenant.
 ///
 /// Tries SpecRegistry first, then legacy entity_set_map.
@@ -126,6 +307,22 @@ pub(super) fn tenant_entity_sets(state: &ServerState, tenant: &TenantId) -> Vec<
         tc.entity_set_map.keys().cloned().collect()
     } else {
         state.entity_set_map.keys().cloned().collect()
+    }
+}
+
+pub(super) fn tenant_entity_sets_for_pin(
+    state: &ServerState,
+    tenant: &TenantId,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> Option<Vec<String>> {
+    match schema_pin {
+        Some(pin) => state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            .map(|config| config.entity_set_map.keys().cloned().collect()),
+        None => Some(tenant_entity_sets(state, tenant)),
     }
 }
 
@@ -172,23 +369,39 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
 /// Consolidates the duplicated two-step constraint check pattern used by
 /// create, patch, put, delete, and bound action handlers. The `action` label
 /// is used for the post-write check (e.g. "Create", "Patch", "Put", "Delete").
-pub(super) async fn run_write_prechecks(
+pub(crate) async fn run_write_prechecks(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_id: &str,
-    action: &str,
-    operation: &str,
+    labels: (&str, &str),
     fields: &serde_json::Value,
+    schema_pin: Option<&SchemaExecutionPin>,
 ) -> Result<(), axum::response::Response> {
-    if let Err(v) =
-        pre_upsert_relation_checks(state, tenant, entity_type, entity_id, operation, fields).await
+    let (action, operation) = labels;
+    if let Err(v) = pre_upsert_relation_checks(
+        state,
+        tenant,
+        entity_type,
+        entity_id,
+        operation,
+        fields,
+        schema_pin,
+    )
+    .await
     {
         return Err(constraint_violation_response(v));
     }
-    if let Err(v) =
-        pre_upsert_field_invariant_checks(state, tenant, entity_type, entity_id, operation, fields)
-            .await
+    if let Err(v) = pre_upsert_field_invariant_checks(
+        state,
+        tenant,
+        entity_type,
+        entity_id,
+        operation,
+        fields,
+        schema_pin,
+    )
+    .await
     {
         return Err(constraint_violation_response(v));
     }
@@ -197,15 +410,55 @@ pub(super) async fn run_write_prechecks(
         tenant,
         entity_type,
         entity_id,
-        action,
+        (action, operation),
         fields,
-        operation,
+        schema_pin,
     )
     .await
     {
         return Err(constraint_violation_response(v));
     }
     Ok(())
+}
+
+/// Load an entity's current state or return a 404 response.
+///
+/// Consolidates the repeated pattern of calling `get_tenant_entity_state`
+/// and mapping errors to OData error responses.
+#[expect(
+    dead_code,
+    reason = "shared by the next OData mutation call-site migration"
+)]
+pub(super) async fn load_entity_or_404(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    set_name: &str,
+    key: &str,
+    schema_pin: Option<&SchemaExecutionPin>,
+) -> Result<crate::EntityResponse, axum::response::Response> {
+    let result = match schema_pin {
+        Some(pin) => {
+            state
+                .get_scoped_entity_state(tenant, entity_type, key, pin.clone())
+                .await
+        }
+        None => {
+            crate::application_data::GovernedApplicationDataService::new(state)
+                .get(tenant, entity_type, key)
+                .await
+        }
+    };
+    result.map_err(|error| {
+        schema_pin_mismatch_response(&error).unwrap_or_else(|| {
+            crate::response::odata_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                &format!("Entity '{set_name}' with key '{key}' not found: {error}"),
+            )
+            .into_response()
+        })
+    })
 }
 
 /// Resolve the parent of a `$value` path to `(set_name, entity_id)`.

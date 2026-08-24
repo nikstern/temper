@@ -488,6 +488,8 @@ impl crate::state::ServerState {
                     params: serde_json::json!({}),
                     cross_entity_booleans: BTreeMap::new(),
                     idempotency_key: Some(idempotency_key.clone()),
+                    expected_sequence: None,
+                    reaction_context: None,
                     expected_authorization_precondition: None,
                 },
                 &policy,
@@ -579,6 +581,7 @@ impl crate::state::ServerState {
                         callback_params,
                         agent_ctx,
                         false,
+                        None,
                         None,
                     )
                     .await

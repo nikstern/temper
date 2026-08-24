@@ -214,9 +214,9 @@ async fn ingest_raw_inner(
         &tenant,
         entity_type,
         &expected_object_id,
-        "Create",
-        "create",
+        ("Create", "create"),
         &admission_fields,
+        None,
     )
     .await
     {
@@ -357,9 +357,9 @@ async fn ingest_raw_inner(
         &tenant,
         entity_type,
         &expected_object_id,
-        "Create",
-        "create",
+        ("Create", "create"),
         &initial_fields,
+        None,
     )
     .await
     {

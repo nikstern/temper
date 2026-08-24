@@ -39,6 +39,157 @@ to = "Submitted"
 
 struct FailingHost;
 
+fn module_authz_context() -> temper_wasm::WasmAuthzContext {
+    temper_wasm::WasmAuthzContext {
+        tenant: TenantId::default().to_string(),
+        module_name: "operate_arc_task_synthesis".to_string(),
+        agent_id: Some("service:wasm-runtime".to_string()),
+        session_id: None,
+        entity_type: "ArcTaskSynthesis".to_string(),
+        trigger_action: "RecordInitialActivated".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn wasm_local_tdata_host_authorizes_as_module_across_reconstruction() {
+    let state = test_state();
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            r#"permit(principal is Agent, action in [Action::"create", Action::"read"], resource is Order) when {
+                principal has role &&
+                principal.id == "operate_arc_task_synthesis" &&
+                principal.role == "wasm_module"
+            };"#,
+        )
+        .expect("module-only policy should parse");
+    let wasm = module_authz_context();
+    let host = LocalTDataWasmHost::new_for_wasm(
+        state.clone(),
+        TenantId::default(),
+        &wasm,
+        Arc::new(FailingHost),
+    );
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    let (status, _) = host
+        .http_call(
+            "POST",
+            "http://127.0.0.1:8787/tdata/Orders",
+            &headers,
+            r#"{"Id":"module-owned-order"}"#,
+        )
+        .await
+        .expect("module-authorized create should stay in process");
+    assert_eq!(status, StatusCode::CREATED.as_u16());
+
+    // Reconstruct the host as recovery does and prove the typed module
+    // authority, tenant, and durable entity remain stable.
+    let recovered =
+        LocalTDataWasmHost::new_for_wasm(state, TenantId::default(), &wasm, Arc::new(FailingHost));
+    let (status, body) = recovered
+        .http_call(
+            "GET",
+            "http://127.0.0.1:8787/tdata/Orders('module-owned-order')",
+            &[],
+            "",
+        )
+        .await
+        .expect("recovered module-authorized read should stay in process");
+    assert_eq!(status, StatusCode::OK.as_u16());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["entity_id"],
+        "module-owned-order"
+    );
+}
+
+#[tokio::test]
+async fn http_endpoint_host_does_not_delegate_local_tdata_to_the_ambient_caller() {
+    let state = test_state();
+    let module_http_permit = r#"
+        permit(principal is Agent, action == Action::"http_call", resource is HttpEndpoint) when {
+            principal has role &&
+            principal.id == "operate_arc_task_synthesis" &&
+            principal.role == "wasm_module"
+        };
+    "#;
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            &format!(
+                r#"{module_http_permit}
+                permit(principal is Agent, action == Action::"create", resource is Order) when {{
+                    principal.id == "ambient-operator"
+                }};"#
+            ),
+        )
+        .expect("caller-only entity policy should parse");
+    let invocation = temper_wasm::types::WasmInvocationContext {
+        tenant: TenantId::default().to_string(),
+        entity_type: "HttpEndpoint".to_string(),
+        entity_id: "module-route".to_string(),
+        trigger_action: "HandleHttp".to_string(),
+        wasm_module: Some("operate_arc_task_synthesis".to_string()),
+        trigger_params: serde_json::Value::Null,
+        entity_state: serde_json::Value::Null,
+        agent_id: Some("ambient-operator".to_string()),
+        session_id: None,
+        integration_config: BTreeMap::new(),
+        trace_id: String::new(),
+        workflow_root_entity_type: None,
+        workflow_root_entity_id: None,
+        workflow_run_id: None,
+        http_request: None,
+    };
+    let build_host = || {
+        super::super::authorized_http_endpoint_host(
+            &state,
+            &TenantId::default(),
+            "operate_arc_task_synthesis",
+            &invocation,
+            state.http_stream_registry.clone(),
+        )
+        .expect("HTTP endpoint host should build")
+    };
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    let (status, _) = build_host()
+        .http_call(
+            "POST",
+            "http://127.0.0.1:8787/tdata/Orders",
+            &headers,
+            r#"{"Id":"caller-only-order"}"#,
+        )
+        .await
+        .expect("local TData denial should return an HTTP response");
+    assert_eq!(status, StatusCode::FORBIDDEN.as_u16());
+
+    state
+        .authz
+        .reload_tenant_policies(
+            TenantId::default().as_str(),
+            &format!(
+                r#"{module_http_permit}
+                permit(principal is Agent, action == Action::"create", resource is Order) when {{
+                    principal has role &&
+                    principal.id == "operate_arc_task_synthesis" &&
+                    principal.role == "wasm_module"
+                }};"#
+            ),
+        )
+        .expect("module-only entity policy should parse");
+    let (status, _) = build_host()
+        .http_call(
+            "POST",
+            "http://127.0.0.1:8787/tdata/Orders",
+            &headers,
+            r#"{"Id":"module-endpoint-order"}"#,
+        )
+        .await
+        .expect("module-authorized local TData should return an HTTP response");
+    assert_eq!(status, StatusCode::CREATED.as_u16());
+}
+
 #[async_trait]
 impl WasmHost for FailingHost {
     async fn http_call(
@@ -75,6 +226,19 @@ struct CountingHost {
 
 #[async_trait]
 impl WasmHost for CountingHost {
+    fn temper_data_request_budget(&self) -> usize {
+        4096
+    }
+
+    fn temper_data_response_handle_budget(&self) -> usize {
+        3
+    }
+
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(request.to_vec())
+    }
+
     async fn http_call(
         &self,
         _method: &str,
@@ -160,6 +324,27 @@ impl WasmHost for CountingHost {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn local_tdata_wrapper_delegates_application_data_capability() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let delegate = Arc::new(CountingHost {
+        calls: calls.clone(),
+        stream_calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let csdl = parse_csdl(ORDER_CSDL_XML).expect("valid CSDL");
+    let state = ServerState::new(
+        temper_runtime::ActorSystem::new("local-data-wrapper-test"),
+        csdl,
+        ORDER_CSDL_XML.into(),
+    );
+    let host = LocalTDataWasmHost::new(state, TenantId::new("alpha"), None, delegate);
+
+    assert_eq!(host.temper_data_request_budget(), 4096);
+    assert_eq!(host.temper_data_response_handle_budget(), 3);
+    assert_eq!(host.temper_data_call(b"request").await.unwrap(), b"request");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 fn test_state() -> ServerState {

@@ -245,7 +245,7 @@ pub async fn reconcile_os_app(
             .cloned()
             .ok_or_else(|| format!("OS app '{app_name}' not found"))?
     };
-    reconcile_os_app_from_dir(state, tenant, app_name, &app_dir).await
+    reconcile_os_app_from_dir(state, tenant, app_name, &app_dir, None).await
 }
 
 /// Reconcile one immutable app directory without consulting the global catalog.
@@ -254,6 +254,7 @@ pub(crate) async fn reconcile_os_app_from_dir(
     tenant: &str,
     app_name: &str,
     app_dir: &std::path::Path,
+    canonical_closure_id: Option<&str>,
 ) -> Result<OsAppReconcileResult, String> {
     let manifest = read_app_manifest(app_dir)
         .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?;
@@ -272,6 +273,9 @@ pub(crate) async fn reconcile_os_app_from_dir(
     let app_guide = std::fs::read_to_string(app_dir.join("APP.md")).ok();
     let digest =
         digest_app_bundle_with_version(app_name, &manifest.version, app_guide.as_deref(), &bundle);
+    if let Some(closure_id) = canonical_closure_id {
+        super::data_binding::verify_bundle_data_bindings(&bundle, closure_id)?;
+    }
 
     if let Some(ps) = state
         .server
@@ -345,9 +349,15 @@ pub(crate) async fn reconcile_os_app_from_dir(
                     seed = plan.seed,
                     "OS app changed; running delta reconcile"
                 );
-                let install =
-                    install_os_app_from_dir_with_plan(state, tenant, app_name, app_dir, plan)
-                        .await?;
+                let install = install_os_app_from_dir_with_plan(
+                    state,
+                    tenant,
+                    app_name,
+                    app_dir,
+                    plan,
+                    canonical_closure_id,
+                )
+                .await?;
                 return Ok(OsAppReconcileResult::Installed {
                     app_name: app_name.to_string(),
                     bundle_digest: digest.bundle_digest,
@@ -372,6 +382,7 @@ pub(crate) async fn reconcile_os_app_from_dir(
         app_name,
         app_dir,
         OsAppInstallPlan::all(),
+        canonical_closure_id,
     )
     .await?;
     Ok(OsAppReconcileResult::Installed {

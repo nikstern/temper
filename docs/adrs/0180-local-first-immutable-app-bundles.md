@@ -1,4 +1,4 @@
-# ADR-0173: Local-First Immutable App Bundles
+# ADR-0180: Local-First Immutable App Bundles
 
 - Status: Accepted
 - Date: 2026-08-24

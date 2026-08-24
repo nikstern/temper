@@ -20,8 +20,23 @@ use super::guard::{Guard, GuardFailure};
 /// The actor hashes these on write to maintain the negative-existence access path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclaredKey {
+    /// Stable declaration name used by the canonical key hash.
     pub name: String,
+    /// Properties hashed in declaration order.
     pub properties: Vec<String>,
+    /// Whether this key defines deterministic entity identity (ADR-0156).
+    #[serde(default)]
+    pub entity_id: bool,
+}
+
+/// Compiled action-parameter metadata used by reference contracts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionParamMetadata {
+    /// Declared parameter type.
+    pub param_type: String,
+    /// Target entity type for a `ref` parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
 }
 
 /// A declared vector access path carried on the table (ADR-0155). `name`
@@ -48,6 +63,19 @@ pub struct TransitionTable {
     pub states: Vec<String>,
     /// The state an entity starts in.
     pub initial_state: String,
+    /// Digest of the complete deployed schema identity (CSDL + entity + IOA).
+    ///
+    /// Registry-built tables populate this value so durable work can reject a
+    /// deployment whose data contract changed even when its transitions did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_digest: Option<String>,
+    /// Durable state-entry timeout declarations carried into the runtime.
+    ///
+    /// Keeping these on the compiled table lets the entity actor co-commit a
+    /// timeout intent with the exact state-entry/reset event instead of
+    /// reconstructing scheduling metadata after the source commit.
+    #[serde(default)]
+    pub state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
     /// Ordered list of transition rules.
     pub rules: Vec<TransitionRule>,
     /// ADR-0153: declared unique/alternate keys the kernel indexes for
@@ -62,6 +90,9 @@ pub struct TransitionTable {
     /// declare any per-field overrides.
     #[serde(default)]
     pub state_var_metadata: BTreeMap<String, StateVarMetadata>,
+    /// Parameter declarations keyed by action then parameter name (ADR-0156).
+    #[serde(default)]
+    pub action_params: BTreeMap<String, BTreeMap<String, ActionParamMetadata>>,
     /// Composite-action metadata keyed by action name (ADR-0040).
     #[serde(default)]
     pub composite_actions: BTreeMap<String, CompositeActionMetadata>,
@@ -84,6 +115,12 @@ pub struct TransitionTable {
 ///   behalf of this field. `None` = permanent (pre-ADR behavior).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateVarMetadata {
+    /// Declared state-variable type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_type: Option<String>,
+    /// Target entity type for a typed reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
     /// Per-field inline byte ceiling for field overflow (ADR-0045).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overflow_inline_max_bytes: Option<usize>,
@@ -154,9 +191,15 @@ impl<'de> Deserialize<'de> for TransitionTable {
             entity_name: String,
             states: Vec<String>,
             initial_state: String,
+            #[serde(default)]
+            schema_digest: Option<String>,
+            #[serde(default)]
+            state_timeouts: Vec<temper_spec::automaton::StateTimeout>,
             rules: Vec<TransitionRule>,
             #[serde(default)]
             state_var_metadata: BTreeMap<String, StateVarMetadata>,
+            #[serde(default)]
+            action_params: BTreeMap<String, BTreeMap<String, ActionParamMetadata>>,
             #[serde(default)]
             composite_actions: BTreeMap<String, CompositeActionMetadata>,
             #[serde(default)]
@@ -170,10 +213,13 @@ impl<'de> Deserialize<'de> for TransitionTable {
             entity_name: raw.entity_name,
             states: raw.states,
             initial_state: raw.initial_state,
+            schema_digest: raw.schema_digest,
+            state_timeouts: raw.state_timeouts,
             rules: raw.rules,
             keys: raw.keys,
             vectors: raw.vectors,
             state_var_metadata: raw.state_var_metadata,
+            action_params: raw.action_params,
             composite_actions: raw.composite_actions,
             rule_index: BTreeMap::new(),
         };
@@ -286,6 +332,8 @@ mod tests {
             entity_name: "TestEntity".to_string(),
             states: vec!["Draft".to_string(), "Active".to_string()],
             initial_state: "Draft".to_string(),
+            schema_digest: None,
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![
@@ -312,6 +360,7 @@ mod tests {
                 },
             ],
             state_var_metadata: BTreeMap::new(),
+            action_params: BTreeMap::new(),
             composite_actions: BTreeMap::new(),
             rule_index: BTreeMap::new(),
         };

@@ -97,6 +97,22 @@ impl AuthorizedWasmHost {
 
 #[async_trait]
 impl WasmHost for AuthorizedWasmHost {
+    fn temper_data_request_budget(&self) -> usize {
+        self.inner.temper_data_request_budget()
+    }
+    fn temper_data_response_handle_budget(&self) -> usize {
+        self.inner.temper_data_response_handle_budget()
+    }
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.inner.temper_data_call(request).await
+    }
+    fn temper_file_stream_read(&self, handle: u32, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        self.inner.temper_file_stream_read(handle, max_bytes)
+    }
+    fn temper_file_stream_try_write(&self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
+        self.inner.temper_file_stream_try_write(handle, bytes)
+    }
+
     /// Forward the wrapped host's per-tenant content decision (ADR-0166). This
     /// wrapper is what dispatch hands to the engine, so without forwarding the
     /// engine would read the trait default and redact even for a tenant that
@@ -319,5 +335,177 @@ impl WasmHost for AuthorizedWasmHost {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_trait::SimWasmHost;
+
+    struct DenyAllGate;
+    impl WasmAuthzGate for DenyAllGate {
+        fn authorize_http_call(
+            &self,
+            _domain: &str,
+            _method: &str,
+            _url: &str,
+            _ctx: &WasmAuthzContext,
+        ) -> WasmAuthzDecision {
+            WasmAuthzDecision::Deny("denied by policy".into())
+        }
+        fn authorize_secret_access(
+            &self,
+            _key: &str,
+            _ctx: &WasmAuthzContext,
+        ) -> WasmAuthzDecision {
+            WasmAuthzDecision::Deny("denied by policy".into())
+        }
+    }
+
+    struct AllowAllGate;
+    impl WasmAuthzGate for AllowAllGate {
+        fn authorize_http_call(
+            &self,
+            _domain: &str,
+            _method: &str,
+            _url: &str,
+            _ctx: &WasmAuthzContext,
+        ) -> WasmAuthzDecision {
+            WasmAuthzDecision::Allow
+        }
+        fn authorize_secret_access(
+            &self,
+            _key: &str,
+            _ctx: &WasmAuthzContext,
+        ) -> WasmAuthzDecision {
+            WasmAuthzDecision::Allow
+        }
+    }
+
+    fn test_ctx() -> WasmAuthzContext {
+        WasmAuthzContext::test_fixture()
+    }
+
+    #[tokio::test]
+    async fn deny_gate_blocks_http_call() {
+        let inner = Arc::new(SimWasmHost::new());
+        let gate = Arc::new(DenyAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+
+        let result = host
+            .http_call("POST", "https://api.stripe.com/v1/charges", &[], "")
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("authorization denied"));
+    }
+
+    #[tokio::test]
+    async fn deny_gate_blocks_secret_access() {
+        let inner = Arc::new(SimWasmHost::new().with_secret("STRIPE_API_KEY", "sk-test"));
+        let gate = Arc::new(DenyAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+
+        let result = host.get_secret("STRIPE_API_KEY");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("authorization denied"));
+    }
+
+    #[tokio::test]
+    async fn allow_gate_delegates_http_call() {
+        let inner = Arc::new(SimWasmHost::new());
+        let gate = Arc::new(AllowAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+
+        let result = host
+            .http_call("GET", "https://api.stripe.com/v1/charges", &[], "")
+            .await;
+        assert!(result.is_ok());
+        let (status, _body) = result.unwrap();
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn allow_gate_delegates_secret_access() {
+        let inner = Arc::new(SimWasmHost::new().with_secret("KEY", "val"));
+        let gate = Arc::new(AllowAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+
+        let result = host.get_secret("KEY");
+        assert_eq!(result, Ok("val".into()));
+    }
+
+    #[test]
+    fn allow_gate_delegates_evaluate_spec() {
+        let ioa_source = "[automaton]\nname = \"Issue\"";
+        let ioa_hash = format!("{:x}", ioa_source.len());
+        let inner = Arc::new(SimWasmHost::new().with_spec_eval_response(
+            &ioa_hash,
+            "Reassign",
+            r#"{"success":true,"new_state":"InProgress"}"#,
+        ));
+        let gate = Arc::new(AllowAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+
+        let result = host.evaluate_spec(ioa_source, "Backlog", "Reassign", "{}");
+        assert!(
+            result.is_ok(),
+            "evaluate_spec should delegate to inner host"
+        );
+        assert!(
+            result.unwrap_or_default().contains(r#""success":true"#),
+            "expected canned evaluate_spec response from inner host"
+        );
+    }
+
+    #[test]
+    fn logging_always_allowed() {
+        let inner = Arc::new(SimWasmHost::new());
+        let gate = Arc::new(DenyAllGate);
+        let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
+        host.log("info", "test message");
+    }
+
+    #[test]
+    fn extract_domain_https() {
+        assert_eq!(
+            extract_domain("https://api.stripe.com/v1/charges"),
+            "api.stripe.com"
+        );
+    }
+
+    #[test]
+    fn extract_domain_http() {
+        assert_eq!(extract_domain("http://localhost:8080/api"), "localhost");
+    }
+
+    #[test]
+    fn extract_domain_with_port() {
+        assert_eq!(
+            extract_domain("https://example.com:443/path"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn extract_domain_no_scheme() {
+        assert_eq!(extract_domain("api.stripe.com/path"), "api.stripe.com");
+    }
+
+    #[test]
+    fn extract_domain_ip() {
+        assert_eq!(extract_domain("http://127.0.0.1:3000/api"), "127.0.0.1");
+    }
+
+    #[test]
+    fn extract_domain_strips_userinfo() {
+        assert_eq!(
+            extract_domain("https://attacker:pass@localhost/exploit"),
+            "localhost"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "authorized_host_data_test.rs"]
+mod data_test;
+
+#[cfg(test)]
 #[path = "authorized_host_test.rs"]
-mod tests;
+mod security_tests;

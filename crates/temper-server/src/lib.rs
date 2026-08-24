@@ -8,6 +8,7 @@ pub mod adapters;
 mod admin;
 #[cfg(feature = "observe")]
 mod api;
+pub mod application_data;
 pub mod authz;
 mod aws_sigv4;
 pub mod blob_store;
@@ -40,6 +41,7 @@ pub mod request_context;
 mod response;
 mod router;
 pub mod runtime_metrics;
+mod schema_deployment;
 pub mod secrets;
 #[cfg(feature = "observe")]
 pub mod sentinel;

@@ -86,6 +86,8 @@ mod tests {
             entity_name: name.to_string(),
             states: vec!["A".into(), "B".into()],
             initial_state: "A".into(),
+            schema_digest: None,
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![TransitionRule {
@@ -96,6 +98,7 @@ mod tests {
                 effects: vec![],
             }],
             state_var_metadata: Default::default(),
+            action_params: Default::default(),
             composite_actions: Default::default(),
             rule_index: Default::default(),
         };

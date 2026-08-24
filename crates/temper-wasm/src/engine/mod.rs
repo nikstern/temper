@@ -3,11 +3,13 @@
 //! Modules are compiled once and cached by SHA-256 hash. Each invocation
 //! gets a fresh `Store` with fuel + memory limits (TigerStyle budgets).
 
+mod data_host_functions;
 #[cfg(test)]
 #[path = "guest_read_bounds_test.rs"]
 mod guest_read_bounds_test;
 mod guest_spans;
 mod host_functions;
+mod migration;
 mod telemetry;
 #[cfg(test)]
 mod tests;
@@ -28,6 +30,8 @@ use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
 };
+
+pub use migration::{PureMigrationError, PureMigrationLimits};
 
 pub(crate) use guest_spans::GuestSpanRegistry;
 
@@ -231,6 +235,10 @@ pub(crate) struct HostState {
     pub(crate) blob_cache: BTreeMap<String, Vec<u8>>,
     /// Guest-created observability spans scoped to this invocation.
     pub(crate) guest_spans: GuestSpanRegistry,
+    /// Bounded response byte buffers keyed by invocation-local handle.
+    pub(crate) data_responses: BTreeMap<i32, Vec<u8>>,
+    /// Next positive response handle.
+    pub(crate) next_data_response: i32,
 }
 
 impl HostState {
@@ -568,6 +576,8 @@ impl WasmEngine {
                     needs_wasi,
                     export_llm_content,
                 ),
+                data_responses: BTreeMap::new(),
+                next_data_response: 1,
             };
             (wasi_stderr_pipe, host_state)
         };

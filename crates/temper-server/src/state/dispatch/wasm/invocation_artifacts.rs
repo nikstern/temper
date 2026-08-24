@@ -174,6 +174,7 @@ impl crate::state::ServerState {
                     agent_ctx,
                     true,
                     None,
+                    None,
                 )
                 .await
                 .map_err(|e| e.to_string())?;

@@ -3,8 +3,8 @@
 //! Cedar authority is carried in an immutable
 //! [`temper_authz::AuthenticatedRequestContext`] request extension. Headers
 //! never materialize that authority. This middleware removes the closed
-//! `x-temper-*` authority namespace while retaining the two correlation-only
-//! namespaces consumed by tracing and workflow observability.
+//! `x-temper-*` authority namespace while retaining validated schema routing,
+//! request identity, and correlation-only observability metadata.
 
 use axum::extract::Request;
 use axum::http::{HeaderName, Method, StatusCode};
@@ -12,16 +12,23 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 const CORRELATION_PREFIXES: [&str; 2] = ["x-temper-observe-", "x-temper-workflow-"];
+const NON_AUTHORITY_HEADERS: [&str; 4] = [
+    "x-temper-schema-scope-kind",
+    "x-temper-schema-scope-id",
+    "x-temper-schema-bundle-digest",
+    "x-temper-request-id",
+];
 
 /// Return whether a header belongs to the caller-controlled authority
 /// namespace that must be removed before dispatch.
 ///
 /// `HeaderName` values are normalized to lowercase. The allowlist is narrow on
 /// purpose: new `x-temper-*` headers are authority by default unless explicitly
-/// placed in a correlation-only namespace.
+/// classified as schema routing, request identity, or correlation metadata.
 pub(crate) fn is_caller_authority_header(name: &HeaderName) -> bool {
     let name = name.as_str();
     name.starts_with("x-temper-")
+        && !NON_AUTHORITY_HEADERS.contains(&name)
         && !CORRELATION_PREFIXES
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -31,8 +38,9 @@ pub(crate) fn is_caller_authority_header(name: &HeaderName) -> bool {
 ///
 /// Credential resolution communicates identity through
 /// [`temper_authz::AuthenticatedRequestContext`], never by adding headers back
-/// after this layer. `x-temper-observe-*` and `x-temper-workflow-*` survive only
-/// as correlation metadata and are not Cedar inputs.
+/// after this layer. Schema-pin routing, request identity, and the
+/// `x-temper-observe-*` / `x-temper-workflow-*` correlation namespaces survive;
+/// none of them are Cedar authority inputs.
 pub async fn strip_inbound_identity_headers(mut request: Request, next: Next) -> Response {
     let names = request
         .headers()
@@ -150,8 +158,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_only_observe_and_workflow_correlation_namespaces() {
+    async fn preserves_non_authority_routing_and_correlation_headers() {
         let request = HttpRequest::get("/echo")
+            .header("x-temper-schema-scope-kind", "task")
+            .header("x-temper-schema-scope-id", "task-1")
+            .header("x-temper-schema-bundle-digest", "sha256:fixture")
+            .header("x-temper-request-id", "request-1")
             .header("x-temper-observe-session-id", "session-1")
             .header("x-temper-observe-intent", "approve invoice")
             .header("x-temper-workflow-run-id", "workflow-1")
@@ -162,7 +174,7 @@ mod tests {
 
         assert_eq!(
             surviving_headers(request).await,
-            "x-temper-observe-intent,x-temper-observe-session-id,x-temper-workflow-root-entity-type,x-temper-workflow-run-id"
+            "x-temper-observe-intent,x-temper-observe-session-id,x-temper-request-id,x-temper-schema-bundle-digest,x-temper-schema-scope-id,x-temper-schema-scope-kind,x-temper-workflow-root-entity-type,x-temper-workflow-run-id"
         );
     }
 

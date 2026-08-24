@@ -12,11 +12,17 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, scoped_journal_pin_suffix, split_scoped_journal_entity_id,
+};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend, PersistenceAppendResult,
     PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+
+mod schema_deployment;
+pub use schema_deployment::SimSchemaFaultPoint;
 
 /// Fault injection configuration for simulation.
 ///
@@ -117,6 +123,8 @@ pub struct SimEventStore {
 
 #[derive(Debug)]
 struct SimEventStoreInner {
+    /// Deterministic schema-deployment authority state.
+    schema_deployments: schema_deployment::SimSchemaDeploymentState,
     /// Event journals: persistence_id → Vec<PersistenceEnvelope>
     journals: BTreeMap<String, Vec<PersistenceEnvelope>>,
     /// Snapshots: persistence_id → (sequence_nr, snapshot_bytes)
@@ -129,6 +137,8 @@ struct SimEventStoreInner {
     rng: DeterministicRng,
     /// Fault injection configuration.
     faults: SimFaultConfig,
+    /// One-shot deterministic failures for schema lifecycle transactions.
+    pending_schema_failures: BTreeMap<SimSchemaFaultPoint, u64>,
     /// One-shot concurrency-violation injection counters per `persistence_id`.
     ///
     /// Each entry tells `append` to return a `ConcurrencyViolation` on the next
@@ -186,12 +196,14 @@ impl SimEventStore {
     pub fn new(seed: u64, faults: SimFaultConfig) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SimEventStoreInner {
+                schema_deployments: schema_deployment::SimSchemaDeploymentState::default(),
                 journals: BTreeMap::new(),
                 snapshots: BTreeMap::new(),
                 snapshot_history: BTreeMap::new(),
                 event_segments: BTreeMap::new(),
                 rng: DeterministicRng::new(seed),
                 faults,
+                pending_schema_failures: BTreeMap::new(),
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_read_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
@@ -214,6 +226,7 @@ impl SimEventStore {
     /// retry replays back to the same spot.
     pub fn inject_concurrency_violations(&self, persistence_id: &str, count: u64) {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
         if count == 0 {
             inner.pending_concurrency_violations.remove(persistence_id);
         } else {
@@ -392,6 +405,31 @@ impl EventStore for SimEventStore {
         }
 
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(persistence_id)
+            && let Some((_, pin)) = split_scoped_journal_entity_id(entity_id)
+        {
+            if inner.schema_deployments.migrated_source_is_fenced(
+                tenant,
+                &pin.scope,
+                &pin.bundle_digest,
+            ) {
+                return Err(PersistenceError::Storage(
+                    "migrated scoped schema write fence".into(),
+                ));
+            }
+            if !inner.journals.contains_key(persistence_id)
+                && !inner.schema_deployments.permits_scoped_journal_write(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                )
+            {
+                return Err(PersistenceError::Storage(
+                    "stale scoped schema write fence".into(),
+                ));
+            }
+        }
 
         // Deterministic one-shot injection (see `inject_concurrency_violations`).
         // Consumes one counter per call; falls back to normal flow once drained.
@@ -801,6 +839,30 @@ impl EventStore for SimEventStore {
         }
 
         for append in appends {
+            if let Ok((tenant, _, entity_id)) = parse_persistence_id_parts(&append.persistence_id)
+                && let Some((_, pin)) = split_scoped_journal_entity_id(entity_id)
+            {
+                if inner.schema_deployments.migrated_source_is_fenced(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                ) {
+                    return Err(PersistenceError::Storage(
+                        "migrated scoped schema write fence".into(),
+                    ));
+                }
+                if !inner.journals.contains_key(&append.persistence_id)
+                    && !inner.schema_deployments.permits_scoped_journal_write(
+                        tenant,
+                        &pin.scope,
+                        &pin.bundle_digest,
+                    )
+                {
+                    return Err(PersistenceError::Storage(
+                        "stale scoped schema write fence".into(),
+                    ));
+                }
+            }
             let pending_cv = inner
                 .pending_concurrency_violations
                 .get(&append.persistence_id)
@@ -914,6 +976,75 @@ impl EventStore for SimEventStore {
             events.truncate(truncate_at.max(1));
         }
 
+        Ok(events)
+    }
+
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
+        let Some(journal) = inner.journals.get(persistence_id) else {
+            return Ok(Vec::new());
+        };
+        let mut events = journal
+            .iter()
+            .filter(|event| event.sequence_nr > from_sequence)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let read_truncation_probability = inner.faults.read_truncation_prob;
+        if !events.is_empty() && inner.rng.chance(read_truncation_probability) {
+            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
+            events.truncate(truncate_at.max(1));
+        }
+        Ok(events)
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
+            *remaining -= 1;
+            let cleared = *remaining == 0;
+            if cleared {
+                inner.pending_read_failures.remove(persistence_id);
+            }
+            return Err(PersistenceError::Storage(format!(
+                "injected read failure for {persistence_id}"
+            )));
+        }
+        let Some(journal) = inner.journals.get(persistence_id) else {
+            return Ok(Vec::new());
+        };
+        let start = journal.len().saturating_sub(limit);
+        let mut events = journal[start..].to_vec();
+        let read_truncation_probability = inner.faults.read_truncation_prob;
+        if !events.is_empty() && inner.rng.chance(read_truncation_probability) {
+            let truncate_at = (inner.rng.next_u64() as usize) % events.len();
+            events.truncate(truncate_at.max(1));
+        }
         Ok(events)
     }
 
@@ -1036,6 +1167,137 @@ impl EventStore for SimEventStore {
         }
 
         Ok(result)
+    }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let result = inner
+            .journals
+            .keys()
+            .filter_map(|persistence_id| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, _, _)| *found_tenant == tenant)
+                    .map(|(_, entity_type, entity_id)| {
+                        (entity_type.to_string(), entity_id.to_string())
+                    })
+            })
+            .filter(|(found_type, _)| entity_type.is_none_or(|wanted| found_type == wanted))
+            .filter(|(entity_type, entity_id)| {
+                after.is_none_or(|cursor| (entity_type.as_str(), entity_id.as_str()) > cursor)
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+        Ok(result)
+    }
+
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        scope: &SchemaScope,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        Ok(inner
+            .journals
+            .keys()
+            .filter_map(|persistence_id| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, found_type, _)| {
+                        *found_tenant == tenant && *found_type == entity_type
+                    })
+                    .and_then(|(_, _, journal_entity_id)| journal_entity_id.strip_suffix(&suffix))
+            })
+            .filter(|entity_id| after_entity_id.is_none_or(|after| *entity_id > after))
+            .take(limit)
+            .map(str::to_string)
+            .collect())
+    }
+
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        scope: &SchemaScope,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        Ok(inner
+            .journals
+            .keys()
+            .filter_map(|persistence_id| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, found_type, _)| {
+                        *found_tenant == tenant && *found_type == entity_type
+                    })
+                    .and_then(|(_, _, journal_entity_id)| {
+                        split_scoped_journal_entity_id(journal_entity_id)
+                    })
+                    .filter(|(found_entity_id, pin)| {
+                        *found_entity_id == entity_id && &pin.scope == scope
+                    })
+                    .map(|(_, pin)| pin.bundle_digest)
+            })
+            .take(limit)
+            .collect())
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        scope: &SchemaScope,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .journals
+            .iter()
+            .filter_map(|(persistence_id, events)| {
+                parse_persistence_id_parts(persistence_id)
+                    .ok()
+                    .filter(|(found_tenant, _, entity_id)| {
+                        *found_tenant == tenant && entity_id.ends_with(&suffix)
+                    })
+                    .map(|_| events.len())
+            })
+            .try_fold(0_u64, |version, count| {
+                version
+                    .checked_add(u64::try_from(count).map_err(|_| {
+                        PersistenceError::Storage("schema write version exhausted".into())
+                    })?)
+                    .ok_or_else(|| {
+                        PersistenceError::Storage("schema write version exhausted".into())
+                    })
+            })
     }
 }
 

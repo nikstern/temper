@@ -19,7 +19,9 @@
 //! ```
 
 pub mod context;
+pub mod data;
 pub mod host;
+pub mod schema_deployment;
 
 #[cfg(target_arch = "wasm32")]
 pub mod http_stream;
@@ -234,5 +236,6 @@ pub mod prelude {
     pub use crate::context::{
         Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan,
     };
+    pub use crate::data::{DataClient, ModuleDataError};
     pub use crate::{Value, json, serde_json, set_error_result, set_success_result, temper_module};
 }

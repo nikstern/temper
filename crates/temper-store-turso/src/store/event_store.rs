@@ -2,6 +2,10 @@
 
 use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use std::time::Duration;
+use temper_runtime::persistence::schema_deployment::{
+    SchemaExecutionPin, SchemaScope, scoped_journal_pin_prefix, scoped_journal_pin_suffix,
+    split_scoped_journal_entity_id,
+};
 use temper_runtime::persistence::{
     EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
     PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, storage_error,
@@ -28,6 +32,72 @@ struct PreparedEventInsert {
     payload_json: String,
     metadata_json: String,
     expected_sequence: u64,
+}
+
+async fn assert_scoped_journal_write_fence(
+    tx: &libsql::Transaction,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), PersistenceError> {
+    let Some((_, pin)) = split_scoped_journal_entity_id(entity_id) else {
+        return Ok(());
+    };
+    let mut migrated_rows = tx
+        .query(
+            "SELECT 1 FROM schema_migration_jobs
+             WHERE tenant = ?1
+               AND json_extract(job_json, '$.command.source_bundle_digest') = ?2
+               AND json_extract(job_json, '$.command.scope.kind') = 'task'
+               AND json_extract(job_json, '$.command.scope.id') = ?3
+               AND json_extract(job_json, '$.status') IN ('cut_over', 'completed')
+             LIMIT 1",
+            params![tenant, pin.bundle_digest.as_str(), pin.scope.id.as_str()],
+        )
+        .await
+        .map_err(storage_error)?;
+    if migrated_rows.next().await.map_err(storage_error)?.is_some() {
+        return Err(PersistenceError::Storage(
+            "migrated scoped schema write fence".into(),
+        ));
+    }
+    let mut existing_rows = tx
+        .query(
+            "SELECT 1 FROM events
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+             LIMIT 1",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
+    if existing_rows.next().await.map_err(storage_error)?.is_some() {
+        return Ok(());
+    }
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM schema_active_pointers
+             WHERE tenant = ?1 AND json_extract(pointer_json, '$.bundle_digest') = ?2
+               AND json_extract(pointer_json, '$.scope.kind') = 'task'
+               AND json_extract(pointer_json, '$.scope.id') = ?3
+             UNION ALL
+             SELECT 1 FROM schema_migration_jobs
+             WHERE tenant = ?1
+               AND json_extract(job_json, '$.command.target_bundle_digest') = ?2
+               AND json_extract(job_json, '$.command.scope.kind') = 'task'
+               AND json_extract(job_json, '$.command.scope.id') = ?3
+               AND json_extract(job_json, '$.status') IN
+                   ('submitted', 'migrating', 'validating', 'ready')
+             LIMIT 1",
+            params![tenant, pin.bundle_digest, pin.scope.id],
+        )
+        .await
+        .map_err(storage_error)?;
+    if rows.next().await.map_err(storage_error)?.is_none() {
+        return Err(PersistenceError::Storage(
+            "stale scoped schema write fence".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl EventStore for TursoEventStore {
@@ -471,6 +541,98 @@ impl EventStore for TursoEventStore {
         Ok(out)
     }
 
+    async fn read_events_limited(
+        &self,
+        persistence_id: &str,
+        from_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT sequence_nr, event_type, payload, metadata
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr > ?4
+                 ORDER BY sequence_nr ASC LIMIT ?5",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    from_sequence.min(i64::MAX as u64) as i64,
+                    limit.min(i64::MAX as usize) as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let metadata_raw = row
+                .get::<Option<String>>(3)
+                .map_err(storage_error)?
+                .ok_or_else(|| PersistenceError::Serialization("missing event metadata".into()))?;
+            out.push(PersistenceEnvelope {
+                sequence_nr: row.get::<i64>(0).map_err(storage_error)? as u64,
+                event_type: row.get::<String>(1).map_err(storage_error)?,
+                payload: serde_json::from_str(&row.get::<String>(2).map_err(storage_error)?)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                metadata: serde_json::from_str(&metadata_raw)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn read_latest_events(
+        &self,
+        persistence_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT sequence_nr, event_type, payload, metadata FROM (
+                   SELECT sequence_nr, event_type, payload, metadata
+                   FROM events
+                   WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3
+                   ORDER BY sequence_nr DESC LIMIT ?4
+                 ) ORDER BY sequence_nr ASC",
+                params![
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    limit.min(i64::MAX as usize) as i64
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let metadata_raw = row
+                .get::<Option<String>>(3)
+                .map_err(storage_error)?
+                .ok_or_else(|| PersistenceError::Serialization("missing event metadata".into()))?;
+            out.push(PersistenceEnvelope {
+                sequence_nr: row.get::<i64>(0).map_err(storage_error)? as u64,
+                event_type: row.get::<String>(1).map_err(storage_error)?,
+                payload: serde_json::from_str(&row.get::<String>(2).map_err(storage_error)?)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                metadata: serde_json::from_str(&metadata_raw)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            });
+        }
+        Ok(out)
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -737,6 +899,183 @@ impl EventStore for TursoEventStore {
         }
         Ok(out)
     }
+
+    async fn list_journal_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: Option<&str>,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut rows = if let (Some(entity_type), Some((after_type, after_id))) =
+            (entity_type, after)
+            && after_type == entity_type
+        {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id > ?3
+                 ORDER BY entity_type, entity_id LIMIT ?4",
+                params![tenant, entity_type, after_id, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        } else if let Some(entity_type) = entity_type
+            && after.is_none_or(|(after_type, _)| after_type < entity_type)
+        {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2
+                 ORDER BY entity_type, entity_id LIMIT ?3",
+                params![tenant, entity_type, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        } else if entity_type.is_some() {
+            conn.query("SELECT entity_type, entity_id FROM events WHERE 0 = 1", ())
+                .await
+                .map_err(storage_error)?
+        } else if let Some((after_type, after_id)) = after {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1
+                   AND (entity_type > ?2 OR (entity_type = ?2 AND entity_id > ?3))
+                 ORDER BY entity_type, entity_id LIMIT ?4",
+                params![tenant, after_type, after_id, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        } else {
+            conn.query(
+                "SELECT DISTINCT entity_type, entity_id FROM events
+                 WHERE tenant = ?1 ORDER BY entity_type, entity_id LIMIT ?2",
+                params![tenant, limit],
+            )
+            .await
+            .map_err(storage_error)?
+        };
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push((
+                row.get::<String>(0).map_err(storage_error)?,
+                row.get::<String>(1).map_err(storage_error)?,
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn list_scoped_entity_ids_page(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        scope: &SchemaScope,
+        bundle_digest: &str,
+        after_entity_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let pattern = format!("%{suffix}");
+        let after = after_entity_id.unwrap_or("");
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT substr(entity_id, 1, length(entity_id) - length(?3)) AS scoped_id
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id LIKE ?4
+                   AND substr(entity_id, 1, length(entity_id) - length(?3)) > ?5
+                 ORDER BY scoped_id LIMIT ?6",
+                params![tenant, entity_type, suffix, pattern, after, limit],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    async fn scoped_entity_bundle_digests(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        scope: &SchemaScope,
+        limit: usize,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.configured_connection().await?;
+        let prefix = scoped_journal_pin_prefix(entity_id, scope);
+        let prefix_len = i64::try_from(prefix.chars().count())
+            .map_err(|_| PersistenceError::Storage("scoped entity id is too long".to_string()))?;
+        let requested_limit = limit.min(i64::MAX as usize) as i64;
+        let canonical_digest_glob = format!("sha256:{}", "[0-9a-f]".repeat(64));
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT substr(entity_id, ?4 + 1) AS bundle_digest
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2
+                   AND substr(entity_id, 1, ?4) = ?3
+                   AND length(entity_id) = ?4 + 71
+                   AND substr(entity_id, ?4 + 1) GLOB ?6
+                 ORDER BY bundle_digest LIMIT ?5",
+                params![
+                    tenant,
+                    entity_type,
+                    prefix,
+                    prefix_len,
+                    requested_limit,
+                    canonical_digest_glob
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            out.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(out)
+    }
+
+    async fn scoped_bundle_write_version(
+        &self,
+        tenant: &str,
+        scope: &SchemaScope,
+        bundle_digest: &str,
+    ) -> Result<u64, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let suffix = scoped_journal_pin_suffix(&SchemaExecutionPin {
+            scope: scope.clone(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+        let pattern = format!("%{suffix}");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM events WHERE tenant = ?1 AND entity_id LIKE ?2",
+                params![tenant, pattern],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(0);
+        };
+        let count = row.get::<i64>(0).map_err(storage_error)?;
+        u64::try_from(count)
+            .map_err(|_| PersistenceError::Storage("invalid schema write version".into()))
+    }
 }
 
 impl TursoEventStore {
@@ -816,7 +1155,9 @@ impl TursoEventStore {
             return Ok(expected_sequence);
         }
 
-        if let [event] = events {
+        if let [event] = events
+            && !persistence_id.contains(":schema:")
+        {
             return self
                 .append_single_event_inner(persistence_id, expected_sequence, event)
                 .await;
@@ -829,6 +1170,8 @@ impl TursoEventStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(storage_error)?;
+
+        assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id).await?;
 
         let select_start = std::time::Instant::now();
         let rows_result = tx
@@ -1012,6 +1355,7 @@ impl TursoEventStore {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
                     .map_err(PersistenceError::Storage)?;
+            assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id).await?;
 
             if append.expected_sequence == 0 && !append.events.is_empty() {
                 parsed.push((

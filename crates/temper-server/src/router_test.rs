@@ -6,13 +6,22 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sha1::Digest as _;
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::schema_deployment::{
+    ActivateSchemaBundle, ClaimSchemaVerification, ClaimSchemaVerificationOutcome,
+    SchemaBundleRecord, SchemaDeploymentStore, SchemaExecutionPin, SchemaOperationIdentity,
+    SchemaScope, SchemaScopeKind, SchemaVerificationReceipt, SubmitSchemaBundle,
+};
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 use crate::events::EntityStateChange;
 use crate::storage::StorageStack;
+
+#[path = "router_test/scoped_schema_pin_test.rs"]
+mod scoped_schema_pin;
 
 fn test_security_context() -> temper_authz::SecurityContext {
     temper_authz::SecurityContext {
@@ -121,6 +130,178 @@ fn test_state_with_ioa() -> ServerState {
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
 }
 
+fn test_state_with_active_task_schema() -> ServerState {
+    test_state_with_active_task_schema_and_ioa(include_str!(
+        "../../../test-fixtures/specs/order.ioa.toml"
+    ))
+}
+
+fn test_state_with_active_task_schema_and_ioa(order_ioa: &str) -> ServerState {
+    let state = test_state_with_ioa();
+    let global_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+    let scoped_csdl = global_csdl.replace("Temper.Example", "Temper.ScopedExample");
+    let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "task-router".to_string(),
+    };
+    let digest = format!("sha256:{}", "a".repeat(64));
+    {
+        let mut registry = state.registry.write().expect("registry lock");
+        registry
+            .stage_scoped_bundle(
+                TenantId::default(),
+                scope.clone(),
+                digest.clone(),
+                parsed,
+                scoped_csdl,
+                &[("Order", order_ioa)],
+            )
+            .expect("stage scoped bundle");
+        registry
+            .activate_scoped_bundle(&TenantId::default(), &scope, &digest, None)
+            .expect("activate scoped bundle");
+    }
+    state
+}
+
+async fn test_state_with_durable_active_task_schema() -> (ServerState, SimEventStore) {
+    test_state_with_durable_active_task_schema_and_ioa(include_str!(
+        "../../../test-fixtures/specs/order.ioa.toml"
+    ))
+    .await
+}
+
+async fn test_state_with_durable_active_task_schema_and_ioa(
+    order_ioa: &str,
+) -> (ServerState, SimEventStore) {
+    let mut state = test_state_with_active_task_schema_and_ioa(order_ioa);
+    let store = SimEventStore::no_faults(1_114);
+    persist_active_task_schema(&store, order_ioa).await;
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    (state, store)
+}
+
+async fn persist_active_task_schema(store: &impl SchemaDeploymentStore, order_ioa: &str) {
+    persist_task_schema_bundle(
+        store,
+        order_ioa,
+        &format!("sha256:{}", "a".repeat(64)),
+        None,
+        "initial",
+    )
+    .await;
+}
+
+async fn persist_task_schema_bundle(
+    store: &impl SchemaDeploymentStore,
+    order_ioa: &str,
+    digest: &str,
+    predecessor: Option<&str>,
+    operation_tag: &str,
+) {
+    let scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: "task-router".into(),
+    };
+    persist_task_schema_bundle_in_scope(
+        store,
+        order_ioa,
+        digest,
+        predecessor,
+        operation_tag,
+        &scope,
+    )
+    .await;
+}
+
+async fn persist_task_schema_bundle_in_scope(
+    store: &impl SchemaDeploymentStore,
+    order_ioa: &str,
+    digest: &str,
+    predecessor: Option<&str>,
+    operation_tag: &str,
+    scope: &SchemaScope,
+) {
+    let scoped_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml")
+        .replace("Temper.Example", "Temper.ScopedExample");
+    store
+        .submit_schema_bundle(SubmitSchemaBundle {
+            bundle: SchemaBundleRecord {
+                tenant: TenantId::default().to_string(),
+                scope: scope.clone(),
+                digest: digest.to_string(),
+                predecessor_digest: predecessor.map(str::to_string),
+                canonical_csdl: scoped_csdl,
+                canonical_ioa: std::collections::BTreeMap::from([(
+                    "Order".into(),
+                    order_ioa.into(),
+                )]),
+                cedar_policies: std::collections::BTreeMap::new(),
+                wasm_module_digests: std::collections::BTreeMap::new(),
+                migration_module_name: None,
+                migration_module_digest: None,
+                migration_abi_version: None,
+                canonical_budgets: "{}".into(),
+            },
+            idempotency_key: format!("{operation_tag}-submit"),
+            request_digest: format!("sha256:{}", "1".repeat(64)),
+            request_id: format!("{operation_tag}-submit"),
+        })
+        .await
+        .unwrap();
+    let claimed = store
+        .claim_schema_verification(ClaimSchemaVerification {
+            tenant: TenantId::default().to_string(),
+            scope: scope.clone(),
+            bundle_digest: digest.to_string(),
+            logical_now: 1,
+            lease_expires_at: 2,
+            operation: SchemaOperationIdentity {
+                idempotency_key: format!("{operation_tag}-verify"),
+                request_digest: format!("sha256:{}", "2".repeat(64)),
+                request_id: format!("{operation_tag}-verify"),
+            },
+        })
+        .await
+        .unwrap();
+    let fence = match claimed {
+        ClaimSchemaVerificationOutcome::Claimed(record)
+        | ClaimSchemaVerificationOutcome::Replayed(record) => record.fence,
+    };
+    let verified = store
+        .finish_schema_verification(
+            TenantId::default().as_str(),
+            scope,
+            digest,
+            fence,
+            SchemaVerificationReceipt {
+                id: format!("{operation_tag}-verification"),
+                verifier_version: "test/v1".into(),
+                input_digest: format!("sha256:{}", "3".repeat(64)),
+                passed: true,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .activate_schema_bundle(ActivateSchemaBundle {
+            tenant: TenantId::default().to_string(),
+            scope: scope.clone(),
+            bundle_digest: digest.to_string(),
+            expected_predecessor: predecessor.map(str::to_string),
+            expected_fence: verified.fence,
+            verification_receipt_id: format!("{operation_tag}-verification"),
+            operation: SchemaOperationIdentity {
+                idempotency_key: format!("{operation_tag}-activate"),
+                request_digest: format!("sha256:{}", "4".repeat(64)),
+                request_id: format!("{operation_tag}-activate"),
+            },
+        })
+        .await
+        .unwrap();
+}
+
 fn test_state_with_order_and_payment_ioa() -> ServerState {
     let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
     let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -131,6 +312,62 @@ fn test_state_with_order_and_payment_ioa() -> ServerState {
     // For navigation tests we only need entity creation/read, so reuse the same minimal IOA.
     specs.insert("Payment".to_string(), order_ioa.to_string());
     ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+fn test_state_with_typed_references() -> ServerState {
+    let csdl_xml = r#"<?xml version="1.0"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+ <edmx:DataServices><Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+  <EntityType Name="Workspace"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Status" Type="Edm.String"/></EntityType>
+  <EntityType Name="Document"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="workspace_id" Type="Edm.String"/><Property Name="Status" Type="Edm.String"/></EntityType>
+  <EntityContainer Name="Svc"><EntitySet Name="Workspaces" EntityType="Test.Workspace"/><EntitySet Name="Documents" EntityType="Test.Document"/></EntityContainer>
+ </Schema></edmx:DataServices>
+</edmx:Edmx>"#;
+    let workspace = r#"
+[automaton]
+name = "Workspace"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+"#;
+    let document = r#"
+[automaton]
+name = "Document"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+[[state]]
+name = "workspace_id"
+type = "ref"
+entity_type = "Workspace"
+initial = ""
+[[key]]
+name = "workspace"
+properties = ["workspace_id"]
+entity_id = true
+"#;
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let specs = std::collections::BTreeMap::from([
+        ("Workspace".to_string(), workspace.to_string()),
+        ("Document".to_string(), document.to_string()),
+    ]);
+    ServerState::with_specs(
+        ActorSystem::new("typed-reference-e2e"),
+        csdl,
+        csdl_xml.into(),
+        specs,
+    )
+    .unwrap()
+}
+
+#[test]
+fn contracted_types_use_the_canonical_actor_path() {
+    let mut state = test_state_with_typed_references();
+    state.actor_backed_types.insert("Document".into());
+    state.actor_backed_types.insert("Workspace".into());
+    let tenant = TenantId::default();
+    assert!(!state.is_pg_actor_backed(&tenant, "Document"));
+    assert!(state.is_pg_actor_backed(&tenant, "Workspace"));
 }
 
 fn test_state_with_customer_and_order_ioa() -> ServerState {
@@ -535,19 +772,7 @@ async fn git_receive_pack_bridge_response_uses_pkt_line_report() {
     );
 }
 
-async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let db_url = format!(
-        "file:/tmp/temper-data-only-fast-path-test-{}-{}.db",
-        std::process::id(),
-        id
-    );
-    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
-    let turso = TursoEventStore::new(&db_url, None)
-        .await
-        .expect("create local turso db");
-    let csdl_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+const DATA_ONLY_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
     <Schema Namespace="Temper.DataOnly" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -563,7 +788,8 @@ async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
     </Schema>
   </edmx:DataServices>
 </edmx:Edmx>"#;
-    let log_entry_ioa = r#"
+
+const DATA_ONLY_IOA: &str = r#"
 [automaton]
 name = "LogEntry"
 states = ["Recorded"]
@@ -574,11 +800,36 @@ name = "Body"
 type = "string"
 initial = ""
 "#;
-    let csdl = parse_csdl(csdl_xml).unwrap();
+
+fn test_state_with_data_only_ioa() -> ServerState {
+    let csdl = parse_csdl(DATA_ONLY_CSDL).unwrap();
     let system = ActorSystem::new("test-data-only-fast-path");
     let mut specs = std::collections::BTreeMap::new();
-    specs.insert("LogEntry".to_string(), log_entry_ioa.to_string());
-    let mut state = ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap();
+    specs.insert("LogEntry".to_string(), DATA_ONLY_IOA.to_string());
+    ServerState::with_specs(system, csdl, DATA_ONLY_CSDL.to_string(), specs).unwrap()
+}
+
+async fn test_state_with_data_only_ioa_and_sim() -> (ServerState, SimEventStore) {
+    let mut state = test_state_with_data_only_ioa();
+    let store = SimEventStore::no_faults(1_115);
+    persist_active_task_schema(&store, DATA_ONLY_IOA).await;
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    (state, store)
+}
+
+async fn test_state_with_data_only_ioa_and_turso() -> ServerState {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let db_url = format!(
+        "file:/tmp/temper-data-only-fast-path-test-{}-{}.db",
+        std::process::id(),
+        id
+    );
+    let _ = std::fs::remove_file(db_url.strip_prefix("file:").unwrap_or(&db_url));
+    let turso = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state = test_state_with_data_only_ioa();
     state.set_storage_stack(StorageStack::from_turso(turso));
     state
 }
@@ -697,6 +948,334 @@ async fn test_metadata_endpoint() {
 }
 
 #[tokio::test]
+async fn task_scoped_metadata_and_entity_io_use_the_same_immutable_pin() {
+    let (state, _store) = test_state_with_durable_active_task_schema().await;
+    let app = authenticated_router(state);
+    let service_document = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(service_document.status(), StatusCode::OK);
+    let service_document_body = axum::body::to_bytes(service_document.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let service_document_json: serde_json::Value =
+        serde_json::from_slice(&service_document_body).unwrap();
+    assert!(
+        service_document_json["value"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "Orders")
+    );
+    let metadata = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(metadata.status(), StatusCode::OK);
+    let metadata_body = axum::body::to_bytes(metadata.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&metadata_body)
+            .unwrap()
+            .contains("Temper.ScopedExample")
+    );
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::from(r#"{"id":"scoped-order"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let second_create = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::from(r#"{"id":"scoped-order-2"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_create.status(), StatusCode::CREATED);
+
+    let collection = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/Orders?$top=1&$count=true")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(collection.status(), StatusCode::OK);
+    let collection_body = axum::body::to_bytes(collection.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let collection_json: serde_json::Value = serde_json::from_slice(&collection_body).unwrap();
+    assert_eq!(collection_json["@odata.count"], 2);
+    assert_eq!(collection_json["value"].as_array().unwrap().len(), 1);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::patch("/tdata/Orders('scoped-order')")
+                .header("Content-Type", "application/json")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::from(r#"{"Notes":"scoped-patch"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch.status(), StatusCode::OK);
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::put("/tdata/Orders('scoped-order')")
+                .header("Content-Type", "application/json")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::from(r#"{"Id":"scoped-order","Notes":"scoped-put"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/Orders('scoped-order')")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["fields"]["_temper_schema_pin_v1"]["scope"]["id"],
+        "task-router"
+    );
+    assert_eq!(
+        json["fields"]["_temper_schema_pin_v1"]["bundle_digest"],
+        format!("sha256:{}", "a".repeat(64))
+    );
+    assert_eq!(json["fields"]["Notes"], "scoped-put");
+
+    let delete = app
+        .oneshot(
+            Request::delete("/tdata/Orders('scoped-order')")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn task_scoped_entity_recovers_active_pointer_after_server_restart() {
+    let (state, store) = test_state_with_durable_active_task_schema().await;
+    let digest = format!("sha256:{}", "a".repeat(64));
+    state
+        .get_or_create_scoped_entity(
+            &TenantId::default(),
+            "Order",
+            "restart-order",
+            serde_json::json!({"Id": "restart-order", "Notes": "durable"}),
+            SchemaExecutionPin {
+                scope: SchemaScope {
+                    kind: SchemaScopeKind::Task,
+                    id: "task-router".into(),
+                },
+                bundle_digest: digest.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(state);
+
+    let mut restarted = test_state_with_ioa();
+    restarted.set_storage_stack(StorageStack::from_sim(store, None));
+    assert_eq!(
+        restarted.registry.read().unwrap().active_scope_digest(
+            &TenantId::default(),
+            &SchemaScope {
+                kind: SchemaScopeKind::Task,
+                id: "task-router".into(),
+            },
+        ),
+        None
+    );
+    let response = authenticated_router(restarted.clone())
+        .oneshot(
+            Request::get("/tdata/Orders('restart-order')")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        restarted.registry.read().unwrap().active_scope_digest(
+            &TenantId::default(),
+            &SchemaScope {
+                kind: SchemaScopeKind::Task,
+                id: "task-router".into(),
+            },
+        ),
+        Some(digest.as_str())
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_inactive_task_scope_never_falls_back_to_global_metadata() {
+    let app = authenticated_router(test_state_with_active_task_schema());
+    let incomplete = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(incomplete.status(), StatusCode::BAD_REQUEST);
+
+    let empty = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "")
+                .header("x-temper-schema-scope-id", "")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_utf8 = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header(
+                    "x-temper-schema-scope-kind",
+                    axum::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+                )
+                .header("x-temper-schema-scope-id", "task-router")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_utf8.status(), StatusCode::BAD_REQUEST);
+
+    let digest_without_scope = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header(
+                    "x-temper-schema-bundle-digest",
+                    format!("sha256:{}", "a".repeat(64)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(digest_without_scope.status(), StatusCode::BAD_REQUEST);
+
+    let malformed_digest = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .header("x-temper-schema-bundle-digest", "sha256:NOT-CANONICAL")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed_digest.status(), StatusCode::BAD_REQUEST);
+
+    let missing_digest = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "task-router")
+                .header(
+                    "x-temper-schema-bundle-digest",
+                    format!("sha256:{}", "b".repeat(64)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_digest.status(), StatusCode::CONFLICT);
+    let missing_body = axum::body::to_bytes(missing_digest.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let missing_json: serde_json::Value = serde_json::from_slice(&missing_body).unwrap();
+    assert_eq!(missing_json["error"]["code"], "SchemaPinMismatch");
+
+    let inactive = app
+        .oneshot(
+            Request::get("/tdata/$metadata")
+                .header("x-temper-schema-scope-kind", "task")
+                .header("x-temper-schema-scope-id", "missing-task")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inactive.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn test_entity_set_listing() {
     let app = authenticated_router(test_state());
     let response = app
@@ -761,6 +1340,75 @@ async fn test_entity_by_key_found() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["@odata.context"], "$metadata#Orders/$entity");
+}
+
+#[tokio::test]
+async fn typed_reference_create_derives_id_and_rejects_rebind() {
+    let app = authenticated_router(test_state_with_typed_references());
+    let missing_target = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Documents")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"workspace_id":"ws-missing"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_target.status(), StatusCode::CONFLICT);
+
+    let workspace = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Workspaces")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"id":"ws-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(workspace.status(), StatusCode::CREATED);
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Documents")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"workspace_id":"ws-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let expected_id = crate::key_index::canonical_key_hash(
+        "workspace",
+        &["workspace_id".to_string()],
+        serde_json::json!({"workspace_id":"ws-1"})
+            .as_object()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json["entity_id"], expected_id);
+
+    let rebind = app
+        .oneshot(
+            Request::patch(format!("/tdata/Documents('{expected_id}')"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"workspace_id":"ws-2"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rebind.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(rebind.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "ConstraintViolation");
 }
 
 #[tokio::test]

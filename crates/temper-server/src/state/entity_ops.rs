@@ -7,12 +7,13 @@ use std::time::Instant;
 use tracing::{Instrument, instrument};
 
 use temper_observe::wide_event;
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
 use super::dispatch::retry;
-use super::{ServerState, projection_backfill};
+use super::{SCHEMA_PIN_MISMATCH_PREFIX, ServerState, projection_backfill};
 use crate::entity_actor::{EntityActor, EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
@@ -39,6 +40,17 @@ fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
         .get("action")
         .and_then(serde_json::Value::as_str)
         == Some("Deleted")
+}
+
+pub(crate) fn validate_global_entity_id(entity_id: &str) -> Result<(), String> {
+    if temper_runtime::persistence::schema_deployment::is_reserved_scoped_journal_entity_id(
+        entity_id,
+    ) {
+        return Err(format!(
+            "global entity ID '{entity_id}' uses the reserved scoped-journal identity form"
+        ));
+    }
+    Ok(())
 }
 
 fn record_projection_update_started(
@@ -755,7 +767,62 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Option<ActorRef<EntityMsg>> {
-        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        self.get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            BTreeMap::new(),
+            None,
+        )
+    }
+
+    /// Get or spawn an actor pinned to one exact immutable scoped bundle.
+    pub fn get_or_spawn_scoped_actor_with_fields(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        schema_pin: SchemaExecutionPin,
+    ) -> Option<ActorRef<EntityMsg>> {
+        self.get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            BTreeMap::new(),
+            Some(schema_pin),
+        )
+    }
+
+    fn get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        initial_reference_evidence: BTreeMap<String, bool>,
+        schema_pin: Option<SchemaExecutionPin>,
+    ) -> Option<ActorRef<EntityMsg>> {
+        if schema_pin.is_none() && validate_global_entity_id(entity_id).is_err() {
+            tracing::warn!(
+                tenant = %tenant,
+                entity_type,
+                entity_id,
+                "rejected global entity ID in reserved scoped-journal namespace"
+            );
+            return None;
+        }
+        let key = match schema_pin.as_ref() {
+            Some(pin) => format!(
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    entity_id, pin
+                )
+            ),
+            None => format!("{tenant}:{entity_type}:{entity_id}"),
+        };
 
         // Fast-path: check actor registry under read lock.
         {
@@ -768,18 +835,29 @@ impl ServerState {
 
         // Look up live transition table reference: try SpecRegistry first,
         // fall back to legacy map (wrapped in a fresh RwLock for compat).
-        let table = {
-            let reg = self.registry.read().unwrap();
-            reg.get_table_live(tenant, entity_type)
-        }
-        .or_else(|| {
-            // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
-            // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
-            // API is uniform. One clone per entity spawn (cheap).
-            self.transition_tables
-                .get(entity_type)
-                .map(|t| Arc::new(RwLock::new((**t).clone())))
-        })?;
+        let table = if let Some(pin) = schema_pin.as_ref() {
+            self.registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_scoped_table_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
+                .map(|table| Arc::new(RwLock::new((*table).clone())))
+        } else {
+            let live = {
+                let reg = self
+                    .registry
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                reg.get_table_live(tenant, entity_type)
+            };
+            live.or_else(|| {
+                // Legacy single-tenant: wrap the static Arc<TransitionTable> in a
+                // new RwLock. Hot-swap doesn't apply to legacy mode, but the actor
+                // API is uniform. One clone per entity spawn (cheap).
+                self.transition_tables
+                    .get(entity_type)
+                    .map(|t| Arc::new(RwLock::new((**t).clone())))
+            })
+        }?;
 
         // Build actor instance (spawn guarded below to avoid duplicate races).
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
@@ -790,6 +868,7 @@ impl ServerState {
             .lock()
             .ok()
             .and_then(|slot| slot.clone());
+        let scoped_pin = schema_pin.clone();
         let actor = match self.event_journal() {
             Some((store, backend)) => EntityActor::with_persistence(
                 entity_type,
@@ -800,13 +879,19 @@ impl ServerState {
                 backend,
             )
             .with_tenant(tenant.as_str())
+            .with_initial_reference_evidence(initial_reference_evidence.clone())
             .with_snapshot_queue(snapshot_queue)
             .with_idempotency_cache(self.idempotency_cache.clone())
             .with_blob_store(tenant_blob_store.clone()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
                 .with_tenant(tenant.as_str())
+                .with_initial_reference_evidence(initial_reference_evidence)
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
+        };
+        let actor = match schema_pin {
+            Some(pin) => actor.with_schema_pin(pin),
+            None => actor,
         };
 
         // Slow-path: atomically re-check and spawn under write lock.
@@ -824,7 +909,16 @@ impl ServerState {
 
         // Track in entity index for collection queries
         {
-            let index_key = format!("{tenant}:{entity_type}");
+            let index_key = match scoped_pin.as_ref() {
+                Some(pin) => format!(
+                    "{tenant}:{entity_type}:{}",
+                    temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                        "__index__",
+                        pin,
+                    )
+                ),
+                None => format!("{tenant}:{entity_type}"),
+            };
             let mut index = self.entity_index.write().unwrap();
             index
                 .entry(index_key)
@@ -835,6 +929,138 @@ impl ServerState {
         runtime_metrics::record_server_state_metrics(self);
 
         Some(actor_ref)
+    }
+
+    /// Sorted in-memory entity IDs for one immutable scoped bundle.
+    pub fn list_scoped_entity_ids(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) -> Vec<String> {
+        let key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "__index__",
+                schema_pin,
+            )
+        );
+        self.entity_index
+            .read()
+            .ok()
+            .and_then(|index| index.get(&key).cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
+    /// Return one deterministic bounded page of scoped entity identities.
+    pub(crate) async fn page_scoped_entity_ids(
+        &self,
+        tenant: &TenantId,
+        entity_types: &[String],
+        schema_pin: &SchemaExecutionPin,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut sorted_types = entity_types.to_vec();
+        sorted_types.sort();
+        if let Some((journal, _)) = self.event_journal() {
+            let mut result = Vec::new();
+            for entity_type in &sorted_types {
+                if after.is_some_and(|(after_type, _)| entity_type.as_str() < after_type) {
+                    continue;
+                }
+                let after_entity_id = after
+                    .filter(|(after_type, _)| *after_type == entity_type)
+                    .map(|(_, after_id)| after_id);
+                let remaining = limit.saturating_sub(result.len());
+                let ids = journal
+                    .list_scoped_entity_ids_page(
+                        tenant.as_str(),
+                        entity_type,
+                        &schema_pin.scope,
+                        &schema_pin.bundle_digest,
+                        after_entity_id,
+                        remaining,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                result.extend(ids.into_iter().map(|id| (entity_type.clone(), id)));
+                if result.len() == limit {
+                    break;
+                }
+            }
+            return Ok(result);
+        }
+        let index = self
+            .entity_index
+            .read()
+            .expect("entity index lock poisoned");
+        let mut result = Vec::new();
+        for entity_type in &sorted_types {
+            let key = format!(
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    "__index__",
+                    schema_pin,
+                )
+            );
+            let Some(ids) = index.get(&key) else {
+                continue;
+            };
+            for entity_id in ids {
+                if after.is_some_and(|cursor| (entity_type.as_str(), entity_id.as_str()) <= cursor)
+                {
+                    continue;
+                }
+                result.push((entity_type.clone(), entity_id.clone()));
+                if result.len() == limit {
+                    return Ok(result);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Stop and evict one exact scoped actor after a committed migration cutover.
+    pub(crate) fn stop_and_remove_scoped_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) {
+        let actor_key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, schema_pin,
+            )
+        );
+        if let Ok(mut registry) = self.actor_registry.write()
+            && let Some(actor_ref) = registry.remove(&actor_key)
+        {
+            let _ = actor_ref.stop();
+        }
+        if let Ok(mut last_accessed) = self.last_accessed.write() {
+            last_accessed.remove(&actor_key);
+        }
+        let index_key = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                "__index__",
+                schema_pin,
+            )
+        );
+        if let Ok(mut index) = self.entity_index.write()
+            && let Some(ids) = index.get_mut(&index_key)
+        {
+            ids.remove(entity_id);
+        }
+        runtime_metrics::record_server_state_metrics(self);
     }
 
     /// Remove an entity from the index and actor registry.
@@ -903,6 +1129,36 @@ impl ServerState {
             .get(&index_key)
             .map(|ids| ids.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Return at most `budget + 1` complete-index IDs, or `None` when obtaining
+    /// a complete index would first require an unbounded durable-store scan.
+    pub(crate) fn list_entity_ids_bounded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        budget: usize,
+    ) -> Option<Vec<String>> {
+        let index_key = format!("{tenant}:{entity_type}");
+        let complete = self.event_journal().is_none()
+            || self
+                .entity_index_hydrated
+                .read()
+                .expect("entity index hydrated lock poisoned")
+                .contains(&index_key);
+        if !complete {
+            return None;
+        }
+        let index = self.entity_index.read().unwrap();
+        Some(
+            index
+                .get(&index_key)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .take(budget.saturating_add(1))
+                .cloned()
+                .collect(),
+        )
     }
 
     /// Check authorization using a pre-built `SecurityContext`.
@@ -1008,6 +1264,148 @@ impl ServerState {
             .map_err(|e| format!("Actor query failed: {e}"))
     }
 
+    /// Get exact state through one immutable scoped actor.
+    pub async fn get_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        let pin_exists = self
+            .scoped_entity_pin_matches(tenant, entity_type, entity_id, &schema_pin)
+            .await?;
+        if !pin_exists {
+            return Err(format!(
+                "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has no durable pin for {}",
+                schema_pin.bundle_digest
+            ));
+        }
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Read a scoped entity for dispatch, initializing it only at the active pin.
+    pub(crate) async fn get_or_initialize_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.validate_scoped_entity_pin_for_dispatch(tenant, entity_type, entity_id, &schema_pin)
+            .await?;
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Validate the durable identity before any scoped dispatch selects a table or actor.
+    pub(crate) async fn validate_scoped_entity_pin_for_dispatch(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: &SchemaExecutionPin,
+    ) -> Result<(), String> {
+        let pin_exists = self
+            .scoped_entity_pin_matches(tenant, entity_type, entity_id, schema_pin)
+            .await?;
+        if !pin_exists {
+            let pin_is_active = self
+                .registry
+                .read()
+                .map_err(|_| "registry lock poisoned".to_string())?
+                .active_scope_digest(tenant, &schema_pin.scope)
+                == Some(schema_pin.bundle_digest.as_str());
+            if !pin_is_active {
+                return Err(format!(
+                    "{SCHEMA_PIN_MISMATCH_PREFIX} scoped entity '{entity_type}/{entity_id}' has no durable pin for {}",
+                    schema_pin.bundle_digest
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn query_scoped_entity_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        let actor_ref = self
+            .get_or_spawn_scoped_actor_with_fields(
+                tenant,
+                entity_type,
+                entity_id,
+                serde_json::json!({}),
+                schema_pin,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "No scoped transition table for tenant '{tenant}', entity type '{entity_type}'"
+                )
+            })?;
+        let policy = self.dispatch_retry_policy();
+        retry::ask_with_backoff::<_, EntityResponse, _>(&actor_ref, || EntityMsg::GetState, &policy)
+            .await
+            .result
+            .map_err(|error| format!("Scoped actor query failed: {error}"))
+    }
+
+    /// Read an exact migration shadow journal without granting it dispatch authority.
+    pub(crate) async fn get_scoped_migration_shadow_state(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.query_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+    }
+
+    /// Enumerate exact-digest entity IDs within a caller-supplied work budget.
+    pub(crate) async fn list_scoped_entity_ids_bounded(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        schema_pin: &SchemaExecutionPin,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        if let Some((store, _)) = self.event_journal() {
+            return store
+                .list_scoped_entity_ids_page(
+                    tenant.as_str(),
+                    entity_type,
+                    &schema_pin.scope,
+                    &schema_pin.bundle_digest,
+                    None,
+                    limit,
+                )
+                .await
+                .map_err(|error| error.to_string());
+        }
+        let prefix = format!("{tenant}:{entity_type}:");
+        let suffix =
+            temper_runtime::persistence::schema_deployment::scoped_journal_pin_suffix(schema_pin);
+        let mut ids = self
+            .actor_registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .filter_map(|key| {
+                key.strip_prefix(&prefix)
+                    .and_then(|rest| rest.strip_suffix(&suffix))
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.truncate(limit);
+        Ok(ids)
+    }
+
     /// Create a new entity with initial fields and return its state.
     #[instrument(skip_all, fields(otel.name = "entity.get_or_create_tenant_entity", tenant = %tenant, entity_type, entity_id))]
     pub async fn get_or_create_tenant_entity(
@@ -1017,8 +1415,115 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<EntityResponse, String> {
+        self.get_or_create_entity_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            None,
+        )
+        .await
+    }
+
+    /// Create or recover an entity under one exact immutable scoped bundle.
+    pub async fn get_or_create_scoped_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.get_or_create_entity_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            Some(schema_pin),
+        )
+        .await
+    }
+
+    async fn get_or_create_entity_with_schema_pin(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        schema_pin: Option<SchemaExecutionPin>,
+    ) -> Result<EntityResponse, String> {
+        let creating = match schema_pin.as_ref() {
+            Some(pin) => {
+                let exists = self
+                    .scoped_entity_pin_matches(tenant, entity_type, entity_id, pin)
+                    .await?;
+                if !exists {
+                    let active_digest = self
+                        .registry
+                        .read()
+                        .map_err(|_| "registry lock poisoned".to_string())?
+                        .active_scope_digest(tenant, &pin.scope)
+                        .map(str::to_string);
+                    if active_digest.as_deref() != Some(pin.bundle_digest.as_str()) {
+                        return Err(format!(
+                            "{SCHEMA_PIN_MISMATCH_PREFIX} bundle {} is not active for new entity '{entity_type}/{entity_id}'",
+                            pin.bundle_digest
+                        ));
+                    }
+                }
+                !exists
+            }
+            None => {
+                !self
+                    .ensure_entity_loaded(tenant, entity_type, entity_id)
+                    .await
+            }
+        };
+        let initial_reference_evidence = if creating {
+            let prepared_id = match schema_pin.as_ref() {
+                Some(pin) => {
+                    self.prepare_scoped_reference_contract_create(
+                        tenant,
+                        entity_type,
+                        Some(entity_id),
+                        &initial_fields,
+                        pin,
+                    )
+                    .await?
+                }
+                None => {
+                    self.prepare_reference_contract_create(
+                        tenant,
+                        entity_type,
+                        Some(entity_id),
+                        &initial_fields,
+                    )
+                    .await?
+                }
+            };
+            debug_assert_eq!(prepared_id.as_deref(), Some(entity_id));
+            self.resolve_reference_evidence(
+                tenant,
+                entity_type,
+                entity_id,
+                None,
+                &initial_fields,
+                schema_pin.as_ref(),
+            )
+            .await
+        } else {
+            BTreeMap::new()
+        };
+        let materialization_pin = schema_pin.clone();
         let actor_ref = self
-            .get_or_spawn_tenant_actor_with_fields(tenant, entity_type, entity_id, initial_fields)
+            .get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+                tenant,
+                entity_type,
+                entity_id,
+                initial_fields,
+                initial_reference_evidence,
+                schema_pin,
+            )
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
             })?;
@@ -1032,6 +1537,32 @@ impl ServerState {
         .await
         .result
         .map_err(|e| format!("Actor query failed: {e}"))?;
+
+        // ADR-0178: the bootstrap Created event may carry a durable timeout
+        // intent for a timed initial state. Materialize its pending lifecycle
+        // immediately and wake the same fenced recovery owner used by
+        // committed reactions.
+        if creating && self.event_journal().is_some() && response.state.sequence_nr > 0 {
+            let intents = self
+                .materialize_committed_reaction_intents(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    response.state.sequence_nr,
+                    materialization_pin.as_ref(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if !intents.is_empty()
+                && let Some(dispatcher) = self
+                    .reaction_dispatcher
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            {
+                dispatcher.notify_recovery(tenant);
+            }
+        }
 
         // Broadcast entity creation event for SSE subscribers
         let seq = self.next_entity_event_sequence(tenant.as_str(), entity_type, entity_id);
@@ -1130,11 +1661,27 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<Option<EntityResponse>, String> {
+        validate_global_entity_id(entity_id)?;
         if !initial_fields.is_object() {
             return Ok(None);
         }
         if self.is_pg_actor_backed(tenant, entity_type) {
             return Ok(None);
+        }
+
+        if !self
+            .ensure_entity_loaded(tenant, entity_type, entity_id)
+            .await
+        {
+            let prepared_id = self
+                .prepare_reference_contract_create(
+                    tenant,
+                    entity_type,
+                    Some(entity_id),
+                    &initial_fields,
+                )
+                .await?;
+            debug_assert_eq!(prepared_id.as_deref(), Some(entity_id));
         }
 
         let table = {
@@ -1408,29 +1955,67 @@ impl ServerState {
         fields: serde_json::Value,
         replace: bool,
     ) -> Result<EntityResponse, String> {
-        let response = self
-            .update_tenant_entity_fields_checked(
-                tenant,
-                entity_type,
-                entity_id,
-                fields,
-                replace,
-                None,
-            )
-            .await?;
-        if response.success {
-            Ok(response)
-        } else {
-            Err(response
-                .error
-                .clone()
-                .unwrap_or_else(|| "entity field update was rejected".to_string()))
-        }
+        self.update_tenant_entity_fields_if_sequence(
+            tenant,
+            entity_type,
+            entity_id,
+            fields,
+            replace,
+            None,
+        )
+        .await
     }
 
-    /// Update fields only if the actor still matches the state that Cedar
-    /// authorized. The comparison and mutation are serialized by the actor
-    /// mailbox, closing the read/authorize/write race.
+    /// Update fields only when the actor is still at `expected_sequence`.
+    #[instrument(skip_all, fields(otel.name = "entity.update_tenant_entity_fields_if_sequence", tenant = %tenant, entity_type, entity_id))]
+    pub async fn update_tenant_entity_fields_if_sequence(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_sequence: Option<u64>,
+    ) -> Result<EntityResponse, String> {
+        self.update_entity_fields_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            fields,
+            replace,
+            expected_sequence,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Update fields through one exact immutable scoped actor.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_scoped_entity_fields_if_sequence(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_sequence: Option<u64>,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.update_entity_fields_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            fields,
+            replace,
+            expected_sequence,
+            Some(schema_pin),
+            None,
+        )
+        .await
+    }
+
+    /// Update fields only if the global actor still matches the state Cedar authorized.
     pub(crate) async fn update_tenant_entity_fields_if_current(
         &self,
         tenant: &TenantId,
@@ -1440,37 +2025,85 @@ impl ServerState {
         replace: bool,
         expected_precondition: String,
     ) -> Result<EntityResponse, String> {
-        self.update_tenant_entity_fields_checked(
+        self.update_entity_fields_with_schema_pin(
             tenant,
             entity_type,
             entity_id,
             fields,
             replace,
+            None,
+            None,
             Some(expected_precondition),
         )
         .await
     }
 
-    async fn update_tenant_entity_fields_checked(
+    /// Update fields only if an immutable scoped actor still matches the state Cedar authorized.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_scoped_entity_fields_if_current(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
         fields: serde_json::Value,
         replace: bool,
+        schema_pin: SchemaExecutionPin,
+        expected_precondition: String,
+    ) -> Result<EntityResponse, String> {
+        self.update_entity_fields_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            fields,
+            replace,
+            None,
+            Some(schema_pin),
+            Some(expected_precondition),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_entity_fields_with_schema_pin(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        fields: serde_json::Value,
+        replace: bool,
+        expected_sequence: Option<u64>,
+        schema_pin: Option<SchemaExecutionPin>,
         expected_precondition: Option<String>,
     ) -> Result<EntityResponse, String> {
         if !fields.is_object() {
             return Err("entity field update must be a JSON object".to_string());
         }
-        let actor_ref = self
-            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
+        let reference_evidence = self
+            .resolve_reference_evidence(
+                tenant,
+                entity_type,
+                entity_id,
+                None,
+                &fields,
+                schema_pin.as_ref(),
+            )
+            .await;
+        let actor_ref = match schema_pin {
+            Some(pin) => self.get_or_spawn_scoped_actor_with_fields(
+                tenant,
+                entity_type,
+                entity_id,
+                serde_json::json!({}),
+                pin,
+            ),
+            None => self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id),
+        }
+        .ok_or_else(|| {
+            format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+        })?;
 
         let mut policy = self.dispatch_retry_policy();
-        if expected_precondition.is_some() {
+        if expected_precondition.is_some() || expected_sequence.is_some() {
             // A timed-out compare-and-set may already have committed. Retrying
             // the same precondition would turn that ambiguity into a false
             // conflict, so the caller must re-read and re-authorize instead.
@@ -1483,6 +2116,8 @@ impl ServerState {
             || EntityMsg::UpdateFields {
                 fields: fields_for_retry.clone(),
                 replace,
+                reference_evidence: reference_evidence.clone(),
+                expected_sequence,
                 expected_precondition: precondition_for_retry.clone(),
             },
             &policy,
@@ -1491,9 +2126,14 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
-        if response.success
-            && let Some(query_plane) = self.query_plane_store()
-        {
+        if !response.success {
+            return Err(response
+                .error
+                .clone()
+                .unwrap_or_else(|| "entity field update was rejected".to_string()));
+        }
+
+        if let Some(query_plane) = self.query_plane_store() {
             let status = response.state.status.clone();
             let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
             let projected_state = self.query_projection_state(&response.state);
@@ -1555,7 +2195,7 @@ impl ServerState {
         entity_id: &str,
     ) -> Result<EntityResponse, String> {
         let response = self
-            .delete_tenant_entity_checked(tenant, entity_type, entity_id, None)
+            .delete_entity_with_schema_pin(tenant, entity_type, entity_id, None, None)
             .await?;
         if response.success {
             Ok(response)
@@ -1567,7 +2207,19 @@ impl ServerState {
         }
     }
 
-    /// Delete only if the actor still matches the state Cedar authorized.
+    /// Delete through one exact immutable scoped actor.
+    pub async fn delete_scoped_entity(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, String> {
+        self.delete_entity_with_schema_pin(tenant, entity_type, entity_id, Some(schema_pin), None)
+            .await
+    }
+
+    /// Delete only if the global actor still matches the state Cedar authorized.
     pub(crate) async fn delete_tenant_entity_if_current(
         &self,
         tenant: &TenantId,
@@ -1575,27 +2227,56 @@ impl ServerState {
         entity_id: &str,
         expected_authorization_precondition: String,
     ) -> Result<EntityResponse, String> {
-        self.delete_tenant_entity_checked(
+        self.delete_entity_with_schema_pin(
             tenant,
             entity_type,
             entity_id,
+            None,
             Some(expected_authorization_precondition),
         )
         .await
     }
 
-    async fn delete_tenant_entity_checked(
+    /// Delete only if a scoped actor still matches the state Cedar authorized.
+    pub(crate) async fn delete_scoped_entity_if_current(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
+        schema_pin: SchemaExecutionPin,
+        expected_authorization_precondition: String,
+    ) -> Result<EntityResponse, String> {
+        self.delete_entity_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            Some(schema_pin),
+            Some(expected_authorization_precondition),
+        )
+        .await
+    }
+
+    async fn delete_entity_with_schema_pin(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: Option<SchemaExecutionPin>,
         expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, String> {
-        let actor_ref = self
-            .get_or_spawn_tenant_actor(tenant, entity_type, entity_id)
-            .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
-            })?;
+        let actor_ref = match schema_pin {
+            Some(pin) => self.get_or_spawn_scoped_actor_with_fields(
+                tenant,
+                entity_type,
+                entity_id,
+                serde_json::json!({}),
+                pin,
+            ),
+            None => self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id),
+        }
+        .ok_or_else(|| {
+            format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+        })?;
 
         let mut policy = self.dispatch_retry_policy();
         if expected_authorization_precondition.is_some() {
@@ -1681,6 +2362,9 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> bool {
+        if validate_global_entity_id(entity_id).is_err() {
+            return false;
+        }
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         let journal = self.event_journal();
 

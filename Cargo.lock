@@ -3582,8 +3582,6 @@ dependencies = [
 [[package]]
 name = "libsql"
 version = "0.9.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2329faffc510cc3c6b4f00169a39177cc7099d3ed7647fc92f7cf26e53a8d976"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -6719,7 +6717,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "temper-spec",
+ "temper-wasm-sdk",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -6873,11 +6874,13 @@ dependencies = [
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",
+ "temper-wasm-sdk",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
  "toml",
+ "toml_edit",
  "tower 0.5.3",
  "tracing",
  "uuid",
@@ -6975,6 +6978,7 @@ dependencies = [
  "temper-store-turso",
  "temper-verify",
  "temper-wasm",
+ "temper-wasm-sdk",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6998,6 +7002,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "toml",
  "tracing",
@@ -7015,6 +7020,7 @@ dependencies = [
  "sqlx",
  "temper-runtime",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-opentelemetry",
  "uuid",
@@ -7113,6 +7119,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "temper-observe",
+ "temper-wasm-sdk",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -7131,6 +7138,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

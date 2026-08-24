@@ -186,8 +186,14 @@ pub(super) async fn reconcile_materialized_bundle(
     let order = dependency_install_order(manifest)?;
     let mut root_result = None;
     for app_name in &order {
-        let result =
-            reconcile_os_app_from_dir(platform, tenant, app_name, &view.join(app_name)).await?;
+        let result = reconcile_os_app_from_dir(
+            platform,
+            tenant,
+            app_name,
+            &view.join(app_name),
+            Some(&manifest.bundle_digest),
+        )
+        .await?;
         if app_name == &manifest.root_app {
             root_result = Some(result);
         }

@@ -107,6 +107,8 @@ mod tests {
             counters,
             booleans: BTreeMap::new(),
             lists: BTreeMap::new(),
+            strings: BTreeMap::new(),
+            params: BTreeMap::new(),
         }
     }
 
@@ -115,6 +117,8 @@ mod tests {
             entity_name: "Order".into(),
             states: vec!["Draft".into(), "Submitted".into(), "Cancelled".into()],
             initial_state: "Draft".into(),
+            schema_digest: None,
+            state_timeouts: vec![],
             keys: vec![],
             vectors: vec![],
             rules: vec![
@@ -140,6 +144,7 @@ mod tests {
                 },
             ],
             state_var_metadata: Default::default(),
+            action_params: Default::default(),
             composite_actions: Default::default(),
             rule_index: Default::default(),
         };

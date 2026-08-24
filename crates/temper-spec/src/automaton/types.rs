@@ -17,7 +17,12 @@ use super::field_invariant::FieldInvariant;
 pub fn is_server_derived_field_name(name: &str) -> bool {
     matches!(
         name,
-        "Id" | "id" | "Status" | "status" | "has_spec" | "HasSpec"
+        "Id" | "id"
+            | "Status"
+            | "status"
+            | "has_spec"
+            | "HasSpec"
+            | "_temper_state_timeout_declaration_v1"
     ) || is_server_derived_context_status_name(name)
 }
 
@@ -91,6 +96,9 @@ pub struct KeyDecl {
     pub name: String,
     /// The property set that is unique, in canonical (hash) order.
     pub properties: Vec<String>,
+    /// Whether this key defines the entity's deterministic ID (ADR-0156).
+    #[serde(default)]
+    pub entity_id: bool,
 }
 
 /// ADR-0155: a declared vector access path on an entity. `property` names the
@@ -138,9 +146,12 @@ pub struct AutomatonMeta {
 pub struct StateVar {
     /// Variable name.
     pub name: String,
-    /// Type: "status", "counter", "set", "string", "bool".
+    /// Type: "status", "counter", "set", "string", "bool", or "ref".
     #[serde(rename = "type")]
     pub var_type: String,
+    /// Target entity type when `var_type = "ref"` (ADR-0156).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
     /// Initial value (as a string, parsed by type).
     pub initial: String,
     /// Optional per-field inline ceiling in bytes for the field-overflow
@@ -172,6 +183,9 @@ pub enum ActionParam {
         name: String,
         #[serde(rename = "type", default = "default_param_type")]
         param_type: String,
+        /// Target entity type when `param_type = "ref"` (ADR-0156).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_type: Option<String>,
     },
 }
 
@@ -190,6 +204,14 @@ impl ActionParam {
         match self {
             Self::Named(_) => "string",
             Self::Typed { param_type, .. } => param_type,
+        }
+    }
+
+    /// Return the declared target entity type for a typed reference parameter.
+    pub fn entity_type(&self) -> Option<&str> {
+        match self {
+            Self::Named(_) => None,
+            Self::Typed { entity_type, .. } => entity_type.as_deref(),
         }
     }
 }
@@ -339,6 +361,14 @@ pub enum Guard {
         /// cross-entity status precondition.
         #[serde(default)]
         required: bool,
+    },
+    /// An incoming typed reference must equal a stored typed reference.
+    #[serde(rename = "reference_equals")]
+    ReferenceEquals {
+        /// Stored typed-reference state variable.
+        reference: String,
+        /// Incoming typed-reference action parameter.
+        param: String,
     },
 }
 

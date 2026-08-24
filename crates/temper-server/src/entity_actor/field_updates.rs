@@ -12,6 +12,7 @@
 //! outcome into a reply.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 use temper_runtime::persistence::PersistenceError;
 use temper_runtime::scheduler::sim_now;
 
@@ -32,9 +33,14 @@ pub(super) async fn commit_field_update(
     state: &mut EntityState,
     fields: Value,
     replace: bool,
+    reference_evidence: BTreeMap<String, bool>,
+    expected_sequence: Option<u64>,
     expected_precondition: Option<String>,
 ) -> Result<(), String> {
     let has_precondition = expected_precondition.is_some();
+    if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
+        return Err("SequenceConflict".to_string());
+    }
     if let Some(expected) = expected_precondition
         && effects::entity_authorization_precondition(state) != expected
     {
@@ -77,7 +83,7 @@ pub(super) async fn commit_field_update(
     // Apply speculatively so the append co-commits key/vector index rows derived
     // from the NEW fields, then journal fail-closed: an update that is not
     // durable must not be acknowledged. Rolled back on failure.
-    let mut previous_fields = state.fields.clone();
+    let mut previous_state = state.clone();
     // Bind the result: `debug_assert!` does not evaluate its argument in release
     // builds, so asserting the call directly would skip the update in production.
     let applied = effects::apply_field_update(state, &fields, replace);
@@ -85,6 +91,13 @@ pub(super) async fn commit_field_update(
         applied,
         "object-ness was checked above; the apply cannot decline"
     );
+    restore_schema_pin(state, &previous_state.fields);
+    if let Err(error) =
+        validate_reference_contract(actor, &previous_state, state, &reference_evidence)
+    {
+        *state = previous_state;
+        return Err(error);
+    }
     let mut event = field_event(action, state, &fields);
 
     let (Some(store), Some(backend)) = (actor.event_journal.as_ref(), actor.event_backend) else {
@@ -95,7 +108,7 @@ pub(super) async fn commit_field_update(
     let mut attempt: u32 = 0;
     loop {
         match actor
-            .persist_event(store, backend, &actor.persistence_id(), state, &event)
+            .persist_event(store, backend, &actor.persistence_id(), state, &event, None)
             .await
         {
             Ok(_) => break,
@@ -106,16 +119,22 @@ pub(super) async fn commit_field_update(
             // Cedar never evaluated. `entity_ops` already caps preconditioned asks
             // at a single attempt for that reason; retrying here would reintroduce
             // one layer down the retry the layer above forbids.
-            Err(PersistenceError::ConcurrencyViolation { .. }) if has_precondition => {
-                state.fields = previous_fields;
-                return Err(STALE_AUTHORIZATION.to_string());
+            Err(PersistenceError::ConcurrencyViolation { .. })
+                if has_precondition || expected_sequence.is_some() =>
+            {
+                *state = previous_state;
+                return Err(if expected_sequence.is_some() {
+                    "SequenceConflict".to_string()
+                } else {
+                    STALE_AUTHORIZATION.to_string()
+                });
             }
             Err(PersistenceError::ConcurrencyViolation { actual, .. }) if attempt < MAX_RETRIES => {
                 attempt += 1;
                 match catch_up(actor, state, attempt, actual, action).await {
                     Ok(()) => {}
                     Err(reason) => {
-                        state.fields = previous_fields;
+                        *state = previous_state;
                         return Err(reason);
                     }
                 }
@@ -124,22 +143,32 @@ pub(super) async fn commit_field_update(
                 }
                 // Re-apply onto the caught-up state and rebuild the event against
                 // its (possibly new) status.
-                previous_fields = state.fields.clone();
+                previous_state = state.clone();
                 let applied = effects::apply_field_update(state, &fields, replace);
                 debug_assert!(
                     applied,
                     "object-ness was checked above; the apply cannot decline"
                 );
+                restore_schema_pin(state, &previous_state.fields);
+                if let Err(error) =
+                    validate_reference_contract(actor, &previous_state, state, &reference_evidence)
+                {
+                    *state = previous_state;
+                    return Err(error);
+                }
                 event = field_event(action, state, &fields);
             }
             Err(e) => {
-                state.fields = previous_fields;
+                *state = previous_state;
                 return Err(format!("persistence failed: {e}"));
             }
         }
     }
 
-    state.push_event_bounded(event);
+    let committed_sequence = state
+        .sequence_nr
+        .max(previous_state.sequence_nr.saturating_add(1));
+    state.record_committed_event(event, committed_sequence);
 
     let persistence_id = actor.persistence_id();
     if let Err(e) = EntityActor::maybe_save_snapshot(
@@ -176,6 +205,32 @@ fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent
         params: fields.clone(),
         idempotency_key: None,
     }
+}
+
+fn restore_schema_pin(state: &mut EntityState, previous_fields: &Value) {
+    let Some(pin) = previous_fields.get(super::actor::SCHEMA_PIN_FIELD).cloned() else {
+        return;
+    };
+    if let Some(fields) = state.fields.as_object_mut() {
+        fields.insert(super::actor::SCHEMA_PIN_FIELD.to_string(), pin);
+    }
+}
+
+fn validate_reference_contract(
+    actor: &EntityActor,
+    previous: &EntityState,
+    prospective: &EntityState,
+    evidence: &BTreeMap<String, bool>,
+) -> Result<(), String> {
+    let table = actor.table.read().expect("table lock poisoned");
+    super::reference_contract::validate_prospective_state(
+        &table,
+        super::types::FIELD_UPDATE_EVENT_TYPE,
+        previous,
+        prospective,
+        evidence,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn budget_refusal(actor: &EntityActor, state: &EntityState, replace: bool) -> Option<String> {
@@ -258,6 +313,8 @@ async fn catch_up(
         store,
         backend,
         &mut caught_up,
+        &actor.persistence_id(),
+        actor.schema_pin.as_ref(),
         &actor.tenant,
         actor.blob_store.as_ref(),
         ReplayPolicy::LenientSnapshot,

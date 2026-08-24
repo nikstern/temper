@@ -9,10 +9,10 @@ use axum::response::IntoResponse;
 use reqwest::Url;
 use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::tenant::TenantId;
-use temper_wasm::WasmHost;
 use temper_wasm::http_stream::{
     HttpRequestHead, HttpResponseHead, HttpStreamHandles, StreamError, StreamHandle,
 };
+use temper_wasm::{WasmAuthzContext, WasmHost};
 use tracing::Instrument;
 
 use crate::state::ServerState;
@@ -30,6 +30,18 @@ pub(super) struct LocalTDataWasmHost {
 }
 
 impl LocalTDataWasmHost {
+    /// Bind local TData re-entry to the immutable module identity admitted by
+    /// the WASM host gate, never to the ambient action caller or relay service.
+    pub(super) fn new_for_wasm(
+        state: ServerState,
+        tenant: TenantId,
+        wasm: &WasmAuthzContext,
+        delegate: Arc<dyn WasmHost>,
+    ) -> Self {
+        let security = crate::authz::wasm_gate::build_wasm_security_context(wasm);
+        Self::new(state, tenant, Some(&security), delegate)
+    }
+
     /// Create a local-TData wrapper around an existing host implementation.
     pub(super) fn new(
         state: ServerState,
@@ -112,6 +124,26 @@ impl LocalTDataWasmHost {
 
 #[async_trait]
 impl WasmHost for LocalTDataWasmHost {
+    fn temper_data_request_budget(&self) -> usize {
+        self.delegate.temper_data_request_budget()
+    }
+
+    fn temper_data_response_handle_budget(&self) -> usize {
+        self.delegate.temper_data_response_handle_budget()
+    }
+
+    async fn temper_data_call(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.delegate.temper_data_call(request).await
+    }
+
+    fn temper_file_stream_read(&self, handle: u32, max_bytes: usize) -> Result<Vec<u8>, i32> {
+        self.delegate.temper_file_stream_read(handle, max_bytes)
+    }
+
+    fn temper_file_stream_try_write(&self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
+        self.delegate.temper_file_stream_try_write(handle, bytes)
+    }
+
     /// Forward the delegate's per-tenant LLM content decision (ADR-0166). The
     /// production stack is `AuthorizedWasmHost(LocalTDataWasmHost(ProductionWasmHost))`,
     /// and only the innermost host holds the flag, so a wrapper that does not

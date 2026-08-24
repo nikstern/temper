@@ -12,11 +12,14 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use temper_jit::table::{Effect, EvalContext, GuardFailure, TransitionTable};
+use temper_jit::table::{Effect, EvalContext, GuardFailure, GuardFailureKind, TransitionTable};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 
 use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, OverflowBlobWrite, blob_ref_value};
 
+use super::reference_contract::{
+    equality_violation, validate_action_parameters, validate_prospective_state,
+};
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
 /// Journal event type for a PATCH-style field merge (ARN-189).
@@ -150,6 +153,13 @@ pub fn build_eval_context_with_xref(
     }
     for (k, v) in &state.lists {
         ctx.lists.insert(k.clone(), v.clone());
+    }
+    if let Some(fields) = state.fields.as_object() {
+        for (name, value) in fields {
+            if let Some(value) = value.as_str() {
+                ctx.strings.insert(name.clone(), value.to_string());
+            }
+        }
     }
     // Merge pre-resolved cross-entity state booleans
     for (k, v) in cross_entity_booleans {
@@ -295,7 +305,18 @@ pub fn process_action_with_xref_and_field_mode(
         };
     }
 
-    let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
+    if let Err(error) = validate_action_parameters(table, action, params, cross_entity_booleans) {
+        return failed_process(error.to_string());
+    }
+
+    let mut ctx = build_eval_context_with_xref(state, cross_entity_booleans);
+    if let Some(params) = params.as_object() {
+        for (name, value) in params {
+            if let Some(value) = value.as_str() {
+                ctx.params.insert(name.clone(), value.to_string());
+            }
+        }
+    }
     let result = table.evaluate_ctx(&state.status, &ctx, action);
 
     match result {
@@ -319,15 +340,31 @@ pub fn process_action_with_xref_and_field_mode(
             let sanitized_params = sanitize_action_params(effective_params.as_ref());
             let params = sanitized_params.as_ref();
 
+            // ADR-0156: evaluate every mutation against an isolated prospective
+            // state. Nothing becomes visible, durable, or dispatchable until the
+            // complete reference/identity contract has passed.
+            let mut prospective = state.clone();
             let (custom_effects, scheduled_actions, spawn_requests, schedule_at_requests) =
-                apply_effects(state, &transition_result.effects, params);
-            apply_new_state_fallback(state, &from_status, &to_status);
+                apply_effects(&mut prospective, &transition_result.effects, params);
+            apply_new_state_fallback(&mut prospective, &from_status, &to_status);
             let overflow_blobs = sync_fields_with_metadata(
-                state,
+                &mut prospective,
                 params,
                 field_sync_mode,
                 Some(&table.state_var_metadata),
             );
+
+            if let Err(error) = validate_prospective_state(
+                table,
+                action,
+                state,
+                &prospective,
+                cross_entity_booleans,
+            ) {
+                return failed_process(error.to_string());
+            }
+
+            *state = prospective;
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -365,6 +402,22 @@ pub fn process_action_with_xref_and_field_mode(
             // self-heal. A from-state miss carries no guard failure and keeps
             // the generic message.
             error: Some(match &rejected.guard_failure {
+                Some(failure) if failure.kind == GuardFailureKind::ReferenceEquals => {
+                    let reference = failure.var.as_deref().unwrap_or("reference_equals");
+                    let target_type = table
+                        .state_var_metadata
+                        .get(reference)
+                        .and_then(|metadata| metadata.entity_type.as_deref())
+                        .unwrap_or("<unknown>");
+                    equality_violation(
+                        table,
+                        action,
+                        &format!("{reference}:{target_type}"),
+                        failure.required.clone(),
+                        failure.found.clone(),
+                    )
+                    .to_string()
+                }
                 Some(failure) => render_guard_failure(action, &state.status, failure),
                 None => format!(
                     "Action '{}' not valid from state '{}'",
@@ -381,6 +434,18 @@ pub fn process_action_with_xref_and_field_mode(
             overflow_blobs: vec![],
             error: Some(format!("Unknown action: {}", action)),
         },
+    }
+}
+
+fn failed_process(error: String) -> ProcessResult {
+    ProcessResult {
+        success: false,
+        event: None,
+        custom_effects: vec![],
+        scheduled_actions: vec![],
+        spawn_requests: vec![],
+        overflow_blobs: vec![],
+        error: Some(error),
     }
 }
 
@@ -917,11 +982,19 @@ pub fn sync_fields_with_metadata(
                 {
                     continue;
                 }
-                let field_meta = state_var_metadata.and_then(|m| m.get(k.as_str()));
+                let canonical_name = state_var_metadata
+                    .and_then(|metadata| {
+                        let canonical = temper_spec::to_snake_case(k);
+                        metadata
+                            .keys()
+                            .find(|name| temper_spec::to_snake_case(name) == canonical)
+                    })
+                    .unwrap_or(k);
+                let field_meta = state_var_metadata.and_then(|m| m.get(canonical_name.as_str()));
                 obj.insert(
-                    k.clone(),
+                    canonical_name.clone(),
                     project_field_value(
-                        k,
+                        canonical_name,
                         v,
                         mode,
                         &entity_type,

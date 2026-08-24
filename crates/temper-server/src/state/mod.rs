@@ -20,7 +20,10 @@ mod projection_backfill;
 mod published_artifacts;
 mod query_projection_queue;
 pub(crate) mod rate_limit;
+mod reference_contract;
 mod runtime_metrics;
+mod schema_pin;
+pub(crate) use schema_pin::SCHEMA_PIN_MISMATCH_PREFIX;
 pub(crate) mod storage_caps;
 pub mod trajectory;
 pub mod wasm_invocation_log;
@@ -30,6 +33,7 @@ pub(crate) use dispatch::authorized_http_endpoint_host;
 #[cfg(feature = "observe")]
 pub(crate) use dispatch::internal_http_capability_issuer;
 pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
+pub(crate) use entity_ops::validate_global_entity_id;
 pub use entity_ops::{FailedLevelInfo, VerificationGateError};
 #[cfg(feature = "observe")]
 pub(crate) use file_reads::{BatchTextReadError, validate_batch_text_ids};
@@ -64,6 +68,7 @@ use temper_evolution::store::RecordStore;
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::actor::ActorRef;
+use temper_runtime::persistence::schema_deployment::{SchemaMigrationJob, SchemaMigrationStatus};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::CsdlDocument;
@@ -79,7 +84,7 @@ use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
     BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
-    QueryPlaneStore, StorageStack, TrajectorySink,
+    QueryPlaneStore, SchemaDeploymentStoreDyn, StorageStack, TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -469,6 +474,17 @@ pub struct ServerState {
     ///
     /// Wrapped in `RwLock` so hot-loaded specs can refresh reaction rules at runtime.
     pub reaction_dispatcher: Arc<RwLock<Option<Arc<ReactionDispatcher>>>>,
+    /// Generation used to retire recovery workers after a dispatcher rebuild.
+    reaction_recovery_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifetime sentinel held by server-owned state clones, but not recovery workers.
+    reaction_recovery_owner: Arc<()>,
+    /// Bounded handoff to the durable schema-migration supervisor.
+    schema_migration_supervisor_tx:
+        Arc<Mutex<Option<tokio::sync::mpsc::Sender<SchemaMigrationJob>>>>,
+    /// Generation used to retire replaced schema-migration supervisors.
+    schema_migration_supervisor_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifetime sentinel held by server-owned state clones, not the worker clone.
+    schema_migration_supervisor_owner: Arc<()>,
     /// Optional webhook dispatcher for external system notifications.
     pub webhook_dispatcher: Option<Arc<WebhookDispatcher>>,
     /// Native adapter integration registry (`type = "adapter"` dispatch path).
@@ -662,6 +678,126 @@ impl ServerState {
             }
         }
         self.storage_stack = Some(stack);
+        self.spawn_schema_migration_supervisor();
+        let dispatcher = self
+            .reaction_dispatcher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| {
+                let registry = self
+                    .registry
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .build_reaction_registry();
+                Arc::new(ReactionDispatcher::new(Arc::new(registry)))
+            });
+        if let Ok(mut slot) = self.reaction_dispatcher.write() {
+            *slot = Some(Arc::clone(&dispatcher));
+        }
+        self.spawn_reaction_recovery(dispatcher);
+    }
+
+    /// Hand one already-claimed migration to the bounded local supervisor.
+    pub(crate) fn enqueue_schema_migration(&self, job: SchemaMigrationJob) -> Result<(), String> {
+        let sender = self
+            .schema_migration_supervisor_tx
+            .lock()
+            .map_err(|_| "schema migration supervisor lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "schema migration supervisor is unavailable".to_string())?;
+        sender.try_send(job).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                "schema migration supervisor queue budget exhausted".to_string()
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                "schema migration supervisor stopped".to_string()
+            }
+        })
+    }
+
+    fn spawn_schema_migration_supervisor(&self) {
+        if self
+            .storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.as_ref())
+            .is_none()
+            || tokio::runtime::Handle::try_current().is_err()
+        {
+            return;
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+        if let Ok(mut slot) = self.schema_migration_supervisor_tx.lock() {
+            *slot = Some(sender);
+        } else {
+            return;
+        }
+        let generation = self
+            .schema_migration_supervisor_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let owner = Arc::downgrade(&self.schema_migration_supervisor_owner);
+        let mut state = self.clone();
+        state.schema_migration_supervisor_owner = Arc::new(());
+        tokio::spawn(async move {
+            // determinism-ok: production durable-work supervisor; simulation
+            // tests drive the same fenced batch method explicitly.
+            let mut scan = tokio::time::interval(std::time::Duration::from_secs(1));
+            scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                if owner.upgrade().is_none()
+                    || state
+                        .schema_migration_supervisor_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        != generation
+                {
+                    return;
+                }
+                let direct = tokio::select! { // determinism-ok: production durable-work scheduling
+                    job = receiver.recv() => job,
+                    _ = scan.tick() => None,
+                };
+                let jobs = match direct {
+                    Some(job) => vec![job],
+                    None => {
+                        let Some(store) = state
+                            .storage_stack
+                            .as_ref()
+                            .and_then(|stack| stack.schema_deployments.as_ref())
+                        else {
+                            return;
+                        };
+                        match store.list_incomplete_schema_migrations(128).await {
+                            Ok(jobs) => {
+                                let now = u64::try_from(sim_now().timestamp_millis()).unwrap_or(0);
+                                jobs.into_iter()
+                                    .filter(|job| {
+                                        job.status != SchemaMigrationStatus::Migrating
+                                            || job
+                                                .lease_expires_at
+                                                .is_some_and(|deadline| deadline <= now)
+                                    })
+                                    .collect()
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "schema migration recovery scan failed");
+                                Vec::new()
+                            }
+                        }
+                    }
+                };
+                for job in jobs {
+                    let job_id = job.command.job_id.clone();
+                    if let Err(error) =
+                        crate::schema_deployment::GovernedSchemaDeploymentService::new(&state)
+                            .drive_migration(job)
+                            .await
+                    {
+                        tracing::error!(job_id, error = %error.message(), "schema migration supervisor cycle failed");
+                    }
+                }
+            }
+        });
     }
 
     /// Return the durable query-plane capability for projection reads/writes.
@@ -683,6 +819,13 @@ impl ServerState {
         self.storage_stack
             .as_ref()
             .map(|stack| (stack.events.clone(), stack.backend))
+    }
+
+    /// Return the durable schema-deployment capability when configured.
+    pub(crate) fn schema_deployment_store(&self) -> Option<Arc<dyn SchemaDeploymentStoreDyn>> {
+        self.storage_stack
+            .as_ref()
+            .and_then(|stack| stack.schema_deployments.clone())
     }
 
     /// Return the granular Cedar policy persistence capability.
@@ -767,6 +910,11 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
+            reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reaction_recovery_owner: Arc::new(()),
+            schema_migration_supervisor_tx: Arc::new(Mutex::new(None)),
+            schema_migration_supervisor_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            schema_migration_supervisor_owner: Arc::new(()),
             webhook_dispatcher: None,
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
@@ -1024,6 +1172,11 @@ impl ServerState {
             record_store: Arc::new(RecordStore::new()),
             pg_record_store: None,
             reaction_dispatcher: Arc::new(RwLock::new(None)),
+            reaction_recovery_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reaction_recovery_owner: Arc::new(()),
+            schema_migration_supervisor_tx: Arc::new(Mutex::new(None)),
+            schema_migration_supervisor_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            schema_migration_supervisor_owner: Arc::new(()),
             webhook_dispatcher: None,
             adapter_registry: Arc::new(AdapterRegistry::with_builtins()),
             wasm_module_registry: Arc::new(RwLock::new(WasmModuleRegistry::new())),
@@ -1076,8 +1229,9 @@ impl ServerState {
     /// Attach a reaction dispatcher for cross-entity coordination.
     pub fn with_reaction_dispatcher(self, dispatcher: Arc<ReactionDispatcher>) -> Self {
         if let Ok(mut slot) = self.reaction_dispatcher.write() {
-            *slot = Some(dispatcher);
+            *slot = Some(Arc::clone(&dispatcher));
         }
+        self.spawn_reaction_recovery(dispatcher);
         self
     }
 
@@ -1089,8 +1243,118 @@ impl ServerState {
         };
         let dispatcher = Arc::new(ReactionDispatcher::new(Arc::new(reaction_registry)));
         if let Ok(mut slot) = self.reaction_dispatcher.write() {
-            *slot = Some(dispatcher);
+            *slot = Some(Arc::clone(&dispatcher));
         }
+        self.spawn_reaction_recovery(dispatcher);
+    }
+
+    fn spawn_reaction_recovery(&self, dispatcher: Arc<ReactionDispatcher>) {
+        if self.event_journal().is_none() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        // Recovery follows configured tenants, not current reaction rules:
+        // committed intents carry their immutable rule and must remain
+        // deliverable after the final live rule is removed.
+        let tenants = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tenant_ids()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if tenants.is_empty() {
+            return;
+        }
+        let generation = self
+            .reaction_recovery_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let recovery_owner = Arc::downgrade(&self.reaction_recovery_owner);
+        let mut state = self.clone();
+        // The worker must not keep its own lifetime sentinel alive. All other
+        // state is retained only until the next bounded owner check.
+        state.reaction_recovery_owner = Arc::new(());
+        // Bound-action hooks run only from the OData binding layer, never from
+        // core reaction dispatch. Platform hooks may retain a PlatformState
+        // (and therefore the original sentinel), so the worker clone must not
+        // carry this unused ownership edge.
+        state.bound_action_hook = None;
+        tokio::spawn(async move {
+            // determinism-ok: production startup recovery uses the durable
+            // event-store contract; deterministic tests invoke the same scan
+            // directly under their simulated scheduler.
+            let now = tokio::time::Instant::now(); // determinism-ok: production supervisor cadence only
+            let mut tenant_due = tenants
+                .into_iter()
+                .map(|tenant| (tenant, now))
+                .collect::<BTreeMap<_, _>>();
+            loop {
+                if recovery_owner.upgrade().is_none()
+                    || state
+                        .reaction_recovery_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        != generation
+                {
+                    return;
+                }
+                let now = tokio::time::Instant::now(); // determinism-ok: production supervisor cadence only
+                for tenant in dispatcher.take_recovery_wake_tenants() {
+                    tenant_due.insert(tenant, now);
+                }
+                let due_tenants = tenant_due
+                    .iter()
+                    .filter(|(_, due)| **due <= now)
+                    .map(|(tenant, _)| tenant.clone())
+                    .collect::<Vec<_>>();
+                if due_tenants.is_empty() {
+                    let next_due = tenant_due.values().min().copied().unwrap_or(now);
+                    tokio::select! { // determinism-ok: production recovery cadence; eligibility uses sim_now
+                        () = tokio::time::sleep_until(next_due) => {}
+                        () = dispatcher.wait_for_recovery_signal() => {}
+                    }
+                    continue;
+                }
+                for tenant in due_tenants {
+                    if recovery_owner.upgrade().is_none()
+                        || state
+                            .reaction_recovery_generation
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            != generation
+                    {
+                        return;
+                    }
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        dispatcher.recover_tenant_deliveries(&state, &tenant, 1_024),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {
+                            tenant_due.insert(
+                                tenant.clone(),
+                                tokio::time::Instant::now() // determinism-ok: production supervisor cadence only
+                                    + dispatcher.recovery_supervisor_delay(&tenant),
+                            );
+                        }
+                        Ok(Err(error)) => {
+                            tracing::error!(tenant = %tenant, %error, "reaction recovery cycle failed");
+                            tenant_due.insert(
+                                tenant.clone(),
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(1), // determinism-ok: production error backoff only
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(tenant = %tenant, "reaction recovery cycle exhausted its wall-time budget");
+                            tenant_due.insert(
+                                tenant.clone(),
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(1), // determinism-ok: production timeout backoff only
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub(crate) fn query_projection_fields(
@@ -1175,10 +1439,32 @@ impl ServerState {
     /// Return true when OData for this tenant/entity should dispatch through
     /// the Postgres actor runtime.
     pub fn is_pg_actor_backed(&self, tenant: &TenantId, entity_type: &str) -> bool {
-        self.actor_backed_types.contains(entity_type)
+        let configured = self.actor_backed_types.contains(entity_type)
             || self
                 .actor_backed_types
-                .contains(&format!("{}:{entity_type}", tenant.as_str()))
+                .contains(&format!("{}:{entity_type}", tenant.as_str()));
+        if !configured {
+            return false;
+        }
+        // The generic PG actor runtime does not carry pre-resolved target
+        // evidence. Contracted entities therefore use the canonical entity
+        // actor, whose staged pre-commit validator covers every write origin.
+        let registry = self
+            .registry
+            .read()
+            .expect("spec registry lock should not be poisoned");
+        let contracted = registry
+            .get_spec(tenant, entity_type)
+            .map(|spec| spec.table().clone())
+            .or_else(|| self.transition_tables.get(entity_type).map(Arc::clone))
+            .is_some_and(|table| {
+                table
+                    .state_var_metadata
+                    .values()
+                    .any(|metadata| metadata.var_type.as_deref() == Some("ref"))
+                    || table.keys.iter().any(|key| key.entity_id)
+            });
+        !contracted
     }
 
     /// Attach an encrypted secrets vault.

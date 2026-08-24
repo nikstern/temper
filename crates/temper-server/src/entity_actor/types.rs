@@ -11,6 +11,11 @@ use temper_runtime::actor::Message;
 
 /// Maximum unsnapshotted events an actor may replay/hot-hold before refusing new transitions.
 pub const MAX_EVENTS_SINCE_SNAPSHOT: usize = 10_000;
+/// Persistence event type reserved for transport-neutral field mutations.
+///
+/// The `$temper.` prefix is outside the IOA action identifier grammar, so a
+/// domain action cannot collide with this synthetic event during replay.
+pub(crate) const FIELD_UPDATE_EVENT_TYPE: &str = "$temper.fields.updated.v1";
 /// Backward-compatible alias for older callers; budget enforcement is tail-based.
 pub const MAX_EVENTS_PER_ENTITY: usize = MAX_EVENTS_SINCE_SNAPSHOT;
 /// Default number of recent events retained in memory per entity.
@@ -19,6 +24,8 @@ pub const RECENT_EVENTS_BUDGET_DEFAULT: usize = 50;
 pub const MAX_ITEMS_PER_ENTITY: usize = 1_000;
 /// Maximum durable idempotency keys retained per entity.
 pub const MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY: usize = 1_000;
+/// Maximum distinct durable state-timeout counters retained by one entity.
+pub const MAX_STATE_TIMEOUT_COUNTERS_PER_ENTITY: usize = 128;
 
 /// Number of recent events retained in memory per entity.
 ///
@@ -48,6 +55,10 @@ pub enum EntityMsg {
         /// Covers the race where a dispatch-layer retry produces a second
         /// in-flight ask after the first one already processed.
         idempotency_key: Option<String>,
+        /// Optional sequence precondition checked atomically by this actor.
+        expected_sequence: Option<u64>,
+        /// ADR-0158 rule and authority snapshot to co-commit with the event.
+        reaction_context: Option<Box<crate::trigger::delivery::ReactionCommitContext>>,
         /// Digest of the exact local state used for an external Cedar
         /// decision. Internal dispatches omit it.
         expected_authorization_precondition: Option<String>,
@@ -60,6 +71,10 @@ pub enum EntityMsg {
     UpdateFields {
         fields: serde_json::Value,
         replace: bool,
+        /// Durable same-tenant target-existence evidence resolved before ask.
+        reference_evidence: BTreeMap<String, bool>,
+        /// Optional sequence precondition checked before mutation.
+        expected_sequence: Option<u64>,
         /// Digest of the exact state used for an external authorization
         /// decision. The actor rejects the update if that state changed before
         /// this message reached its mailbox.
@@ -133,6 +148,30 @@ impl EntityState {
         if let Some(key) = event.idempotency_key.as_deref() {
             self.record_processed_idempotency_key(key);
         }
+        if let Some(timeout_state) = event
+            .params
+            .get(crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD)
+            .and_then(serde_json::Value::as_str)
+        {
+            let key = format!("state-timeout-occurrences:{timeout_state}");
+            let existing_timeout_counters = self
+                .processed_idempotency_keys
+                .keys()
+                .filter(|key| key.starts_with("state-timeout-occurrences:"))
+                .count();
+            assert!(
+                self.processed_idempotency_keys.contains_key(&key)
+                    || existing_timeout_counters < MAX_STATE_TIMEOUT_COUNTERS_PER_ENTITY,
+                "state-timeout occurrence counter budget exhausted"
+            );
+            let occurrences = self
+                .processed_idempotency_keys
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            self.processed_idempotency_keys.insert(key, occurrences);
+        }
         self.events.push_back(event);
 
         let budget = recent_events_budget();
@@ -141,8 +180,33 @@ impl EntityState {
         }
     }
 
+    /// Record an event only after its sequence is committed.
+    ///
+    /// Production passes the sequence returned by the event store. Simulation
+    /// and in-memory operation pass the deterministic next sequence. Keeping
+    /// this bookkeeping in one helper prevents event counts, idempotency
+    /// records, and sequence numbers from diverging between execution modes.
+    pub fn record_committed_event(&mut self, event: EntityEvent, sequence_nr: u64) {
+        assert!(
+            sequence_nr >= self.sequence_nr,
+            "committed event sequence must not move backward"
+        );
+        assert!(sequence_nr > 0, "committed event sequence must be positive");
+        self.sequence_nr = sequence_nr;
+        self.push_event_bounded(event);
+        debug_assert!(self.total_event_count > 0);
+    }
+
     pub fn has_processed_idempotency_key(&self, key: &str) -> bool {
         self.processed_idempotency_keys.contains_key(key)
+    }
+
+    /// Successful firings recorded for one exact state-timeout declaration.
+    pub fn state_timeout_occurrences(&self, timeout_state: &str) -> u64 {
+        self.processed_idempotency_keys
+            .get(&format!("state-timeout-occurrences:{timeout_state}"))
+            .copied()
+            .unwrap_or(0)
     }
 
     fn record_processed_idempotency_key(&mut self, key: &str) {
@@ -150,10 +214,17 @@ impl EntityState {
         self.processed_idempotency_keys
             .insert(key.to_string(), sequence);
 
-        while self.processed_idempotency_keys.len() > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY {
+        while self
+            .processed_idempotency_keys
+            .keys()
+            .filter(|key| !key.starts_with("state-timeout-occurrences:"))
+            .count()
+            > MAX_DURABLE_IDEMPOTENCY_KEYS_PER_ENTITY
+        {
             let Some(oldest_key) = self
                 .processed_idempotency_keys
                 .iter()
+                .filter(|(key, _)| !key.starts_with("state-timeout-occurrences:"))
                 .min_by_key(|(_, sequence)| **sequence)
                 .map(|(key, _)| key.clone())
             else {

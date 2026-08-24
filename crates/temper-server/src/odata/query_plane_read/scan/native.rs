@@ -9,7 +9,10 @@ use super::{
 use crate::odata::query_plane_read::types::{
     QueryPlaneFallbackReason, QueryPlaneReadRequest, QueryPlaneReadStrategy,
 };
-use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage};
+use crate::storage::{
+    QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexOrderTarget,
+    QueryFieldIndexPage,
+};
 
 fn native_order_by(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<QueryFieldIndexOrder>> {
     let query_options = request.query_options;
@@ -21,7 +24,11 @@ fn native_order_by(request: &QueryPlaneReadRequest<'_>) -> Option<Vec<QueryField
         .map(|clause| {
             native_order_property_is_lossless(request, &clause.property).then(|| {
                 QueryFieldIndexOrder {
-                    field_name: clause.property.clone(),
+                    target: match clause.property.as_str() {
+                        "entity_id" | "Id" | "id" => QueryFieldIndexOrderTarget::EntityId,
+                        "Status" | "status" => QueryFieldIndexOrderTarget::Status,
+                        _ => QueryFieldIndexOrderTarget::Property(clause.property.clone()),
+                    },
                     direction: match clause.direction {
                         OrderDirection::Asc => QueryFieldIndexOrderDirection::Asc,
                         OrderDirection::Desc => QueryFieldIndexOrderDirection::Desc,
@@ -112,12 +119,9 @@ async fn try_query_native_page(
     top: usize,
     include_count: bool,
 ) -> Result<Option<QueryFieldIndexPage>, ()> {
-    let Some(query_plane) = request.state.query_plane_store() else {
-        return Ok(None);
-    };
-    query_plane
-        .query_field_index_page(
-            request.tenant.as_str(),
+    crate::application_data::GovernedApplicationDataService::new(request.state)
+        .query_index_page(
+            request.tenant,
             request.entity_type,
             &plan.where_clause,
             plan.params.clone(),

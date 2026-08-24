@@ -15,6 +15,7 @@ mod install;
 mod local;
 mod mcp;
 mod migrate_turso_to_postgres;
+mod module_sdk;
 mod serve;
 mod util;
 mod verify;
@@ -94,6 +95,11 @@ enum Commands {
         /// Output directory for generated code
         #[arg(short, long, default_value = "generated")]
         output_dir: String,
+    },
+    /// Generate and bind typed Rust SDKs for local application modules.
+    ModuleSdk {
+        #[command(subcommand)]
+        command: module_sdk::Command,
     },
     /// Run the verification cascade
     Verify {
@@ -496,6 +502,7 @@ async fn async_main() -> anyhow::Result<()> {
             specs_dir,
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
+        Commands::ModuleSdk { command } => module_sdk::run(command)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
         Commands::VerifyRemote {
             specs_dir,

@@ -28,6 +28,7 @@ use std::time::Instant;
 use temper_jit::table::{Effect, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
+use temper_runtime::persistence::schema_deployment::{SchemaEventPin, SchemaExecutionPin};
 use temper_runtime::persistence::{
     COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
 };
@@ -45,6 +46,31 @@ use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
     MAX_ITEMS_PER_ENTITY,
 };
+
+/// Reserved state/event field holding immutable scoped schema evidence.
+pub const SCHEMA_PIN_FIELD: &str = "_temper_schema_pin_v1";
+
+pub(crate) fn schema_event_pin(
+    execution: &SchemaExecutionPin,
+    entity_type: &str,
+    action: &str,
+) -> SchemaEventPin {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for frame in [
+        execution.bundle_digest.as_bytes(),
+        entity_type.as_bytes(),
+        action.as_bytes(),
+    ] {
+        digest.update((frame.len() as u64).to_be_bytes());
+        digest.update(frame);
+    }
+    SchemaEventPin {
+        execution: execution.clone(),
+        action_digest: format!("sha256:{:x}", digest.finalize()),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReplayPolicy {
@@ -113,6 +139,26 @@ fn duplicate_idempotency_custom_effects(
         .unwrap_or_default()
 }
 
+fn attach_timeout_occurrence_evidence(
+    event: &mut EntityEvent,
+    reaction_context: Option<&crate::trigger::delivery::ReactionCommitContext>,
+) {
+    let Some(timeout_state) = reaction_context
+        .and_then(|context| context.receipt.as_ref())
+        .and_then(|receipt| receipt.state_timeout_state.as_ref())
+    else {
+        return;
+    };
+    let params = event
+        .params
+        .as_object_mut()
+        .expect("spec action parameters must serialize as an object");
+    params.insert(
+        crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD.to_string(),
+        serde_json::Value::String(timeout_state.clone()),
+    );
+}
+
 /// The entity actor -- processes actions through a TransitionTable.
 /// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
@@ -125,6 +171,8 @@ pub struct EntityActor {
     /// restarting the actor.
     pub(super) table: Arc<RwLock<TransitionTable>>,
     pub(super) initial_fields: serde_json::Value,
+    /// Pre-resolved durable target evidence for bootstrap creation.
+    initial_reference_evidence: BTreeMap<String, bool>,
     /// Optional event journal for persistence. None = in-memory only.
     pub(super) event_journal: Option<BoxedEventStore>,
     /// Optional async snapshot writer. Event appends remain synchronous.
@@ -139,6 +187,8 @@ pub struct EntityActor {
     idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     pub(super) blob_store: Option<crate::blob_store::BlobStore>,
+    /// Immutable scoped schema identity. `None` is tenant-global behavior.
+    pub(super) schema_pin: Option<SchemaExecutionPin>,
 }
 
 impl EntityActor {
@@ -260,12 +310,14 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
+            initial_reference_evidence: BTreeMap::new(),
             event_journal: None,
             snapshot_queue: None,
             event_backend: None,
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            schema_pin: None,
         }
     }
 
@@ -284,18 +336,40 @@ impl EntityActor {
             entity_id: entity_id.into(),
             table,
             initial_fields,
+            initial_reference_evidence: BTreeMap::new(),
             event_journal: Some(store),
             snapshot_queue: None,
             event_backend: Some(backend),
             trace_id: sim_uuid().to_string(),
             idempotency_cache: None,
             blob_store: None,
+            schema_pin: None,
         }
     }
 
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Pin this actor to one immutable task-scoped bundle.
+    pub fn with_schema_pin(mut self, pin: SchemaExecutionPin) -> Self {
+        let fields = self
+            .initial_fields
+            .as_object_mut()
+            .expect("entity initial fields must be a JSON object");
+        fields.insert(
+            SCHEMA_PIN_FIELD.to_string(),
+            serde_json::to_value(&pin).expect("schema execution pin must serialize"),
+        );
+        self.schema_pin = Some(pin);
+        self
+    }
+
+    /// Attach durable target-existence evidence for bootstrap validation.
+    pub fn with_initial_reference_evidence(mut self, evidence: BTreeMap<String, bool>) -> Self {
+        self.initial_reference_evidence = evidence;
         self
     }
 
@@ -336,7 +410,24 @@ impl EntityActor {
 
     /// Persistence ID for this entity: "tenant:EntityType:EntityId".
     pub(super) fn persistence_id(&self) -> String {
-        format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
+        match self.schema_pin.as_ref() {
+            Some(pin) => format!(
+                "{}:{}:{}",
+                self.tenant,
+                self.entity_type,
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    &self.entity_id,
+                    pin,
+                )
+            ),
+            None => format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id),
+        }
+    }
+
+    fn schema_event_pin(&self, action: &str) -> Option<SchemaEventPin> {
+        self.schema_pin
+            .as_ref()
+            .map(|execution| schema_event_pin(execution, &self.entity_type, action))
     }
 
     fn field_sync_mode_for_backend(
@@ -360,9 +451,109 @@ impl EntityActor {
         persistence_id: &str,
         state: &mut EntityState,
         event: &EntityEvent,
+        reaction_context: Option<&crate::trigger::delivery::ReactionCommitContext>,
     ) -> Result<u64, PersistenceError> {
-        let payload = serde_json::to_value(event)
+        let mut payload = serde_json::to_value(event)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        if let Some(pin) = self.schema_event_pin(&event.action) {
+            payload
+                .as_object_mut()
+                .expect("serialized entity event must be an object")
+                .insert(
+                    SCHEMA_PIN_FIELD.to_string(),
+                    serde_json::to_value(pin)
+                        .map_err(|e| PersistenceError::Serialization(e.to_string()))?,
+                );
+        }
+        let source_sequence = state.sequence_nr + 1;
+        let mut intents = Vec::new();
+        if let Some(context) = reaction_context {
+            intents.reserve(context.rules.len());
+            for (trigger_index, rule) in context.rules.iter().enumerate() {
+                let delivery_id = crate::trigger::delivery::stable_delivery_id(
+                    self.tenant.as_str(),
+                    &self.entity_type,
+                    &self.entity_id,
+                    &event.action,
+                    source_sequence,
+                    &rule.name,
+                    trigger_index,
+                );
+                let resolved_guard = context
+                    .resolved_guards
+                    .get(&rule.name)
+                    .cloned()
+                    .unwrap_or_default();
+                intents.push(crate::trigger::delivery::PersistedReactionIntent {
+                    kind: crate::trigger::delivery::DeliveryKind::Reaction,
+                    root_delivery_id: context
+                        .root_delivery_id
+                        .clone()
+                        .unwrap_or_else(|| delivery_id.clone()),
+                    delivery_id,
+                    tenant: self.tenant.to_string(),
+                    source_entity_type: self.entity_type.clone(),
+                    source_entity_id: self.entity_id.clone(),
+                    source_action: event.action.clone(),
+                    source_sequence,
+                    source_to_state: event.to_status.clone(),
+                    source_fields: state.fields.clone(),
+                    guard_passed: rule.when.guard.as_ref().is_none_or(|guard| {
+                        crate::trigger::guard::evaluate_with_resolved(
+                            guard,
+                            &state.fields,
+                            &event.to_status,
+                            &resolved_guard,
+                            &rule.name,
+                        )
+                    }),
+                    target_entity_id: crate::trigger::resolver::resolve_target_id(
+                        &rule.resolve_target,
+                        &self.entity_id,
+                        &state.fields,
+                    ),
+                    trigger_name: rule.name.clone(),
+                    trigger_index,
+                    depth: context.depth,
+                    rule: serde_json::to_value(rule)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                    authority: context.authority.clone(),
+                    created_at: event.timestamp,
+                    not_before: None,
+                    state_timeout: None,
+                    schema_pin: self.schema_event_pin(&event.action),
+                });
+            }
+            if let Some(receipt) = context.receipt.as_ref() {
+                let mut receipt = receipt.clone();
+                receipt.schema_pin = self.schema_event_pin(&event.action);
+                crate::trigger::delivery::attach_receipt(&mut payload, &receipt)
+                    .map_err(PersistenceError::Serialization)?;
+            }
+        }
+        let timeout_intents = {
+            let table = self.table.read().expect("table lock poisoned");
+            crate::trigger::delivery::state_timeout_intents(
+                crate::trigger::delivery::StateTimeoutIntentContext {
+                    tenant: self.tenant.as_str(),
+                    entity_type: &self.entity_type,
+                    entity_id: &self.entity_id,
+                    source_sequence,
+                    event,
+                    source_fields: &state.fields,
+                    table: &table,
+                    schema_pin: self.schema_event_pin(&event.action),
+                    triggering_authority: reaction_context.map(|context| &context.authority),
+                    durable_idempotency_evidence: &state.processed_idempotency_keys,
+                },
+            )
+        }
+        .map_err(PersistenceError::Serialization)?;
+        intents.extend(timeout_intents);
+        if !intents.is_empty() {
+            crate::trigger::delivery::attach_intents(&mut payload, &intents)
+                .map_err(PersistenceError::Serialization)?;
+        }
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
@@ -524,18 +715,19 @@ impl EntityActor {
     /// all state variables (status, counters, booleans). This is option 2 from
     /// the replay design: the TransitionTable is the authoritative source of
     /// effects, so replay produces the same state as the original execution.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn replay_events(
         table: &TransitionTable,
         store: &BoxedEventStore,
         backend: BackendLabel,
         state: &mut EntityState,
+        persistence_id: &str,
+        expected_schema_pin: Option<&SchemaExecutionPin>,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
         replay_policy: ReplayPolicy,
     ) -> Result<(), ActorError> {
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
-        let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
-        let persistence_id = persistence_id.as_str();
         let mut from_sequence = 0;
         let mut loaded_snapshot = false;
 
@@ -619,7 +811,44 @@ impl EntityActor {
                         continue;
                     }
 
+                    if let Some(expected_pin) = expected_schema_pin {
+                        let event_pin = env
+                            .payload
+                            .get(SCHEMA_PIN_FIELD)
+                            .cloned()
+                            .ok_or_else(|| {
+                                ActorError::custom(format!(
+                                    "scoped event {} is missing immutable schema pin",
+                                    env.sequence_nr
+                                ))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<SchemaEventPin>(value).map_err(|error| {
+                                    ActorError::custom(format!(
+                                        "scoped event {} has invalid schema pin: {error}",
+                                        env.sequence_nr
+                                    ))
+                                })
+                            })?;
+                        let expected_event_pin =
+                            schema_event_pin(expected_pin, &state.entity_type, &env.event_type);
+                        if event_pin != expected_event_pin {
+                            return Err(ActorError::custom(format!(
+                                "scoped event {} schema pin or action digest does not match actor pin",
+                                env.sequence_nr
+                            )));
+                        }
+                    }
+
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
+                    if let Ok(event) = &parsed_event
+                        && event.action != env.event_type
+                    {
+                        return Err(ActorError::custom(format!(
+                            "event {} envelope event type differs from payload action",
+                            env.sequence_nr
+                        )));
+                    }
 
                     // Tombstone is terminal: once deleted, entity must not replay
                     // into a live state. Stop at the first Deleted event.
@@ -658,8 +887,7 @@ impl EntityActor {
                                 serde_json::Value::String(state.status.clone()),
                             );
                         }
-                        state.push_event_bounded(tombstone);
-                        state.sequence_nr = env.sequence_nr;
+                        state.record_committed_event(tombstone, env.sequence_nr);
                         if replay_policy.strict_event_validation() && index + 1 != envelopes.len() {
                             return Err(ActorError::custom(format!(
                                 "journal for {}:{} contains events after terminal tombstone at sequence {}",
@@ -703,7 +931,19 @@ impl EntityActor {
                                         &state.entity_id,
                                     );
                                 }
-                                state.push_event_bounded(event);
+                                if let Some(pin) = expected_schema_pin
+                                    && let Some(fields) = state.fields.as_object_mut()
+                                {
+                                    fields.insert(
+                                        SCHEMA_PIN_FIELD.to_string(),
+                                        serde_json::to_value(pin).map_err(|error| {
+                                            ActorError::custom(format!(
+                                                "failed to restore scoped schema pin: {error}"
+                                            ))
+                                        })?,
+                                    );
+                                }
+                                state.record_committed_event(event, env.sequence_nr);
                             }
                             Err(e) => {
                                 // Honor the replay policy, like the tombstone and
@@ -733,7 +973,9 @@ impl EntityActor {
                                 );
                             }
                         }
-                        state.sequence_nr = env.sequence_nr;
+                        if state.sequence_nr < env.sequence_nr {
+                            state.sequence_nr = env.sequence_nr;
+                        }
                         continue;
                     }
 
@@ -744,8 +986,60 @@ impl EntityActor {
                                     table, state, env, &event,
                                 )?;
                             }
+                            let timeout_occurrence = event
+                                .params
+                                .get(crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD)
+                                .cloned();
                             event.params =
                                 super::effects::sanitize_action_params(&event.params).into_owned();
+                            if let (Some(params), Some(timeout_occurrence)) =
+                                (event.params.as_object_mut(), timeout_occurrence)
+                            {
+                                params.insert(
+                                    crate::trigger::delivery::STATE_TIMEOUT_OCCURRENCE_FIELD
+                                        .to_string(),
+                                    timeout_occurrence,
+                                );
+                            }
+                            if env.event_type == super::types::FIELD_UPDATE_EVENT_TYPE {
+                                if event
+                                    .params
+                                    .get("migration")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false)
+                                {
+                                    state.status = event.to_status.clone();
+                                }
+                                let replace = event
+                                    .params
+                                    .get("replace")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                let fields = event
+                                    .params
+                                    .get("fields")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                if !super::effects::apply_field_update(state, &fields, replace) {
+                                    return Err(ActorError::custom(
+                                        "persisted field update payload is not an object",
+                                    ));
+                                }
+                                if let Some(pin) = expected_schema_pin
+                                    && let Some(fields) = state.fields.as_object_mut()
+                                {
+                                    fields.insert(
+                                        SCHEMA_PIN_FIELD.to_string(),
+                                        serde_json::to_value(pin).map_err(|error| {
+                                            ActorError::custom(format!(
+                                                "failed to restore scoped schema pin: {error}"
+                                            ))
+                                        })?,
+                                    );
+                                }
+                                state.record_committed_event(event, env.sequence_nr);
+                                continue;
+                            }
                             // A persisted event is a historical fact: its guard
                             // already passed at commit time and its `to_status`
                             // is authoritative. Replay therefore re-derives the
@@ -811,7 +1105,7 @@ impl EntityActor {
                                 );
                             }
 
-                            state.push_event_bounded(event);
+                            state.record_committed_event(event, env.sequence_nr);
                         }
                         Err(e) => {
                             if replay_policy.strict_event_validation() {
@@ -834,7 +1128,9 @@ impl EntityActor {
                             tracing::warn!(tenant = %tenant, entity_type = %state.entity_type, "event replay error");
                         }
                     }
-                    state.sequence_nr = env.sequence_nr;
+                    if state.sequence_nr < env.sequence_nr {
+                        state.sequence_nr = env.sequence_nr;
+                    }
                 }
                 if !envelopes.is_empty() {
                     let replayed_tail = state
@@ -913,12 +1209,45 @@ pub(crate) async fn recover_entity_state_from_store(
     blob_store: Option<&crate::blob_store::BlobStore>,
     strict_journal_read: bool,
 ) -> Result<EntityState, ActorError> {
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    recover_entity_state_from_store_with_pin(
+        tenant,
+        entity_type,
+        entity_id,
+        table,
+        store,
+        backend,
+        initial_fields,
+        blob_store,
+        strict_journal_read,
+        &persistence_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_entity_state_from_store_with_pin(
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    store: &BoxedEventStore,
+    backend: BackendLabel,
+    initial_fields: &serde_json::Value,
+    blob_store: Option<&crate::blob_store::BlobStore>,
+    strict_journal_read: bool,
+    persistence_id: &str,
+    expected_schema_pin: Option<&SchemaExecutionPin>,
+) -> Result<EntityState, ActorError> {
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
     EntityActor::replay_events(
         table,
         store,
         backend,
         &mut state,
+        persistence_id,
+        expected_schema_pin,
         tenant,
         blob_store,
         if strict_journal_read {
@@ -954,6 +1283,8 @@ pub(crate) async fn recover_authoritative_entity_state_from_store(
         store,
         backend,
         &mut state,
+        &format!("{tenant}:{entity_type}:{entity_id}"),
+        None,
         tenant,
         blob_store,
         ReplayPolicy::StrictFullJournal,
@@ -982,7 +1313,7 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
-            state = recover_entity_state_from_store(
+            state = recover_entity_state_from_store_with_pin(
                 &self.tenant,
                 &self.entity_type,
                 &self.entity_id,
@@ -992,8 +1323,47 @@ impl Actor for EntityActor {
                 &self.initial_fields,
                 self.blob_store.as_ref(),
                 false, // hydration: keep serving on a transient journal read failure
+                &self.persistence_id(),
+                self.schema_pin.as_ref(),
             )
             .await?;
+        }
+
+        if let Some(expected_pin) = self.schema_pin.as_ref() {
+            let recovered_pin = state
+                .fields
+                .get(SCHEMA_PIN_FIELD)
+                .cloned()
+                .ok_or_else(|| ActorError::custom("scoped entity state is missing schema pin"))
+                .and_then(|value| {
+                    serde_json::from_value::<SchemaExecutionPin>(value).map_err(|error| {
+                        ActorError::custom(format!(
+                            "scoped entity state has invalid schema pin: {error}"
+                        ))
+                    })
+                })?;
+            if &recovered_pin != expected_pin {
+                return Err(ActorError::custom(
+                    "scoped entity state schema pin does not match actor pin",
+                ));
+            }
+        }
+
+        if state.total_event_count == 0 {
+            let empty = Self::build_initial_state(
+                &self.entity_type,
+                &self.entity_id,
+                &table,
+                &serde_json::json!({}),
+            );
+            super::reference_contract::validate_prospective_state(
+                &table,
+                "Create",
+                &empty,
+                &state,
+                &self.initial_reference_evidence,
+            )
+            .map_err(|error| ActorError::custom(error.to_string()))?;
         }
 
         // Persist a bootstrap Created event for first-time entities so initial
@@ -1012,16 +1382,24 @@ impl Actor for EntityActor {
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
-                    .await
-                    .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
-                    })?;
+                self.persist_event(
+                    store,
+                    backend,
+                    &self.persistence_id(),
+                    &mut state,
+                    &created,
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    ActorError::custom(format!(
+                        "failed to persist bootstrap Created event for {}:{}: {}",
+                        self.entity_type, self.entity_id, e
+                    ))
+                })?;
             }
-            state.push_event_bounded(created);
+            let committed_sequence = state.sequence_nr.max(1);
+            state.record_committed_event(created, committed_sequence);
         }
 
         Ok(state)
@@ -1039,6 +1417,8 @@ impl Actor for EntityActor {
                 params,
                 cross_entity_booleans,
                 idempotency_key,
+                expected_sequence,
+                reaction_context,
                 expected_authorization_precondition,
             } => {
                 // Capture start time for span duration (DST-safe: sim_now()
@@ -1110,6 +1490,18 @@ impl Actor for EntityActor {
                         state: response_state,
                         error: None,
                         custom_effects,
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                    });
+                    return Ok(());
+                }
+                if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
+                    ctx.reply(EntityResponse {
+                        success: false,
+                        state: state.clone(),
+                        error: Some("SequenceConflict".into()),
+                        custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
@@ -1221,6 +1613,7 @@ impl Actor for EntityActor {
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                     event.idempotency_key = idempotency_key.clone();
+                    attach_timeout_occurrence_evidence(&mut event, reaction_context.as_deref());
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -1251,7 +1644,14 @@ impl Actor for EntityActor {
                         (self.event_journal.as_ref(), self.event_backend)
                     {
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                &self.persistence_id(),
+                                state,
+                                &event,
+                                reaction_context.as_deref(),
+                            )
                             .await;
 
                         match first_persist {
@@ -1262,6 +1662,19 @@ impl Actor for EntityActor {
                                 expected: _,
                                 actual,
                             }) => {
+                                if expected_sequence.is_some() {
+                                    *state = state_before;
+                                    ctx.reply(EntityResponse {
+                                        success: false,
+                                        state: state.clone(),
+                                        error: Some("SequenceConflict".into()),
+                                        custom_effects: vec![],
+                                        scheduled_actions: vec![],
+                                        spawn_requests: vec![],
+                                        spec_governed: true,
+                                    });
+                                    return Ok(());
+                                }
                                 // ADR-0046 Sub-Decision 3: dedicated APM span
                                 // covering the retry cycle. `attempts` and
                                 // `outcome` are recorded at the end so Datadog
@@ -1312,6 +1725,8 @@ impl Actor for EntityActor {
                                         store,
                                         backend,
                                         state,
+                                        &self.persistence_id(),
+                                        self.schema_pin.as_ref(),
                                         &self.tenant,
                                         self.blob_store.as_ref(),
                                         // Actor hydration keeps the lenient "start
@@ -1370,6 +1785,10 @@ impl Actor for EntityActor {
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                                     let mut retry_event = retry_event;
                                     retry_event.idempotency_key = idempotency_key.clone();
+                                    attach_timeout_occurrence_evidence(
+                                        &mut retry_event,
+                                        reaction_context.as_deref(),
+                                    );
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()
@@ -1402,6 +1821,7 @@ impl Actor for EntityActor {
                                             &self.persistence_id(),
                                             state,
                                             &retry_event,
+                                            reaction_context.as_deref(),
                                         )
                                         .await
                                     {
@@ -1529,7 +1949,12 @@ impl Actor for EntityActor {
                     wide_event::emit_span(&wide);
                     wide_event::emit_metrics(&wide);
 
-                    state.push_event_bounded(event);
+                    let committed_sequence = if self.event_journal.is_some() {
+                        state.sequence_nr
+                    } else {
+                        state.sequence_nr.saturating_add(1)
+                    };
+                    state.record_committed_event(event, committed_sequence);
 
                     let persistence_id = self.persistence_id();
                     if let Some(ref store) = self.event_journal
@@ -1665,6 +2090,8 @@ impl Actor for EntityActor {
             EntityMsg::UpdateFields {
                 fields,
                 replace,
+                reference_evidence,
+                expected_sequence,
                 expected_precondition,
             } => {
                 // The whole durable transaction — validation, budget, journal
@@ -1675,6 +2102,8 @@ impl Actor for EntityActor {
                     state,
                     fields,
                     replace,
+                    reference_evidence,
+                    expected_sequence,
                     expected_precondition,
                 )
                 .await;
@@ -1721,7 +2150,14 @@ impl Actor for EntityActor {
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .persist_event(
+                            store,
+                            backend,
+                            &self.persistence_id(),
+                            state,
+                            &deleted,
+                            None,
+                        )
                         .await
                 {
                     ctx.reply(EntityResponse {
@@ -1743,7 +2179,12 @@ impl Actor for EntityActor {
                         serde_json::Value::String(state.status.clone()),
                     );
                 }
-                state.push_event_bounded(deleted);
+                let committed_sequence = if self.event_journal.is_some() {
+                    state.sequence_nr
+                } else {
+                    state.sequence_nr.saturating_add(1)
+                };
+                state.record_committed_event(deleted, committed_sequence);
 
                 ctx.reply(EntityResponse {
                     success: true,

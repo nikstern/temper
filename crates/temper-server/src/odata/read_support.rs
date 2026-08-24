@@ -297,8 +297,8 @@ pub(super) async fn materialize_entity_set_entities(
                     };
                     return Some(entity);
                 }
-                match state
-                    .get_tenant_entity_state(&tenant, &entity_type, &id)
+                match crate::application_data::GovernedApplicationDataService::new(&state)
+                    .get(&tenant, &entity_type, &id)
                     .await
                 {
                     Ok(response) => {
@@ -453,29 +453,6 @@ pub(super) fn select_entity_ids_for_materialization(
         apply_options,
         precomputed_count,
     })
-}
-
-/// Resolve an entity set name from an entity type name.
-///
-/// Reverse-lookups the entity_set_map to find the set name for a given type.
-pub(super) fn resolve_entity_set_name(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-) -> String {
-    let registry = state
-        .registry
-        .read()
-        .expect("registry lock should not be poisoned"); // ci-ok: infallible lock
-    if let Some(tc) = registry.get_tenant(tenant) {
-        for (set_name, type_name) in &tc.entity_set_map {
-            if type_name == entity_type {
-                return set_name.clone();
-            }
-        }
-    }
-    // Fallback: pluralize entity type
-    format!("{entity_type}s")
 }
 
 /// Record a trajectory entry for an EntitySetNotFound error.

@@ -77,6 +77,10 @@ pub fn build_router(state: ServerState) -> Router {
 
     let router = Router::new()
         .nest("/tdata", tdata)
+        .nest(
+            "/api/v1/schema-deployments",
+            crate::schema_deployment::router(),
+        )
         .nest("/_admin", crate::admin::build_admin_router())
         .route("/temper-client.js", get(serve_temper_client))
         .route("/static/temper-client.js", get(serve_temper_client))
@@ -126,6 +130,10 @@ pub fn build_router(state: ServerState) -> Router {
             HeaderName::from_static("x-repository-id"),
             HeaderName::from_static("x-expected-object-id"),
             HeaderName::from_static("idempotency-key"),
+            HeaderName::from_static("x-temper-schema-scope-kind"),
+            HeaderName::from_static("x-temper-schema-scope-id"),
+            HeaderName::from_static("x-temper-schema-bundle-digest"),
+            HeaderName::from_static("x-temper-request-id"),
         ]);
 
     router
@@ -417,7 +425,6 @@ async fn dispatch_matched_route(
         &route.route.integration_module,
         &ctx,
         streams.clone(),
-        authenticated.security_context(),
     ) {
         Ok(host) => host,
         Err(error) => {

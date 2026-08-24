@@ -7,7 +7,7 @@ use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_acti
 use crate::events::EntityStateChange;
 
 use super::file_writes::content_hash_and_native_blob_key;
-use super::{FileStreamContentError, ServerState};
+use super::{FileStreamContentError, ServerState, validate_global_entity_id};
 
 impl ServerState {
     /// Create a brand-new TemperFS `File` and persist its first stream bytes as
@@ -52,6 +52,7 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
+        validate_global_entity_id(file_id).map_err(FileStreamContentError::ActionRejected)?;
         if self.ensure_entity_loaded(tenant, "File", file_id).await {
             return Err(FileStreamContentError::ActionRejected(format!(
                 "File('{file_id}') already exists; use File $value update for existing content"
@@ -64,6 +65,21 @@ impl ServerState {
             ));
         };
         let table = self.file_transition_table(tenant)?;
+        let prepared_id = self
+            .prepare_reference_contract_create(tenant, "File", Some(file_id), &create_params)
+            .await
+            .map_err(FileStreamContentError::ActionRejected)?;
+        debug_assert_eq!(prepared_id.as_deref(), Some(file_id));
+        let reference_evidence = self
+            .resolve_reference_evidence(
+                tenant,
+                "File",
+                file_id,
+                Some("Create"),
+                &create_params,
+                None,
+            )
+            .await;
 
         // Reject a brand-new File whose target Workspace is not Active BEFORE
         // persisting any bytes. `workspace_id` arrives in the create params on
@@ -99,13 +115,17 @@ impl ServerState {
         };
         push_synthetic_event(&mut state, &mut events, created);
 
-        let no_xref = std::collections::BTreeMap::new();
         if create_params
             .as_object()
             .is_some_and(|params| !params.is_empty())
         {
-            let create_event =
-                apply_synthetic_file_action(&mut state, &table, "Create", create_params, &no_xref)?;
+            let create_event = apply_synthetic_file_action(
+                &mut state,
+                &table,
+                "Create",
+                create_params,
+                &reference_evidence,
+            )?;
             push_synthetic_event(&mut state, &mut events, create_event);
         }
 
@@ -133,6 +153,7 @@ impl ServerState {
         // holds — pass `true`.
         let mut stream_xref = std::collections::BTreeMap::new();
         stream_xref.insert("__xref:Workspace:workspace_id".to_string(), true);
+        stream_xref.extend(reference_evidence);
         let stream_event = apply_synthetic_file_action(
             &mut state,
             &table,

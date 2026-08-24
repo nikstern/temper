@@ -1,4 +1,7 @@
+mod reference;
+
 use crate::request_context::AgentContext;
+use temper_runtime::persistence::schema_deployment::SchemaExecutionPin;
 use temper_runtime::tenant::TenantId;
 use tracing::Instrument;
 
@@ -11,6 +14,66 @@ use tracing::Instrument;
 type CrossGuardSpec = (String, String, Vec<String>, Vec<String>, bool);
 
 impl crate::state::ServerState {
+    pub(crate) async fn durable_reference_target_exists(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> bool {
+        if let Some((store, _backend)) = self.event_journal() {
+            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+            let Ok(events) = store.read_events(&persistence_id, 0).await else {
+                return false;
+            };
+            if events.is_empty()
+                || events
+                    .last()
+                    .is_some_and(|event| event.event_type == "Deleted")
+            {
+                return false;
+            }
+        } else if !self.entity_exists(tenant, entity_type, entity_id) {
+            return false;
+        }
+        self.ensure_entity_loaded(tenant, entity_type, entity_id)
+            .await
+    }
+
+    pub(crate) async fn scoped_reference_target_exists(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        pin: &SchemaExecutionPin,
+    ) -> bool {
+        let Some((store, _)) = self.event_journal() else {
+            let actor_key = format!(
+                "{tenant}:{entity_type}:{}",
+                temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                    entity_id, pin,
+                )
+            );
+            return self
+                .actor_registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&actor_key);
+        };
+        let persistence_id = format!(
+            "{tenant}:{entity_type}:{}",
+            temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                entity_id, pin
+            )
+        );
+        let Ok(events) = store.read_events(&persistence_id, 0).await else {
+            return false;
+        };
+        !events.is_empty()
+            && events
+                .last()
+                .is_none_or(|event| event.event_type != "Deleted")
+    }
+
     /// Pre-resolve cross-entity state guards for an action.
     ///
     /// Reads the TransitionTable, walks rules for the given action, and for each
@@ -22,6 +85,7 @@ impl crate::state::ServerState {
         entity_type: &str,
         entity_id: &str,
         action: &str,
+        schema_pin: Option<&SchemaExecutionPin>,
     ) -> std::collections::BTreeMap<String, bool> {
         use crate::entity_actor::effects::MAX_CROSS_ENTITY_LOOKUPS;
 
@@ -30,10 +94,20 @@ impl crate::state::ServerState {
         // Get the transition table to find cross-entity guards.
         let cross_guards: Vec<CrossGuardSpec> = {
             let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-            let Some(spec) = registry.get_spec(tenant, entity_type) else {
+            let table = match schema_pin {
+                Some(pin) => registry.get_scoped_table_at_digest(
+                    tenant,
+                    &pin.scope,
+                    &pin.bundle_digest,
+                    entity_type,
+                ),
+                None => registry
+                    .get_spec(tenant, entity_type)
+                    .map(|spec| spec.table()),
+            };
+            let Some(table) = table else {
                 return result;
             };
-            let table = spec.table();
 
             // Collect CrossEntityStateIn guards from rules matching this action
             let mut guards = Vec::new();
@@ -50,10 +124,17 @@ impl crate::state::ServerState {
         }
 
         // Get current entity fields to resolve target entity IDs
-        let current_fields = match self
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-        {
+        let current_response = match schema_pin {
+            Some(pin) => {
+                self.get_scoped_entity_state(tenant, entity_type, entity_id, pin.clone())
+                    .await
+            }
+            None => {
+                self.get_tenant_entity_state(tenant, entity_type, entity_id)
+                    .await
+            }
+        };
+        let current_fields = match current_response {
             Ok(resp) => resp.state.fields,
             Err(_) => return result,
         };
@@ -112,10 +193,18 @@ impl crate::state::ServerState {
                         all_matched = false;
                         break;
                     }
-                    if let Some(status) = self
-                        .resolve_entity_status(tenant, target_type, item_id)
-                        .await
-                    {
+                    let status = match schema_pin {
+                        Some(pin) => self
+                            .get_scoped_entity_state(tenant, target_type, item_id, pin.clone())
+                            .await
+                            .ok()
+                            .map(|response| response.state.status),
+                        None => {
+                            self.resolve_entity_status(tenant, target_type, item_id)
+                                .await
+                        }
+                    };
+                    if let Some(status) = status {
                         if !status_ok(&status, required_statuses, forbidden_statuses) {
                             all_matched = false;
                             break;
@@ -149,10 +238,18 @@ impl crate::state::ServerState {
             }
 
             lookup_count += 1;
-            if let Some(status) = self
-                .resolve_entity_status(tenant, target_type, target_id)
-                .await
-            {
+            let status = match schema_pin {
+                Some(pin) => self
+                    .get_scoped_entity_state(tenant, target_type, target_id, pin.clone())
+                    .await
+                    .ok()
+                    .map(|response| response.state.status),
+                None => {
+                    self.resolve_entity_status(tenant, target_type, target_id)
+                        .await
+                }
+            };
+            if let Some(status) = status {
                 result.insert(
                     key,
                     status_ok(&status, required_statuses, forbidden_statuses),
