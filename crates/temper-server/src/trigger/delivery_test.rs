@@ -65,6 +65,26 @@ fn intent() -> PersistedReactionIntent {
     }
 }
 
+fn timeout_intents(
+    table: &temper_jit::table::TransitionTable,
+    event: &crate::entity_actor::EntityEvent,
+    source_sequence: u64,
+    authority: Option<&serde_json::Value>,
+) -> Result<Vec<PersistedReactionIntent>, String> {
+    state_timeout_intents(super::StateTimeoutIntentContext {
+        tenant: "tenant-a",
+        entity_type: "Ticket",
+        entity_id: "ticket-1",
+        source_sequence,
+        event,
+        source_fields: &json!({"Id": "ticket-1"}),
+        table,
+        schema_pin: None,
+        triggering_authority: authority,
+        durable_idempotency_evidence: &std::collections::BTreeMap::new(),
+    })
+}
+
 #[test]
 fn timeout_intent_fixes_deadline_and_schema_to_committed_event() {
     let table = temper_jit::table::TransitionTable::from_ioa_source(TIMEOUT_IOA);
@@ -77,19 +97,7 @@ fn timeout_intent_fixes_deadline_and_schema_to_committed_event() {
         params: json!({}),
         idempotency_key: None,
     };
-    let intents = state_timeout_intents(
-        "tenant-a",
-        "Ticket",
-        "ticket-1",
-        1,
-        &event,
-        &json!({"Id": "ticket-1"}),
-        &table,
-        None,
-        None,
-        &std::collections::BTreeMap::new(),
-    )
-    .expect("timeout intent");
+    let intents = timeout_intents(&table, &event, 1, None).expect("timeout intent");
     assert_eq!(intents.len(), 1);
     let timeout = &intents[0];
     assert_eq!(timeout.kind, DeliveryKind::StateTimeout);
@@ -122,21 +130,10 @@ fn transition_timeout_retains_exact_triggering_authority() {
         None,
     ))
     .unwrap();
-    let intent = state_timeout_intents(
-        "tenant-a",
-        "Ticket",
-        "ticket-1",
-        2,
-        &event,
-        &json!({}),
-        &table,
-        None,
-        Some(&authority),
-        &std::collections::BTreeMap::new(),
-    )
-    .unwrap()
-    .pop()
-    .expect("reset should commit a timeout clock");
+    let intent = timeout_intents(&table, &event, 2, Some(&authority))
+        .unwrap()
+        .pop()
+        .expect("reset should commit a timeout clock");
     let rule: crate::trigger::ReactionRule = serde_json::from_value(intent.rule.clone()).unwrap();
 
     assert_eq!(intent.authority, authority);
@@ -159,36 +156,14 @@ fn timeout_intent_is_created_only_by_entry_or_reset_evidence() {
         idempotency_key: None,
     };
     assert!(
-        state_timeout_intents(
-            "tenant-a",
-            "Ticket",
-            "ticket-1",
-            2,
-            &same_state("Unrelated"),
-            &json!({}),
-            &table,
-            None,
-            None,
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap()
-        .is_empty()
+        timeout_intents(&table, &same_state("Unrelated"), 2, None)
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(
-        state_timeout_intents(
-            "tenant-a",
-            "Ticket",
-            "ticket-1",
-            3,
-            &same_state("Heartbeat"),
-            &json!({}),
-            &table,
-            None,
-            None,
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap()
-        .len(),
+        timeout_intents(&table, &same_state("Heartbeat"), 3, None)
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -205,21 +180,10 @@ fn timeout_deadline_remains_absolute_across_clock_skew_and_forward_jumps() {
         params: json!({}),
         idempotency_key: None,
     };
-    let intent = state_timeout_intents(
-        "tenant-a",
-        "Ticket",
-        "ticket-1",
-        1,
-        &event,
-        &json!({}),
-        &table,
-        None,
-        None,
-        &std::collections::BTreeMap::new(),
-    )
-    .unwrap()
-    .pop()
-    .expect("timeout intent");
+    let intent = timeout_intents(&table, &event, 1, None)
+        .unwrap()
+        .pop()
+        .expect("timeout intent");
     let deadline = entered_at + Duration::seconds(30);
     let mut record = ReactionDeliveryRecord::pending(intent);
 

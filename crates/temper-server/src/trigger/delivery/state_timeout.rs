@@ -52,24 +52,50 @@ pub struct StateTimeoutPrecondition {
     pub occurrence_ordinal: u64,
 }
 
+/// Committed entity evidence used to normalize generated timeout intents.
+pub struct StateTimeoutIntentContext<'a> {
+    /// Tenant owning the authoritative entity journal.
+    pub tenant: &'a str,
+    /// Entity type containing the timeout declaration.
+    pub entity_type: &'a str,
+    /// Stable entity identifier.
+    pub entity_id: &'a str,
+    /// Committed source event sequence.
+    pub source_sequence: u64,
+    /// Event that established or reset the timeout clock.
+    pub event: &'a crate::entity_actor::EntityEvent,
+    /// Authoritative fields after the source event.
+    pub source_fields: &'a serde_json::Value,
+    /// Exact transition table used for the source event.
+    pub table: &'a temper_jit::table::TransitionTable,
+    /// Exact scoped schema pin, when the entity is scope-bound.
+    pub schema_pin: Option<SchemaEventPin>,
+    /// Cedar authority that established the clock, when request-derived.
+    pub triggering_authority: Option<&'a serde_json::Value>,
+    /// Durable timeout occurrence counters reconstructed from receipts.
+    pub durable_idempotency_evidence: &'a std::collections::BTreeMap<String, u64>,
+}
+
 /// Build generated timeout intents to co-commit with one entity event.
 ///
 /// Entry, bootstrap creation, and declared `reset_on` actions each establish
 /// one new absolute clock. The exact declaration and schema identity are
 /// snapshotted so later hot swaps cannot reinterpret committed scheduling.
-#[allow(clippy::too_many_arguments)]
 pub fn state_timeout_intents(
-    tenant: &str,
-    entity_type: &str,
-    entity_id: &str,
-    source_sequence: u64,
-    event: &crate::entity_actor::EntityEvent,
-    source_fields: &serde_json::Value,
-    table: &temper_jit::table::TransitionTable,
-    schema_pin: Option<SchemaEventPin>,
-    triggering_authority: Option<&serde_json::Value>,
-    durable_idempotency_evidence: &std::collections::BTreeMap<String, u64>,
+    context: StateTimeoutIntentContext<'_>,
 ) -> Result<Vec<PersistedReactionIntent>, String> {
+    let StateTimeoutIntentContext {
+        tenant,
+        entity_type,
+        entity_id,
+        source_sequence,
+        event,
+        source_fields,
+        table,
+        schema_pin,
+        triggering_authority,
+        durable_idempotency_evidence,
+    } = context;
     if table.state_timeouts.is_empty() {
         return Ok(Vec::new());
     }

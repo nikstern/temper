@@ -534,16 +534,18 @@ impl EntityActor {
         let timeout_intents = {
             let table = self.table.read().expect("table lock poisoned");
             crate::trigger::delivery::state_timeout_intents(
-                self.tenant.as_str(),
-                &self.entity_type,
-                &self.entity_id,
-                source_sequence,
-                event,
-                &state.fields,
-                &table,
-                self.schema_event_pin(&event.action),
-                reaction_context.map(|context| &context.authority),
-                &state.processed_idempotency_keys,
+                crate::trigger::delivery::StateTimeoutIntentContext {
+                    tenant: self.tenant.as_str(),
+                    entity_type: &self.entity_type,
+                    entity_id: &self.entity_id,
+                    source_sequence,
+                    event,
+                    source_fields: &state.fields,
+                    table: &table,
+                    schema_pin: self.schema_event_pin(&event.action),
+                    triggering_authority: reaction_context.map(|context| &context.authority),
+                    durable_idempotency_evidence: &state.processed_idempotency_keys,
+                },
             )
         }
         .map_err(PersistenceError::Serialization)?;

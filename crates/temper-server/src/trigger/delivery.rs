@@ -1,7 +1,6 @@
 //! Durable reaction delivery identities and lifecycle records (ADR-0158).
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use temper_runtime::persistence::schema_deployment::SchemaEventPin;
 use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
 use temper_runtime::scheduler::{sim_now, sim_uuid};
@@ -9,11 +8,14 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use super::types::ReactionRule;
 use crate::storage::BoxedEventStore;
 
+mod identity;
 mod state_timeout;
+pub use identity::stable_delivery_id;
 pub(crate) use state_timeout::state_timeout_declaration_id;
 pub use state_timeout::{
     DeliveryKind, STATE_TIMEOUT_CLOCK_AUDIT_BUDGET, STATE_TIMEOUT_SERVICE,
-    StateTimeoutPrecondition, state_timeout_intents, transition_table_digest,
+    StateTimeoutIntentContext, StateTimeoutPrecondition, state_timeout_intents,
+    transition_table_digest,
 };
 
 /// Reserved event-payload field holding intents co-committed with a source event.
@@ -470,31 +472,6 @@ pub async fn find_delivery_record(
     Ok(Some((record, latest.sequence_nr)))
 }
 
-/// Derive a length-prefixed immutable identity for one committed delivery.
-pub fn stable_delivery_id(
-    tenant: &str,
-    source_entity_type: &str,
-    source_entity_id: &str,
-    source_action: &str,
-    source_sequence: u64,
-    trigger_name: &str,
-    trigger_index: usize,
-) -> String {
-    let mut digest = Sha256::new();
-    for component in [
-        tenant,
-        source_entity_type,
-        source_entity_id,
-        source_action,
-        trigger_name,
-    ] {
-        digest.update(component.len().to_be_bytes());
-        digest.update(component.as_bytes());
-    }
-    digest.update(source_sequence.to_be_bytes());
-    digest.update(trigger_index.to_be_bytes());
-    format!("reaction-v1-{:x}", digest.finalize())
-}
 #[cfg(test)]
 #[path = "delivery_test.rs"]
 mod tests;
