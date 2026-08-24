@@ -1,8 +1,8 @@
 use super::{
-    PersistedReactionIntent, REACTION_INTENTS_FIELD, ReactionDeliveryRecord,
+    DeliveryKind, PersistedReactionIntent, REACTION_INTENTS_FIELD, ReactionDeliveryRecord,
     ReactionDeliveryStatus, ReactionReceipt, append_delivery_record, attach_intents,
     attach_receipt, delivery_journal_id, extract_intents, extract_receipt, load_delivery_record,
-    stable_delivery_id,
+    stable_delivery_id, state_timeout_intents,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
@@ -10,10 +10,38 @@ use temper_runtime::persistence::PersistenceError;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_store_sim::SimEventStore;
 
+const TIMEOUT_IOA: &str = r#"
+[automaton]
+name = "Ticket"
+states = ["Open", "Assigned"]
+initial = "Open"
+allow_indefinite_states = ["Assigned"]
+
+[[action]]
+name = "Heartbeat"
+kind = "input"
+from = ["Open"]
+to = "Open"
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open"]
+to = "Assigned"
+
+[[state_timeout]]
+state = "Open"
+after_seconds = 30
+on_timeout = "Assign"
+reset_on = ["Heartbeat"]
+params = { reason = "deadline" }
+"#;
+
 use crate::storage::BoxedEventStore;
 
 fn intent() -> PersistedReactionIntent {
     PersistedReactionIntent {
+        kind: DeliveryKind::Reaction,
         delivery_id: "reaction-v1-a".to_string(),
         root_delivery_id: "reaction-v1-a".to_string(),
         tenant: "tenant-a".to_string(),
@@ -31,8 +59,183 @@ fn intent() -> PersistedReactionIntent {
         rule: json!({"name": "create-payment"}),
         authority: json!({"principal": {"id": "User::alice"}}),
         created_at: Utc.timestamp_opt(1_800_000_000, 0).single().unwrap(),
+        not_before: None,
+        state_timeout: None,
         schema_pin: None,
     }
+}
+
+#[test]
+fn timeout_intent_fixes_deadline_and_schema_to_committed_event() {
+    let table = temper_jit::table::TransitionTable::from_ioa_source(TIMEOUT_IOA);
+    let timestamp = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let event = crate::entity_actor::EntityEvent {
+        action: "Created".to_string(),
+        from_status: String::new(),
+        to_status: "Open".to_string(),
+        timestamp,
+        params: json!({}),
+        idempotency_key: None,
+    };
+    let intents = state_timeout_intents(
+        "tenant-a",
+        "Ticket",
+        "ticket-1",
+        1,
+        &event,
+        &json!({"Id": "ticket-1"}),
+        &table,
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("timeout intent");
+    assert_eq!(intents.len(), 1);
+    let timeout = &intents[0];
+    assert_eq!(timeout.kind, DeliveryKind::StateTimeout);
+    assert_eq!(timeout.not_before, Some(timestamp + Duration::seconds(30)));
+    assert_eq!(timeout.target_entity_id.as_deref(), Some("ticket-1"));
+    let clock = timeout.state_timeout.as_ref().expect("clock evidence");
+    assert_eq!(clock.clock_sequence, 1);
+    assert_eq!(clock.state, "Open");
+    assert!(clock.schema_digest.starts_with("sha256:"));
+
+    let pending = ReactionDeliveryRecord::pending(timeout.clone());
+    assert_eq!(pending.next_attempt_at, timeout.not_before);
+}
+
+#[test]
+fn transition_timeout_retains_exact_triggering_authority() {
+    let table = temper_jit::table::TransitionTable::from_ioa_source(TIMEOUT_IOA);
+    let timestamp = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let event = crate::entity_actor::EntityEvent {
+        action: "Heartbeat".to_string(),
+        from_status: "Open".to_string(),
+        to_status: "Open".to_string(),
+        timestamp,
+        params: json!({}),
+        idempotency_key: None,
+    };
+    let authority = serde_json::to_value(temper_authz::SecurityContext::from_resolved_identity(
+        "operator-1",
+        "operator",
+        None,
+    ))
+    .unwrap();
+    let intent = state_timeout_intents(
+        "tenant-a",
+        "Ticket",
+        "ticket-1",
+        2,
+        &event,
+        &json!({}),
+        &table,
+        None,
+        Some(&authority),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap()
+    .pop()
+    .expect("reset should commit a timeout clock");
+    let rule: crate::trigger::ReactionRule = serde_json::from_value(intent.rule.clone()).unwrap();
+
+    assert_eq!(intent.authority, authority);
+    assert_eq!(
+        rule.principal, None,
+        "synthetic rule must not replace authority"
+    );
+}
+
+#[test]
+fn timeout_intent_is_created_only_by_entry_or_reset_evidence() {
+    let table = temper_jit::table::TransitionTable::from_ioa_source(TIMEOUT_IOA);
+    let timestamp = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let same_state = |action: &str| crate::entity_actor::EntityEvent {
+        action: action.to_string(),
+        from_status: "Open".to_string(),
+        to_status: "Open".to_string(),
+        timestamp,
+        params: json!({}),
+        idempotency_key: None,
+    };
+    assert!(
+        state_timeout_intents(
+            "tenant-a",
+            "Ticket",
+            "ticket-1",
+            2,
+            &same_state("Unrelated"),
+            &json!({}),
+            &table,
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        state_timeout_intents(
+            "tenant-a",
+            "Ticket",
+            "ticket-1",
+            3,
+            &same_state("Heartbeat"),
+            &json!({}),
+            &table,
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn timeout_deadline_remains_absolute_across_clock_skew_and_forward_jumps() {
+    let table = temper_jit::table::TransitionTable::from_ioa_source(TIMEOUT_IOA);
+    let entered_at = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    let event = crate::entity_actor::EntityEvent {
+        action: "Created".to_string(),
+        from_status: String::new(),
+        to_status: "Open".to_string(),
+        timestamp: entered_at,
+        params: json!({}),
+        idempotency_key: None,
+    };
+    let intent = state_timeout_intents(
+        "tenant-a",
+        "Ticket",
+        "ticket-1",
+        1,
+        &event,
+        &json!({}),
+        &table,
+        None,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap()
+    .pop()
+    .expect("timeout intent");
+    let deadline = entered_at + Duration::seconds(30);
+    let mut record = ReactionDeliveryRecord::pending(intent);
+
+    assert!(
+        record
+            .claim(deadline - Duration::seconds(1), Duration::seconds(5))
+            .is_err(),
+        "a backward-skewed observer cannot claim before the committed deadline"
+    );
+    assert_eq!(record.next_attempt_at, Some(deadline));
+    assert_eq!(
+        record
+            .claim(deadline + Duration::hours(12), Duration::seconds(5))
+            .expect("a forward jump makes the original deadline eligible"),
+        1
+    );
 }
 
 #[test]
@@ -97,6 +300,7 @@ fn receipt_round_trips_inside_the_atomic_target_event_payload() {
         delivery_id: "reaction-v1-a".to_string(),
         fencing_token: 3,
         received_at: Utc.timestamp_opt(1_800_000_001, 0).single().unwrap(),
+        state_timeout_state: None,
         schema_pin: None,
     };
 

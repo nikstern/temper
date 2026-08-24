@@ -1,5 +1,4 @@
 //! Durable reaction delivery identities and lifecycle records (ADR-0158).
-
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,17 +9,25 @@ use temper_runtime::scheduler::{sim_now, sim_uuid};
 use super::types::ReactionRule;
 use crate::storage::BoxedEventStore;
 
+mod state_timeout;
+pub(crate) use state_timeout::state_timeout_declaration_id;
+pub use state_timeout::{
+    DeliveryKind, STATE_TIMEOUT_CLOCK_AUDIT_BUDGET, STATE_TIMEOUT_SERVICE,
+    StateTimeoutPrecondition, state_timeout_intents, transition_table_digest,
+};
+
 /// Reserved event-payload field holding intents co-committed with a source event.
 pub const REACTION_INTENTS_FIELD: &str = "_temper_reaction_intents_v1";
 /// Reserved target-event field proving one fenced delivery reached commit.
 pub const REACTION_RECEIPT_FIELD: &str = "_temper_reaction_receipt_v1";
+/// Reserved event parameter carrying durable timeout occurrence evidence.
+pub const STATE_TIMEOUT_OCCURRENCE_FIELD: &str = "_temper_state_timeout_declaration_v1";
 /// Maximum automatic delivery attempts before transient failure dead-letters.
 pub const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 /// Maximum operator-requested retries for one transient dead letter.
 pub const MAX_MANUAL_RETRIES: u32 = 3;
 /// Private synthetic entity type used for one journal per logical delivery.
 pub const REACTION_DELIVERY_ENTITY_TYPE: &str = "_ReactionDelivery";
-
 /// Bounded rule and authority snapshot supplied to the entity actor at commit.
 #[derive(Debug, Clone)]
 pub struct ReactionCommitContext {
@@ -51,6 +58,9 @@ pub struct ReactionReceipt {
     pub fencing_token: u64,
     /// Target commit time from the scheduler clock.
     pub received_at: DateTime<Utc>,
+    /// State whose successful timeout firing this receipt proves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_timeout_state: Option<String>,
     /// Exact target action schema, absent only for tenant-global compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_pin: Option<SchemaEventPin>,
@@ -59,6 +69,9 @@ pub struct ReactionReceipt {
 /// Immutable normalized reaction input committed with the source event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedReactionIntent {
+    /// Kernel delivery category.
+    #[serde(default)]
+    pub kind: DeliveryKind,
     /// Stable logical delivery identity.
     pub delivery_id: String,
     /// Root delivery identity for descendant-tree waits.
@@ -94,6 +107,12 @@ pub struct PersistedReactionIntent {
     pub authority: serde_json::Value,
     /// Logical creation time from the scheduler clock.
     pub created_at: DateTime<Utc>,
+    /// Earliest absolute scheduler time at which this delivery may be claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<DateTime<Utc>>,
+    /// State-clock evidence for generated timeout deliveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_timeout: Option<StateTimeoutPrecondition>,
     /// Exact source action schema, absent only for tenant-global compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_pin: Option<SchemaEventPin>,
@@ -148,6 +167,7 @@ pub struct ReactionDeliveryRecord {
 impl ReactionDeliveryRecord {
     /// Create the initial pending record for a committed intent.
     pub fn pending(intent: PersistedReactionIntent) -> Self {
+        let next_attempt_at = intent.not_before;
         Self {
             intent,
             status: ReactionDeliveryStatus::Pending,
@@ -155,7 +175,7 @@ impl ReactionDeliveryRecord {
             manual_retries: 0,
             fencing_token: 0,
             lease_expires_at: None,
-            next_attempt_at: None,
+            next_attempt_at,
             transient_failure: false,
             last_error: None,
         }
@@ -450,11 +470,7 @@ pub async fn find_delivery_record(
     Ok(Some((record, latest.sequence_nr)))
 }
 
-/// Derive the immutable identity of one logical reaction delivery.
-///
-/// Length-prefixing each component prevents delimiter ambiguity. The committed
-/// source sequence and registry-stable trigger name/index bind retries and
-/// restart recovery to exactly one source transition.
+/// Derive a length-prefixed immutable identity for one committed delivery.
 pub fn stable_delivery_id(
     tenant: &str,
     source_entity_type: &str,
@@ -479,7 +495,6 @@ pub fn stable_delivery_id(
     digest.update(trigger_index.to_be_bytes());
     format!("reaction-v1-{:x}", digest.finalize())
 }
-
 #[cfg(test)]
 #[path = "delivery_test.rs"]
 mod tests;

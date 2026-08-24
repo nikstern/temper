@@ -1,6 +1,6 @@
 # ADR-0178: Durable state-timeout delivery
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0056's hydration-only timeout recovery
@@ -42,7 +42,7 @@ identity, and exact schema digest. The absolute deadline is computed once as:
 `committed event scheduler timestamp + after_seconds`.
 
 The intent snapshots the target action and params, expected state, reset action
-set, source sequence, service authority, and exact schema identity. A source
+set, source sequence, exact dispatch authority, and exact schema identity. A source
 commit without its mandatory timeout intent fails closed. State exit does not
 need a second atomic write: delivery validates the later authoritative timeout
 clock before firing and records the obsolete intent as terminally skipped.
@@ -71,26 +71,47 @@ the same hard problem—turn one committed event into one later idempotent actio
 across crashes. Sharing the proven owner avoids a second lease, retry, cursor,
 and receipt implementation with subtly different failure semantics.
 
-### 3. Persist and validate the authoritative timeout clock
+### 3. Validate the authoritative timeout clock from committed evidence
 
-Entity state snapshots retain a bounded map of active timeout clocks. Replay
-updates that map from the normalized intents embedded in committed events, not
-from the currently loaded spec. Each clock records declaration identity, source
-sequence, absolute deadline, expected state, and schema digest. Entry/reset
-replaces the prior clock; state exit removes it.
+Each intent records declaration identity, source sequence, absolute deadline,
+expected state, reset actions, occurrence ordinal, and schema digest. Before
+claiming a due intent, the worker loads authoritative entity state under the
+persisted scoped journal pin and audits the bounded event tail after the
+clock-setting event. A later entry, exit, or reset makes the old delivery
+terminally skipped. The worker also
+loads the exact compiled declaration and verifies its identity, delay, target
+action, parameters, expected state, reset policy, and schema digest. A migration
+is terminally skipped, while an incompatible global schema change is terminally
+rejected rather than reinterpreted. Scoped event stores also enforce a
+migrated-source fence in the same transaction as target append. PostgreSQL locks
+all live source-migration rows in deterministic identity order before the active
+scope pointer, matching cutover's job-to-pointer order even when multiple jobs
+target one source. If append wins, cutover observes a changed source write
+version and must revalidate; if cutover wins, the retired-journal append is
+rejected and the delivery is skipped.
 
-Before claiming a due intent, the worker loads authoritative entity state under
-the persisted scoped journal pin and compares the active clock exactly. A later
-entry, exit, reset, migration, or schema change makes the old delivery terminally
-skipped or rejected. The target dispatch uses the persisted scoped bundle and
-the timeout-scheduler service principal; it never inherits a restart process's
-ambient authority.
+Transition and reset clocks persist the exact Cedar authority that established
+the clock, matching volatile-timer behavior without inheriting a restart
+process's ambient authority. Bootstrap `Created` has no request principal and
+therefore uses the explicit `timeout-scheduler` service identity; deployments
+must grant that identity only the timeout actions their schemas declare. Cedar
+denial is terminal and observable. The synthetic rule has no principal override,
+so recovery cannot silently replace either persisted authority.
 
-For pre-existing events without normalized timeout evidence, recovery may
-perform one bounded full-journal derivation from the latest authoritative entry
-or reset event and materialize the same stable intent. If it cannot prove the
-clock within budget, it records an operator-visible rejection and never grants a
-fresh deadline.
+Every successful timeout target co-commits its source state as private receipt
+evidence. Entity replay and snapshots retain a bounded counter per timed state.
+New clocks carry the next ordinal, and delivery skips ordinals beyond the exact
+declaration's `max_occurrences`. This closes the target-commit/lifecycle-ack
+crash window without an unbounded tenant or entity journal scan.
+
+The target dispatch uses the persisted scoped bundle.
+Entity snapshots remain ordinary state acceleration and are not a second timer
+source of truth.
+
+Events written by the former process-local implementation have no normalized
+intent or durable lifecycle to recover. They are not guessed into existence:
+deployment must drain those volatile timers before enabling durable ownership.
+This intentionally avoids backward compatibility with an unprovable clock.
 
 ### 4. Use absolute scheduler time and fail safe on clock anomalies
 
@@ -121,10 +142,9 @@ high-cardinality labels.
 ## Rollout Plan
 
 1. Ship readers for the additive intent/clock fields and backend-parity tests.
-2. Enable co-commit and durable delivery for new state entries and resets.
-3. Run bounded legacy recovery, alert on unprovable clocks, and verify overdue
-   drain behavior before removing durable-store volatile timer ownership.
-4. Deploy with timeout delivery dashboards and compare queued, overdue, fired,
+2. Drain process-local timers, then atomically enable co-commit and durable
+   delivery while disabling durable-store volatile timer ownership.
+3. Deploy with timeout delivery dashboards and compare queued, overdue, fired,
    skipped, rejected, and duplicate-reconciliation counts in Datadog.
 
 ## Readiness Gates
@@ -152,18 +172,21 @@ high-cardinality labels.
   lifecycle writes to the delivery journal.
 - Reaction observability now includes a distinct timeout delivery kind and must
   present it clearly rather than implying it was authored as a reaction rule.
-- Legacy clocks that cannot be proven within the recovery budget require
-  operator attention instead of being granted a convenient new budget.
+- Pre-deployment process-local clocks must be drained because they have no
+  durable identity from which recovery can be proven.
 
 ### Risks
 
 - A stale-clock check after claim but before target commit could race a state
-  change. The same target actor serializes the action, enforces the persisted
-  idempotency key and state validity, and co-commits the receipt; reconciliation
-  then determines the single terminal truth.
+  change. Delivery binds the observed target sequence into the actor command;
+  an intervening reset/exit causes an optimistic-concurrency retry and then a
+  stale-clock skip. The actor also enforces idempotency and co-commits the receipt.
 - A global hot-swap could remove the target action. Exact schema comparison
   rejects the stale intent; scoped delivery resolves the immutable retired
   bundle by digest.
+- Migration cutover could race the final target append after clock validation.
+  The append-time migrated-source fence and cutover's source-write-version check
+  serialize the two commits without blocking manual successor activation.
 - Large legacy journals could exhaust recovery work. Keyset paging and explicit
   event budgets bound each cycle; failure is observable and never extends time.
 
