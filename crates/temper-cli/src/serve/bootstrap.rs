@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -29,6 +29,36 @@ use super::storage::{
     connect_postgres_store, redact_connection_url, upsert_loaded_specs_to_postgres,
     upsert_loaded_specs_to_turso,
 };
+
+pub(super) fn resolve_data_dir(override_path: Option<PathBuf>) -> Result<PathBuf> {
+    let data_dir = override_path.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        Path::new(&home).join(".local/share/temper")
+    });
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("Failed to create data directory {}", data_dir.display()))?;
+    Ok(data_dir)
+}
+
+pub(super) fn seed_cedar_policies(
+    state: &PlatformState,
+    tenant_policy_seed: BTreeMap<String, String>,
+) {
+    for (tenant, policy_text) in &tenant_policy_seed {
+        if let Err(error) = state
+            .server
+            .authz
+            .reload_tenant_policies(tenant, policy_text)
+        {
+            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {error}");
+            continue;
+        }
+    }
+    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+    for (tenant, policy_text) in tenant_policy_seed {
+        policies.insert(tenant, policy_text);
+    }
+}
 
 /// Phase 1: Initialize the storage backend (Postgres, Turso, Redis, or memory).
 pub(super) async fn init_storage(

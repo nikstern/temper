@@ -36,46 +36,50 @@ struct LocalObserveState {
     nonce_used: Arc<AtomicBool>,
 }
 
-/// Local Observe router plus its one-use browser bootstrap URL.
-pub(super) struct LocalObserveSurface {
-    pub router: Router,
-    pub bootstrap_url: String,
-}
-
 #[derive(Deserialize)]
 struct BootstrapQuery {
     nonce: String,
 }
 
-pub(super) fn build(
+pub(super) fn install(
+    router: Router,
     port: u16,
     api_token: String,
     tenant: String,
     open_after_start: bool,
-) -> Result<LocalObserveSurface> {
+) -> Result<(Router, String)> {
     let nonce = random_secret();
     let session = random_secret();
     let bootstrap_url = format!("http://127.0.0.1:{port}/observe/bootstrap?nonce={nonce}");
     let state = LocalObserveState {
-        api_token,
+        api_token: api_token.clone(),
         base_url: format!("http://127.0.0.1:{port}"),
         tenant,
         nonce,
         session,
         nonce_used: Arc::new(AtomicBool::new(false)),
     };
-    let router = Router::new()
+    let observe_router = Router::new()
         .route("/observe", get(index))
         .route("/observe/bootstrap", get(bootstrap))
         .route("/observe/api/{*path}", get(proxy_observe))
         .with_state(state);
     if open_after_start && let Err(error) = open::that(&bootstrap_url) {
-        eprintln!("  Warning: failed to open local Observe: {error}");
+        tracing::warn!(%error, "failed to open local Observe");
     }
-    Ok(LocalObserveSurface {
-        router,
-        bootstrap_url,
-    })
+    let router = router.merge(observe_router).merge(temper_mcp::http_router(
+        temper_mcp::McpConfig {
+            temper_port: Some(port),
+            temper_url: None,
+            agent_id: None,
+            agent_type: None,
+            session_id: None,
+            api_key: Some(api_token),
+        },
+        port,
+    ));
+    let summary = format!("\n  Observe: {bootstrap_url}\n  MCP: http://127.0.0.1:{port}/mcp");
+    Ok((router, summary))
 }
 
 async fn bootstrap(

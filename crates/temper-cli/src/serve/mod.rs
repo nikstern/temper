@@ -100,18 +100,10 @@ pub async fn run(
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
     }
-    let data_dir = match data_dir_override {
-        Some(path) => path,
-        None => {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            Path::new(&home).join(".local/share/temper")
-        }
-    };
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("Failed to create data directory {}", data_dir.display()))?;
+    let data_dir = bootstrap::resolve_data_dir(data_dir_override)?;
     state.server.data_dir = data_dir.clone();
 
-    seed_cedar_policies(&state, tenant_policy_seed);
+    bootstrap::seed_cedar_policies(&state, tenant_policy_seed);
     state.server.rebuild_reaction_dispatcher();
 
     // Configure subprocess verification if requested.
@@ -284,24 +276,10 @@ pub async fn run(
     let _ = state.server.listen_port.set(actual_port);
 
     let mut router = build_platform_router(state.clone());
+    let mut local_summary = String::new();
     if let (Some(open_after_start), Some(token)) = (local_observe, state.api_token.clone()) {
-        let local_surface =
-            local_observe::build(actual_port, token.clone(), tenant.clone(), open_after_start)?;
-        router = router
-            .merge(local_surface.router)
-            .merge(temper_mcp::http_router(
-                temper_mcp::McpConfig {
-                    temper_port: Some(actual_port),
-                    temper_url: None,
-                    agent_id: None,
-                    agent_type: None,
-                    session_id: None,
-                    api_key: Some(token),
-                },
-                actual_port,
-            ));
-        println!("  Observe: {}", local_surface.bootstrap_url);
-        println!("  MCP: http://127.0.0.1:{actual_port}/mcp");
+        (router, local_summary) =
+            local_observe::install(router, actual_port, token, tenant.clone(), open_after_start)?;
     }
 
     if observe {
@@ -362,30 +340,12 @@ pub async fn run(
         }
     }
 
-    println!("Listening on http://{bind_host}:{actual_port}");
+    println!("Listening on http://{bind_host}:{actual_port}{local_summary}");
     axum::serve(listener, router)
         .await
         .context("Server error")?;
 
     Ok(())
-}
-
-fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {
-    for (tenant, policy_text) in &tenant_policy_seed {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {e}");
-            continue;
-        }
-    }
-    // Update in-memory text cache.
-    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-    for (tenant, policy_text) in tenant_policy_seed {
-        policies.insert(tenant, policy_text);
-    }
 }
 
 fn cache_platform_secret_if_present(

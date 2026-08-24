@@ -11,6 +11,69 @@ use temper_platform::app_bundles::{
     build_workspace_bundle, write_workspace_lock,
 };
 
+use crate::local_args::{AppArgs, AppCommand, CacheCommand, DevArgs, UpArgs};
+use crate::{ActorRuntimeBackend, StorageBackend, serve};
+
+/// Start the persistent local runtime.
+pub async fn run_up(args: UpArgs) -> Result<()> {
+    let data_dir = args.data_dir.map_or_else(default_data_dir, Ok)?;
+    let token = ensure_operator_credential(&data_dir)?;
+    serve::run(
+        args.port,
+        Vec::new(),
+        Vec::new(),
+        StorageBackend::Turso,
+        true,
+        ActorRuntimeBackend::Legacy,
+        Vec::new(),
+        false,
+        false,
+        None,
+        args.tenant,
+        Some(data_dir),
+        "127.0.0.1".to_string(),
+        Some(token),
+        Some(!args.no_open),
+    )
+    .await
+}
+
+/// Execute a local application bundle command.
+pub async fn run_app(args: AppArgs) -> Result<()> {
+    match args.command {
+        AppCommand::Lock { path, locals } => lock_workspace(&path, &locals),
+        AppCommand::Install {
+            path,
+            tenant,
+            url,
+            locked,
+            data_dir,
+        } => {
+            let data_dir = data_dir.map_or_else(default_data_dir, Ok)?;
+            install(&path, &tenant, &url, &data_dir, locked).await?;
+            Ok(())
+        }
+        AppCommand::Cache {
+            command:
+                CacheCommand::Gc {
+                    tenant,
+                    url,
+                    dry_run,
+                    data_dir,
+                },
+        } => {
+            let data_dir = data_dir.map_or_else(default_data_dir, Ok)?;
+            garbage_collect(&tenant, &url, &data_dir, dry_run).await
+        }
+    }
+}
+
+/// Watch a workspace and promote each verified revision.
+pub async fn run_dev(args: DevArgs) -> Result<()> {
+    let data_dir = args.data_dir.map_or_else(default_data_dir, Ok)?;
+    dev(&args.path, &args.tenant, &args.url, &data_dir).await
+}
+
 /// Return the established Temper local data directory.
 pub fn default_data_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
