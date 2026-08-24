@@ -41,6 +41,7 @@ mod tests {
             include_str!("../migrations/0010_key_index_backfill_watermark.sql"),
             include_str!("../migrations/0011_key_index_watermark_key_set.sql"),
             include_str!("../migrations/0016_evolution_tenant_ownership.sql"),
+            include_str!("../migrations/0017_installed_app_local_provenance.sql"),
         ]
         .join("\n")
         .to_lowercase();

@@ -93,25 +93,30 @@ installer to parse an archive format.
 
 ### Sub-Decision 3: Explicit local dependency lock
 
-`app.toml` continues to declare dependency names or pinned Genesis refs.
-`temper.lock.toml` records the explicit local path for each bare dependency and
-the resolved bundle digest for every member of the closure. Paths are resolved
-relative to the lock file and are never searched for by name.
+For a local workspace snapshot, `app.toml` declares dependency names and
+`temper.lock.toml` records the explicit local path plus resolved bundle digest
+for every member of the closure. Paths are resolved relative to the lock file
+and are never searched for by name. Pinned Genesis refs remain supported by
+the governed Genesis install path, which now converts the resolved closure to
+the same canonical bundle contract before installation; the local workspace
+adapter rejects mixed local/Genesis closures instead of resolving them through
+ambient state.
 
 `temper app lock --local NAME=PATH` updates the lock atomically. Normal local
 install and development rebuild the closure and refresh resolved digests after
 successful verification. `--locked` instead fails when the lock is absent,
-incomplete, or stale. A bare dependency without an explicit locked local path,
-a cached content ref, or a pinned Genesis ref is an error. Cycles, duplicate
-names, conflicting refs, and closure budget exhaustion fail before cache or
-runtime mutation.
+incomplete, or stale. A dependency without an explicit locked local path is an
+error in the local adapter; a pinned Genesis ref is an error with guidance to
+use governed `App.Install`. Cycles, duplicate names, conflicting refs, and
+closure budget exhaustion fail before cache or runtime mutation.
 
 Only resolved names, dependency edges, and content digests enter the canonical
 bundle. Local filesystem paths remain build provenance and never affect bundle
 identity.
 
 **Why this approach**: Multi-app local work remains possible without restoring
-ambient lookup or making machine-specific paths part of the installed artifact.
+ambient lookup or making machine-specific paths part of the installed artifact,
+while pinned publication dependencies retain Genesis governance.
 
 ### Sub-Decision 4: Source-neutral governed installation and provenance
 
@@ -157,9 +162,11 @@ must use the explicit hosted/server configuration for remote ingress.
 `temper app install` snapshots and uploads a canonical bundle to an existing
 daemon. `temper dev` connects to that daemon or starts an embedded one, watches
 the root and locked local dependencies, and builds an immutable revision after
-changes settle. A successful verification atomically advances the same target
-tenant to the new digest. A failed build reports the complete verification
-failure and leaves the last good digest active.
+changes settle. Verification covers the complete closure before installation
+begins. A failed build reports the complete verification failure and leaves the
+last good digest active. Installation then uses the existing governed,
+durable-first app reconciliation boundary dependency-by-dependency; the
+canonical root provenance is recorded only after the complete closure succeeds.
 
 `temper serve`, pinned Genesis installation, helper-skill installation, and the
 stdio MCP bridge remain supported. `serve --app NAME=DIR` becomes a compatibility
@@ -193,17 +200,19 @@ boundary.
 
 ### Sub-Decision 7: Embedded local Observe, separate hosted build
 
-Observe has two build targets sharing React views and API clients:
+Observe has two delivery targets sharing the same authenticated Observe HTTP
+contracts:
 
 - the existing Next.js server retains GitHub OAuth, middleware, and hosted
   proxy behavior;
-- a static local entry is embedded in the Temper binary and calls same-origin
-  APIs using the local session cookie.
+- a dependency-free diagnostic shell is embedded in the Temper binary and
+  exposes health, specs, entities, workflows, trajectories, agents, and WASM
+  views through same-origin APIs using the local session cookie.
 
-The Rust server serves the local application beneath `/observe`, including an
-SPA fallback and runtime configuration. Release packaging builds and embeds
-these assets; running a released binary never requires Node or a Temper source
-checkout.
+The Rust server serves the local shell beneath `/observe`. It is compiled into
+the Rust binary; running a released binary never requires Node or a Temper
+source checkout. The hosted React application remains the richer operational
+UI and consumes the same server contracts.
 
 **Why this approach**: Local startup becomes self-contained without removing
 the working hosted authentication path.
@@ -231,8 +240,10 @@ avoids adding a hidden session store solely for local access.
    provenance, store migrations, shared installer, and recovery.
 2. **Local lifecycle** — Land `up`, `app lock`, `app install`, `app cache gc`,
    `dev`, generated credentials, and updated scaffolding.
-3. **Local surfaces** — Embed the static Observe build and add stateless HTTP
-   MCP while retaining hosted Observe and stdio compatibility.
+3. **Local surfaces** — Embed a dependency-free Observe diagnostic surface and
+   add stateless HTTP MCP while retaining the richer hosted React Observe and
+   stdio compatibility. Both Observe surfaces use the same authenticated server
+   contracts.
 4. **Proof and documentation** — Make local-only operation the default quick
    start, run the restart E2E, and verify hosted Genesis/Observe regressions in
    the deployed system.
@@ -265,7 +276,8 @@ avoids adding a hidden session store solely for local access.
 
 ### Negative
 
-- Release builds must produce and embed a second Observe artifact.
+- The compact embedded Observe diagnostic surface is intentionally less rich
+  than the hosted React application and must track its server contracts.
 - Local installation uploads and validates all uncached bundle bytes even when
   client and server run on the same machine.
 - The manifest, cache, provenance migration, and HTTP MCP transport add

@@ -26,6 +26,7 @@ mod closure_bootstrap;
 mod entity_aliases;
 mod policy_rows;
 mod reconcile;
+mod reconcile_digest;
 mod runtime_heal;
 mod system_files;
 mod types;
@@ -45,16 +46,19 @@ use entity_aliases::{
 };
 #[cfg(test)]
 pub(super) use policy_rows::os_app_policy_row_id;
-pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
+pub use reconcile::{reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use reconcile::{
-    tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
+    reconcile_os_app_from_dir, tenant_has_active_policies_for_bundle,
+    tenant_has_registered_wasm_for_bundle,
 };
+pub(crate) use reconcile_digest::digest_app_bundle_with_version;
+pub use reconcile_digest::os_app_bundle_digest;
 pub(crate) use runtime_heal::{
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
 };
 pub use types::*;
 
-fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
+pub(crate) fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     let path = app_dir.join("app.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     toml::from_str(&content).ok()
@@ -925,7 +929,7 @@ pub fn get_app_guide(name: &str) -> Option<String> {
 }
 
 /// Load a complete app bundle from a directory on disk.
-fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
+pub(crate) fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     let manifest = read_app_manifest(app_dir)?;
     let deployment_mode = effective_app_deployment_mode(&manifest);
     let legacy_reaction_paths = [
@@ -1111,7 +1115,21 @@ pub(super) async fn install_os_app_with_plan(
             format!("OS app '{app_name}' not found in catalog (known path keys: {known:?})")
         })?
     };
-    let bundle = load_app_bundle(&app_dir).ok_or_else(|| {
+    install_os_app_from_dir_with_plan(state, tenant, app_name, &app_dir, plan).await
+}
+
+/// Install one already-validated app directory without consulting the global catalog.
+pub(crate) async fn install_os_app_from_dir_with_plan(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    app_dir: &Path,
+    plan: OsAppInstallPlan,
+) -> Result<InstallResult, String> {
+    let app_version = read_app_manifest(app_dir)
+        .ok_or_else(|| format!("OS app '{app_name}' has no valid app.toml"))?
+        .version;
+    let bundle = load_app_bundle(app_dir).ok_or_else(|| {
         format!(
             "OS app '{app_name}' is registered at '{}' but its bundle failed to load",
             app_dir.display()
@@ -1536,7 +1554,8 @@ pub(super) async fn install_os_app_with_plan(
 
     // ── Step 5: Bootstrap App entity + APP.md. ──────────────────────────
     let (agents_bootstrapped, skills_bootstrapped, adrs_bootstrapped) = if plan.content {
-        let app_id = bootstrap_app_entity(state, &tenant_id, tenant, app_name).await;
+        let app_id =
+            bootstrap_app_entity(state, &tenant_id, tenant, app_name, app_dir, &bundle).await;
 
         // ── Step 6: Bootstrap agents (returns name→uuid map). ──────────
         let (agents_bootstrapped, agent_uuid_map) = agent_bootstrap::bootstrap_agents(
@@ -1571,7 +1590,15 @@ pub(super) async fn install_os_app_with_plan(
         Vec::new()
     };
 
-    reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle).await;
+    reconcile::record_app_install_metadata_for_bundle_version(
+        state,
+        tenant,
+        app_name,
+        &app_version,
+        read_app_guide(app_dir).as_deref(),
+        &bundle,
+    )
+    .await;
 
     Ok(InstallResult {
         added,
@@ -1638,7 +1665,7 @@ async fn uploaded_wasm_replacement_context(
     else {
         return UploadedWasmReplacementContext::default();
     };
-    let digest = reconcile::digest_app_bundle(app_name, bundle);
+    let digest = reconcile_digest::digest_app_bundle(app_name, bundle);
     match ps.get_installed_app(tenant, app_name).await {
         Ok(Some(record)) => UploadedWasmReplacementContext {
             bundle_wasm_digest_changed: record.wasm_digest != digest.wasm_digest,
@@ -1672,6 +1699,8 @@ async fn bootstrap_app_entity(
     tenant_id: &TenantId,
     tenant: &str,
     app_name: &str,
+    app_dir: &Path,
+    bundle: &AppBundle,
 ) -> Option<String> {
     // Check if App entity type is registered.
     let has_apps = {
@@ -1706,10 +1735,30 @@ async fn bootstrap_app_entity(
     }
 
     // Read app manifest for metadata.
-    let manifest = {
-        let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-        cat.entries.iter().find(|e| e.name == app_name).cloned()
-    };
+    let manifest = read_app_manifest(app_dir).map(|source| {
+        let app_guide = read_app_guide(app_dir);
+        let description = if source.description.is_empty() {
+            app_guide
+                .as_deref()
+                .and_then(extract_description)
+                .unwrap_or_else(|| format!("App: {app_name}"))
+        } else {
+            source.description.clone()
+        };
+        AppEntry {
+            name: source.name,
+            description,
+            entity_types: bundle
+                .specs
+                .iter()
+                .map(|(entity_type, _)| entity_type.clone())
+                .collect(),
+            version: source.version,
+            startup_install: source.startup_install,
+            app_guide,
+            dependencies: source.dependencies,
+        }
+    });
     let description = manifest
         .as_ref()
         .map(|m| m.description.clone())

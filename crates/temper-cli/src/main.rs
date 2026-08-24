@@ -12,6 +12,7 @@ mod codegen;
 mod decide;
 mod init;
 mod install;
+mod local;
 mod mcp;
 mod migrate_turso_to_postgres;
 mod serve;
@@ -50,6 +51,41 @@ struct Cli {
 enum Commands {
     /// Initialize a new Temper project
     Init { name: String },
+    /// Run a persistent, self-contained local Temper instance.
+    Up {
+        /// Port to listen on.
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+        /// Local data directory override.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Default tenant.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Do not open Observe after startup.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Manage immutable local application bundles.
+    App {
+        #[command(subcommand)]
+        command: AppCommands,
+    },
+    /// Watch a local app and promote each verified immutable revision.
+    Dev {
+        /// App workspace path.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Target tenant.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Local Temper URL.
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+        /// Local data directory override.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Generate Rust code from specifications
     Codegen {
         /// Path to the specs directory
@@ -215,6 +251,61 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum AppCommands {
+    /// Resolve and pin explicit local dependencies.
+    Lock {
+        /// App workspace path.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Explicit local dependency mapping, repeatable as NAME=PATH.
+        #[arg(long = "local")]
+        locals: Vec<String>,
+    },
+    /// Build, verify, and install an immutable local app bundle.
+    Install {
+        /// App workspace path.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Target tenant.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Temper server URL.
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+        /// Reject a missing or stale dependency lock.
+        #[arg(long)]
+        locked: bool,
+        /// Local data directory used to discover credentials.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Maintain the local content-addressed bundle cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Remove objects unreachable from durable installation records.
+    Gc {
+        /// Target tenant used to authorize cache maintenance.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Local Temper URL.
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+        /// Report collectible objects without deleting them.
+        #[arg(long)]
+        dry_run: bool,
+        /// Local data directory used to discover credentials.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+}
+
 fn resolve_storage_backend(
     cli_storage: StorageBackend,
     storage_explicit: bool,
@@ -303,6 +394,82 @@ async fn async_main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init { name } => init::run(&name)?,
+        Commands::Up {
+            port,
+            data_dir,
+            tenant,
+            no_open,
+        } => {
+            let data_dir = match data_dir {
+                Some(path) => path,
+                None => local::default_data_dir()?,
+            };
+            let token = local::ensure_operator_credential(&data_dir)?;
+            if !no_open {
+                println!("Observe will be available from the local daemon.");
+            }
+            serve::run(
+                port,
+                Vec::new(),
+                Vec::new(),
+                StorageBackend::Turso,
+                true,
+                ActorRuntimeBackend::Legacy,
+                Vec::new(),
+                false,
+                false,
+                None,
+                tenant,
+                Some(data_dir),
+                "127.0.0.1".to_string(),
+                Some(token),
+                Some(!no_open),
+            )
+            .await?
+        }
+        Commands::App { command } => match command {
+            AppCommands::Lock { path, locals } => local::lock_workspace(&path, &locals)?,
+            AppCommands::Install {
+                path,
+                tenant,
+                url,
+                locked,
+                data_dir,
+            } => {
+                let data_dir = match data_dir {
+                    Some(path) => path,
+                    None => local::default_data_dir()?,
+                };
+                local::install(&path, &tenant, &url, &data_dir, locked).await?;
+            }
+            AppCommands::Cache {
+                command:
+                    CacheCommands::Gc {
+                        tenant,
+                        url,
+                        dry_run,
+                        data_dir,
+                    },
+            } => {
+                let data_dir = match data_dir {
+                    Some(path) => path,
+                    None => local::default_data_dir()?,
+                };
+                local::garbage_collect(&tenant, &url, &data_dir, dry_run).await?;
+            }
+        },
+        Commands::Dev {
+            path,
+            tenant,
+            url,
+            data_dir,
+        } => {
+            let data_dir = match data_dir {
+                Some(path) => path,
+                None => local::default_data_dir()?,
+            };
+            local::dev(&path, &tenant, &url, &data_dir).await?;
+        }
         Commands::Install {
             app_ref,
             tenant,
@@ -408,6 +575,10 @@ async fn async_main() -> anyhow::Result<()> {
                 verify_subprocess,
                 discord_token,
                 tenant,
+                None,
+                "0.0.0.0".to_string(),
+                None,
+                None,
             )
             .await?
         }
