@@ -7,6 +7,7 @@ use super::{
 use crate::storage::BoxedEventStore;
 use crate::trigger::delivery::{ReactionDeliveryRecord, ReactionDeliveryStatus};
 
+mod metrics;
 mod outcome;
 mod receipt;
 mod timeout_binding;
@@ -73,10 +74,7 @@ pub(crate) async fn commit_activated_start(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if matches!(outcome, super::CollectionLedgerCommitOutcome::Committed(_)) {
-        crate::runtime_metrics::record_collection_workflow_event("start", "running");
-        crate::runtime_metrics::record_collection_active_window(record.counts.in_flight);
-    }
+    metrics::record_start_commit(&outcome, record);
     Ok(outcome)
 }
 
@@ -125,28 +123,7 @@ pub(crate) async fn commit_controlled(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if matches!(outcome, super::CollectionLedgerCommitOutcome::Committed(_))
-        && record.last_control_id.as_deref() == Some(intent.control_id.as_str())
-    {
-        let requested = match record.requested_outcome {
-            Some(super::CollectionRequestedOutcome::Cancelled) => "cancelled",
-            Some(super::CollectionRequestedOutcome::TimedOut) => "timed_out",
-            None => "ignored",
-        };
-        crate::runtime_metrics::record_collection_workflow_event("control", requested);
-        crate::runtime_metrics::record_collection_active_window(record.counts.in_flight);
-        for member in record.members.iter().filter(|member| {
-            matches!(
-                member.status,
-                CollectionMemberStatus::Cancelled | CollectionMemberStatus::TimedOut
-            )
-        }) {
-            crate::runtime_metrics::record_collection_member_outcome(member.status);
-        }
-        if record.status.is_terminal() {
-            crate::runtime_metrics::record_collection_terminal_classification(record.status);
-        }
-    }
+    metrics::record_control_commit(&outcome, intent, record);
     Ok(outcome)
 }
 
@@ -453,20 +430,7 @@ pub(crate) async fn commit_terminal_delivery(
     )
     .await
     .map_err(|error| error.to_string())?;
-    crate::runtime_metrics::record_collection_active_window(record.counts.in_flight);
-    if let Some(member_id) = context.member_id.as_deref()
-        && let Some(member) = record
-            .members
-            .iter()
-            .find(|member| member.member_id == member_id)
-        && Some(member.status) != prior_member_status
-        && member.status.is_terminal()
-    {
-        crate::runtime_metrics::record_collection_member_outcome(member.status);
-    }
-    if !was_terminal && record.status.is_terminal() {
-        crate::runtime_metrics::record_collection_terminal_classification(record.status);
-    }
+    metrics::record_terminal_commit(was_terminal, prior_member_status, context, &record);
     Ok(true)
 }
 
