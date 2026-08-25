@@ -231,14 +231,22 @@ fn canonical_source_preserves_actions_after_nested_trigger_config() {
         .iter()
         .find(|action| action.name == "Start")
         .expect("Start action should survive canonicalization");
-    assert_eq!(start.guard.len(), 1, "Start guard should survive canonicalization");
+    assert_eq!(
+        start.guard.len(),
+        1,
+        "Start guard should survive canonicalization"
+    );
 
     let fail = automaton
         .actions
         .iter()
         .find(|action| action.name == "Fail")
         .expect("Fail action should survive canonicalization");
-    assert_eq!(fail.effect.len(), 2, "Fail effects should survive canonicalization");
+    assert_eq!(
+        fail.effect.len(),
+        2,
+        "Fail effects should survive canonicalization"
+    );
 }
 
 #[test]

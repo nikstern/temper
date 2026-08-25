@@ -38,7 +38,7 @@ fn parse_effect_array(value: &str, effects: &mut Vec<Effect>) -> Result<(), Auto
     Ok(())
 }
 
-fn parse_effect_fields(
+pub(super) fn parse_effect_fields(
     fields: &std::collections::BTreeMap<String, String>,
 ) -> Result<Option<Effect>, AutomatonParseError> {
     let effect_type = fields.get("type").map(|s| s.as_str()).unwrap_or("");
