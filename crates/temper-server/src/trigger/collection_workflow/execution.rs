@@ -63,7 +63,7 @@ pub(crate) async fn commit_activated_start(
     }
     timeout_binding::bind_timeout_from_source(record, &source_append, actions.timeout_action)?;
     let intents = activate_start(record, 0, actions)?;
-    super::commit_collection_start_with_intents(
+    let outcome = super::commit_collection_start_with_intents(
         store,
         source_append,
         intent,
@@ -72,7 +72,12 @@ pub(crate) async fn commit_activated_start(
         superseded_append.as_slice(),
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    if matches!(outcome, super::CollectionLedgerCommitOutcome::Committed(_)) {
+        crate::runtime_metrics::record_collection_workflow_event("start", "running");
+        crate::runtime_metrics::record_collection_active_window(record.counts.in_flight);
+    }
+    Ok(outcome)
 }
 
 /// Atomically commit first-writer control and every cancellation/join intent
@@ -109,7 +114,7 @@ pub(crate) async fn commit_controlled(
                 .map_err(|error| error.to_string())?,
         );
     }
-    super::commit_collection_control_with_intents(
+    let outcome = super::commit_collection_control_with_intents(
         store,
         source_append,
         intent,
@@ -119,7 +124,30 @@ pub(crate) async fn commit_controlled(
         &delivery_appends,
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    if matches!(outcome, super::CollectionLedgerCommitOutcome::Committed(_))
+        && record.last_control_id.as_deref() == Some(intent.control_id.as_str())
+    {
+        let requested = match record.requested_outcome {
+            Some(super::CollectionRequestedOutcome::Cancelled) => "cancelled",
+            Some(super::CollectionRequestedOutcome::TimedOut) => "timed_out",
+            None => "ignored",
+        };
+        crate::runtime_metrics::record_collection_workflow_event("control", requested);
+        crate::runtime_metrics::record_collection_active_window(record.counts.in_flight);
+        for member in record.members.iter().filter(|member| {
+            matches!(
+                member.status,
+                CollectionMemberStatus::Cancelled | CollectionMemberStatus::TimedOut
+            )
+        }) {
+            crate::runtime_metrics::record_collection_member_outcome(member.status);
+        }
+        if record.status.is_terminal() {
+            crate::runtime_metrics::record_collection_terminal_classification(record.status);
+        }
+    }
+    Ok(outcome)
 }
 
 /// Deterministically reconstruct the next missing execution intents from a
@@ -305,6 +333,14 @@ pub(crate) async fn commit_terminal_delivery(
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "collection workflow journal is missing".to_string())?;
+    let was_terminal = record.status.is_terminal();
+    let prior_member_status = context.member_id.as_deref().and_then(|member_id| {
+        record
+            .members
+            .iter()
+            .find(|member| member.member_id == member_id)
+            .map(|member| member.status)
+    });
     if context.role == CollectionDeliveryRole::Member
         && matching_receipt
         && let Some(member_id) = context.member_id.as_deref()
@@ -417,6 +453,20 @@ pub(crate) async fn commit_terminal_delivery(
     )
     .await
     .map_err(|error| error.to_string())?;
+    crate::runtime_metrics::record_collection_active_window(record.counts.in_flight);
+    if let Some(member_id) = context.member_id.as_deref()
+        && let Some(member) = record
+            .members
+            .iter()
+            .find(|member| member.member_id == member_id)
+        && Some(member.status) != prior_member_status
+        && member.status.is_terminal()
+    {
+        crate::runtime_metrics::record_collection_member_outcome(member.status);
+    }
+    if !was_terminal && record.status.is_terminal() {
+        crate::runtime_metrics::record_collection_terminal_classification(record.status);
+    }
     Ok(true)
 }
 
