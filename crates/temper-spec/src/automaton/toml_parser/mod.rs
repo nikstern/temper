@@ -13,7 +13,7 @@ use super::types::*;
 use effects::{parse_effect_fields, parse_effect_value};
 #[cfg(test)]
 use guards::parse_guard_clause;
-use guards::parse_guard_value;
+use guards::{parse_guard_fields, parse_guard_value};
 use inline::{join_multiline_arrays, parse_action_params, parse_kv, parse_string_array};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -568,30 +568,25 @@ fn extract_action_behavior_metadata(
         #[serde(default)]
         name: String,
         #[serde(default)]
-        guard: Vec<super::types::Guard>,
+        guard: Vec<toml::Value>,
         #[serde(default)]
         effect: Vec<toml::Value>,
     }
 
     let wrapper: ActionBehaviorWrapper = toml::from_str(&slice)
         .map_err(|error| AutomatonParseError::Toml(format!("action behavior: {error}")))?;
-    let mut map = std::collections::BTreeMap::new();
+    let mut map = std::collections::BTreeMap::<String, ParsedActionBehaviorMetadata>::new();
     for action in wrapper.actions {
         if action.name.is_empty() || (action.guard.is_empty() && action.effect.is_empty()) {
             continue;
         }
         let metadata = map.entry(action.name).or_default();
-        metadata.guards.extend(action.guard);
+        for value in action.guard {
+            let fields = canonical_behavior_fields(value, "guard")?;
+            metadata.guards.push(parse_guard_fields(&fields)?);
+        }
         for value in action.effect {
-            let toml::Value::Table(table) = value else {
-                return Err(AutomatonParseError::Toml(
-                    "action behavior: effect entry must be a table".into(),
-                ));
-            };
-            let fields = table
-                .into_iter()
-                .map(|(key, value)| (key, canonical_effect_field(value)))
-                .collect();
+            let fields = canonical_behavior_fields(value, "effect")?;
             if let Some(effect) = parse_effect_fields(&fields)? {
                 metadata.effects.push(effect);
             }
@@ -600,7 +595,22 @@ fn extract_action_behavior_metadata(
     Ok(map)
 }
 
-fn canonical_effect_field(value: toml::Value) -> String {
+fn canonical_behavior_fields(
+    value: toml::Value,
+    behavior: &str,
+) -> Result<std::collections::BTreeMap<String, String>, AutomatonParseError> {
+    let toml::Value::Table(table) = value else {
+        return Err(AutomatonParseError::Toml(format!(
+            "action behavior: {behavior} entry must be a table"
+        )));
+    };
+    Ok(table
+        .into_iter()
+        .map(|(key, value)| (key, canonical_behavior_field(value)))
+        .collect())
+}
+
+fn canonical_behavior_field(value: toml::Value) -> String {
     match value {
         toml::Value::String(value) => value,
         toml::Value::Integer(value) => value.to_string(),
@@ -609,7 +619,7 @@ fn canonical_effect_field(value: toml::Value) -> String {
         toml::Value::Datetime(value) => value.to_string(),
         toml::Value::Array(values) => values
             .into_iter()
-            .map(canonical_effect_field)
+            .map(canonical_behavior_field)
             .collect::<Vec<_>>()
             .join(","),
         toml::Value::Table(table) => toml::Value::Table(table).to_string(),
@@ -912,3 +922,7 @@ fn isolate_field_invariant_sections(source: &str) -> String {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "nested_metadata_test.rs"]
+mod nested_metadata_test;
