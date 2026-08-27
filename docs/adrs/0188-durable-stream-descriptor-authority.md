@@ -1,6 +1,6 @@
 # ADR-0188: Durable Stream Descriptor Authority
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Deciders: Temper core maintainers
 - Related:
@@ -381,11 +381,13 @@ original receipt without duplicating a descriptor.
 
 Completion evidence binds the tenant, deployment kind and identity, source and
 target bundle digests, canonical stream-capability digest, descriptor contract
-version, and the durable per-capability publication generations observed by a
-stable complete pass. Every stream publication advances its capability's
-generation in the same storage transaction as its event append. Activation
-locks and compares every covered generation with the receipt, so a publication
-after inventory makes the evidence stale without a race window.
+version, and the exact durable per-capability publication generations observed
+by a stable complete pass. Every stream publication advances its capability's
+generation in the same storage transaction as its event append. The job stores
+the complete generation map rather than only a combined token. Activation uses
+that stored map as its compare-and-set input, so it cannot silently rebase the
+receipt onto a newer generation; a publication after inventory makes the
+evidence stale without a race window.
 
 Both task-scoped schema activation and tenant-global installed-app reconcile
 enforce the same evidence contract. A target without
@@ -393,13 +395,51 @@ enforce the same evidence contract. A target without
 target that activates version 1 stays staged while evidence is absent, stale,
 or has unresolved subjects. The storage fence rejects descriptor-less
 publications after activation even if the in-memory registry has not yet
-observed the new pointer.
+observed the new pointer. For a task cutover, the fence is selective: it blocks
+only the verified descriptor-less publication action on predecessor-pinned
+journals. Ordinary predecessor actions and descriptor-bearing publications
+remain available.
 
 **Why this approach**: deployment already owns verification, immutable bundle
 identity, Cedar authorization, and atomic activation. Binding migration to that
 boundary keeps privileged inventory in the kernel, gives application workflows
 a typed progress surface, and prevents every activation path from bypassing
 the same durable proof.
+
+### Operator Contract
+
+Operators submit the exact task-bundle or installed-application target through
+`POST /api/v1/schema-deployments/stream-descriptor-migrations`, then advance it
+with bounded calls to
+`POST /api/v1/schema-deployments/stream-descriptor-migrations/{job_id}/advance`.
+Progress is read with `GET` on the job URI; unresolved classifications are read
+with `POST` to its `/unresolved` endpoint so the bounded cursor request remains
+in the authenticated body. The typed WASM schema-deployment ABI exposes
+the same four operations and receipts. Tenant identity always comes from the
+authenticated invocation, and Cedar authorizes the concrete task scope or
+installed application rather than a caller-provided surrogate.
+
+Start and advance mutations require stable idempotency keys. Exact replays
+return the originally committed receipt, including its request ID, cursor,
+page outcomes, and committed sequence. Each advance is limited to 256 subjects,
+1,024 events per subject, and 2 GiB of blob verification work; callers may
+choose smaller positive budgets. A job stores at most 1,024 mutation receipts
+and a 4 MiB state payload. Operators repair missing or corrupt blobs or invalid
+publication facts at their authoritative source, then advance the same job;
+the retry cursor rotates through unresolved subjects so one persistent fault
+cannot starve later repairs.
+
+Activation remains denied until a stable complete pass has no unresolved
+subjects. A concurrent publication before cutover makes completion stale and
+the next advance reopens inventory. Task activation and installed-app reconcile
+compare and install publication fences atomically with the observed
+generations. Completion evidence is a cutover prerequisite, not a perpetual
+steady-state check: exact task activation replays use the durable activation
+receipt, and unchanged installed-app reconcile uses the exact durable semantic,
+publication-action, and capability fence. Normal post-cutover writes therefore
+do not reopen migration. Rollback keeps the prior descriptor-aware deployment
+active; migration records and descriptor events are append-only and are never
+deleted as a rollback action.
 
 ## Rollout Plan
 
