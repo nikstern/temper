@@ -49,7 +49,12 @@ kind = "input"
 from = ["Selecting"]
 to = "Evaluating"
 effect = [{ type = "increment", var = "candidate_count" }, { type = "trigger", name = "evaluate_candidate" }]
-params = ["CandidateId", "SpecSource", "TrajectoryActions", "Trajectories"]
+params = [
+  "CandidateId",
+  "SpecSource",
+  { name = "TrajectoryActions", type = "string", nullable = true },
+  { name = "Trajectories", type = "string", nullable = true },
+]
 hint = "Select a candidate spec from the Pareto frontier or seed pool."
 
 # ADR-0046: inline trigger — migrated from [[integration]] below.

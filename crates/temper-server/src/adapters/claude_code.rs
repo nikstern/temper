@@ -155,6 +155,13 @@ fn parse_stream_json_output(stdout: &str) -> serde_json::Value {
             obj.insert("stream".to_string(), serde_json::Value::Object(merged));
         }
         if let Some(last) = last_json {
+            if let Some(last_obj) = last.as_object() {
+                for (key, value) in last_obj {
+                    if !matches!(key.as_str(), "raw_output" | "stream" | "result") {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
             obj.insert("result".to_string(), last);
         }
     }
@@ -415,6 +422,17 @@ mod tests {
         assert_eq!(
             parsed.get("MutatedSpecSource").and_then(Value::as_str),
             Some("[automaton]\nname=\"Issue\"")
+        );
+    }
+
+    #[test]
+    fn parse_stream_json_preserves_direct_callback_fields() {
+        let stdout = r#"{"VerificationReport":"L0-L3 passed"}"#;
+
+        let parsed = parse_stream_json_output(stdout);
+        assert_eq!(
+            parsed.get("VerificationReport").and_then(Value::as_str),
+            Some("L0-L3 passed")
         );
     }
 }
