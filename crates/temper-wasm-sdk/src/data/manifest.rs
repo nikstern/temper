@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{DATA_ABI_VERSION_V1, ModuleSdkCompatibilityProof};
 
+mod nullability;
 mod operation;
 mod permissions;
 mod stream;
@@ -468,6 +469,17 @@ impl ModuleSdkManifest {
             }
         }
         Ok(hashes)
+    }
+
+    /// Action symbols whose only schema change widens required input to nullable.
+    ///
+    /// Nullable-to-required changes are rejected with a parameter-qualified
+    /// diagnostic because an older artifact may legitimately omit that value.
+    pub fn compatible_action_nullability_widenings(
+        &self,
+        candidate: &Self,
+    ) -> Result<BTreeSet<String>, String> {
+        nullability::compatible_action_nullability_widenings(self, candidate)
     }
 }
 

@@ -8,7 +8,9 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::automaton::{
+    LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle, lint_automaton,
+};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
@@ -103,6 +105,26 @@ pub fn run(specs_dir: &str) -> Result<()> {
         }
         lint_error_count +=
             reference_contract::report_csdl_lints(&csdl, &parsed_automata, &mut lint_error_lines);
+
+        for finding in lint_automata_csdl_bundle(&parsed_automata, &csdl) {
+            match finding.severity {
+                LintSeverity::Error => {
+                    lint_error_count += 1;
+                    lint_error_lines.push(format!(
+                        "{}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    ));
+                    println!(
+                        "\n  [lint:error] {}: {} — {}",
+                        finding.entity, finding.code, finding.message
+                    );
+                }
+                LintSeverity::Warning => println!(
+                    "\n  [lint:warn] {}: {} — {}",
+                    finding.entity, finding.code, finding.message
+                ),
+            }
+        }
 
         if lint_error_count > 0 {
             anyhow::bail!(
@@ -341,6 +363,52 @@ mod tests {
     }
 
     #[test]
+    fn maintained_bundles_align_ioa_and_csdl_action_contracts() {
+        const SPEC_DIRS: &[&str] = &[
+            "test-fixtures/specs",
+            "crates/temper-platform/src/specs",
+            "docs/examples/pipeline-specs",
+            "reference-apps/crucible/specs",
+            "reference-apps/ecommerce/specs",
+            "reference-apps/oncall/specs",
+            "reference-apps/readers-writers/specs",
+            "reference-apps/weather-tracker/specs",
+            "os-apps/agent-orchestration/specs",
+            "os-apps/directed-evolution/specs",
+            "os-apps/evolution",
+            "os-apps/intent-discovery/specs",
+            "os-apps/project-management",
+            "os-apps/project-management/specs",
+            "os-apps/temper-agent/specs",
+            "os-apps/temper-channels/specs",
+            "os-apps/temper-fs/specs",
+        ];
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative_dir in SPEC_DIRS {
+            let specs_dir = workspace.join(relative_dir);
+            let csdl_xml = fs::read_to_string(specs_dir.join("model.csdl.xml"))
+                .unwrap_or_else(|error| panic!("failed to read {relative_dir}: {error}"));
+            let csdl = parse_csdl(&csdl_xml)
+                .unwrap_or_else(|error| panic!("failed to parse {relative_dir}: {error}"));
+            let automata = read_ioa_sources(&specs_dir)
+                .unwrap_or_else(|error| panic!("failed to read IOA in {relative_dir}: {error}"))
+                .into_iter()
+                .map(|(entity, source)| {
+                    let automaton = temper_spec::automaton::parse_automaton(&source)
+                        .unwrap_or_else(|error| panic!("failed to parse {entity}: {error}"));
+                    (entity, automaton)
+                })
+                .collect();
+            let findings = lint_automata_csdl_bundle(&automata, &csdl);
+            assert!(
+                findings.is_empty(),
+                "{relative_dir} has IOA/CSDL action-contract findings: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_verify_fails_on_broken_spawn_contract_with_exact_lint_code() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let specs_dir = tmp.path();
@@ -429,6 +497,15 @@ params = ["title", "description", "plan_id"]
         <Property Name="Id" Type="Edm.Guid" Nullable="false" />
         <Property Name="status" Type="Edm.String" />
       </EntityType>
+      <Action Name="Touch" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Fs.File" Nullable="false" />
+      </Action>
+      <Action Name="IncrementUsage" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Fs.Workspace" Nullable="false" />
+      </Action>
+      <Action Name="Freeze" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Fs.Workspace" Nullable="false" />
+      </Action>
       <EntityContainer Name="Service">
         <EntitySet Name="Files" EntityType="Temper.Fs.File" />
         <EntitySet Name="Workspaces" EntityType="Temper.Fs.Workspace" />

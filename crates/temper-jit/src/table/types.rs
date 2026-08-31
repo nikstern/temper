@@ -37,6 +37,9 @@ pub struct ActionParamMetadata {
     /// Target entity type for a `ref` parameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_type: Option<String>,
+    /// Whether omission or JSON `null` is accepted.
+    #[serde(default)]
+    pub nullable: bool,
 }
 
 /// A declared vector access path carried on the table (ADR-0155). `name`
@@ -96,7 +99,7 @@ pub struct TransitionTable {
     /// declare any per-field overrides.
     #[serde(default)]
     pub state_var_metadata: BTreeMap<String, StateVarMetadata>,
-    /// Parameter declarations keyed by action then parameter name (ADR-0156).
+    /// Parameter declarations keyed by action then parameter name (ADRs 0156 and 0174).
     #[serde(default)]
     pub action_params: BTreeMap<String, BTreeMap<String, ActionParamMetadata>>,
     /// Composite-action metadata keyed by action name (ADR-0040).
@@ -317,6 +320,82 @@ pub struct TransitionResult {
 }
 
 impl TransitionTable {
+    /// Add canonical IOA parameter keys for any accepted naming aliases.
+    ///
+    /// Existing keys are preserved because some internal create paths carry
+    /// both CSDL and storage aliases. Semantic consumers can always read the
+    /// exact IOA name after this normalization step.
+    pub fn canonicalize_action_params(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(metadata) = self.action_params.get(action) else {
+            return params.clone();
+        };
+        let Some(source) = params.as_object() else {
+            return params.clone();
+        };
+        let mut canonical = source.clone();
+        for name in metadata.keys() {
+            if canonical.contains_key(name) {
+                continue;
+            }
+            let normalized_name = temper_spec::naming::to_snake_case(name);
+            if let Some((_, value)) = source
+                .iter()
+                .find(|(name, _)| temper_spec::naming::to_snake_case(name) == normalized_name)
+            {
+                canonical.insert(name.clone(), value.clone());
+            }
+        }
+        serde_json::Value::Object(canonical)
+    }
+
+    /// Validate required action inputs before guards or effects run.
+    ///
+    /// This actor-local defense checks presence and nullability. Adapters use
+    /// pinned CSDL for the richer client-facing type validation.
+    pub fn validate_required_action_params(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<(), ActionInputError> {
+        let Some(metadata) = self.action_params.get(action) else {
+            // Older serialized tables deserialize with an empty map. They stay
+            // readable, but a known live action without compiled requiredness
+            // metadata must not skip actor-local validation.
+            if self.rule_index.contains_key(action) {
+                return Err(ActionInputError {
+                    code: "MissingActionParameter",
+                    action: action.to_string(),
+                    parameter: action.to_string(),
+                });
+            }
+            return Ok(());
+        };
+        let object = params.as_object();
+        for (name, param) in metadata {
+            if param.nullable {
+                continue;
+            }
+            let normalized_name = temper_spec::naming::to_snake_case(name);
+            let has_value = object.is_some_and(|object| {
+                object.iter().any(|(name, value)| {
+                    temper_spec::naming::to_snake_case(name) == normalized_name && !value.is_null()
+                })
+            });
+            if !has_value {
+                return Err(ActionInputError {
+                    code: "MissingActionParameter",
+                    action: action.to_string(),
+                    parameter: name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Rebuild the rule index from the current rules vec.
     ///
     /// Called automatically during construction. Must be called explicitly
@@ -331,6 +410,29 @@ impl TransitionTable {
         }
     }
 }
+
+/// Stable actor-local action input validation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionInputError {
+    /// Stable detail code shared with adapter diagnostics.
+    pub code: &'static str,
+    /// Action whose input contract was violated.
+    pub action: String,
+    /// Missing or null required parameter.
+    pub parameter: String,
+}
+
+impl std::fmt::Display for ActionInputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: action '{}' requires non-null parameter '{}'",
+            self.code, self.action, self.parameter
+        )
+    }
+}
+
+impl std::error::Error for ActionInputError {}
 
 #[cfg(test)]
 mod tests {
@@ -385,3 +487,7 @@ mod tests {
         assert_eq!(table.rule_index["Cancel"], vec![2]);
     }
 }
+
+#[cfg(test)]
+#[path = "types/requiredness_test.rs"]
+mod requiredness_test;

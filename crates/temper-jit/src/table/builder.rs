@@ -97,7 +97,6 @@ impl TransitionTable {
         let action_params = automaton
             .actions
             .iter()
-            .filter(|action| !action.params.is_empty())
             .map(|action| {
                 let params = action
                     .params
@@ -108,6 +107,7 @@ impl TransitionTable {
                             super::types::ActionParamMetadata {
                                 param_type: param.param_type().to_string(),
                                 entity_type: param.entity_type().map(str::to_string),
+                                nullable: param.nullable(),
                             },
                         )
                     })
@@ -147,7 +147,6 @@ impl TransitionTable {
             Ok(routes) => routes,
             Err(error) => panic!("validated automaton has invalid failure routes: {error}"),
         };
-
         TransitionTable {
             entity_name: automaton.automaton.name.clone(),
             states: automaton.automaton.states.clone(),
@@ -178,8 +177,8 @@ impl TransitionTable {
                 })
                 .collect(),
             state_var_metadata,
-            action_params,
             composite_actions,
+            action_params,
             rule_index,
         }
     }

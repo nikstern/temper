@@ -226,12 +226,14 @@ pub(super) fn verify_module_data_binding(
         return Ok(regenerated.clone());
     }
 
+    let prior_hashes = supplied.used_symbol_hashes()?;
+    let candidate_hashes = regenerated.used_symbol_hashes()?;
+    let compatible_nullability_changes =
+        supplied.compatible_action_nullability_widenings(regenerated)?;
     let proof = supplied
         .compatibility_proof
         .as_ref()
         .ok_or_else(|| "module data binding differs without an artifact-bound proof".to_string())?;
-    let prior_hashes = supplied.used_symbol_hashes()?;
-    let candidate_hashes = regenerated.used_symbol_hashes()?;
     if proof.prior_closure_digest != supplied.closure_digest
         || proof.candidate_closure_digest != regenerated.closure_digest
         || proof.prior_grant_digest != supplied.grant_digest
@@ -241,10 +243,10 @@ pub(super) fn verify_module_data_binding(
     {
         return Err("module data compatibility proof failed host recomputation".into());
     }
-    if prior_hashes
-        .iter()
-        .any(|(symbol, hash)| candidate_hashes.get(symbol) != Some(hash))
-    {
+    if prior_hashes.iter().any(|(symbol, hash)| {
+        candidate_hashes.get(symbol) != Some(hash)
+            && !compatible_nullability_changes.contains(symbol)
+    }) {
         return Err("module data compatibility proof changes a used symbol".into());
     }
     if !grant_is_equal_or_narrower(&regenerated.grant, &supplied.grant)
@@ -409,3 +411,7 @@ initial = "Open"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "data_binding/nullability_test.rs"]
+mod nullability_test;

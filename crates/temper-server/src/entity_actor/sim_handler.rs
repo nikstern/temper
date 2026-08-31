@@ -10,9 +10,11 @@ use temper_jit::table::{EvalContext, TransitionTable};
 use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
 use temper_spec::automaton::StateVar;
 
+use self::params::{deterministic_param_value, to_pascal_case};
 use super::effects::ScheduledAction;
 use super::types::EntityState;
 
+mod params;
 mod replay;
 
 /// Simulation handler wrapping a real TransitionTable.
@@ -420,6 +422,27 @@ impl SimActorHandler for EntityActorHandler {
             .collect()
     }
 
+    fn params_for_action(&self, action: &str) -> String {
+        let params = self
+            .table
+            .action_params
+            .get(action)
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .filter(|(_, parameter)| !parameter.nullable)
+                    .map(|(name, parameter)| {
+                        (
+                            name.clone(),
+                            deterministic_param_value(&parameter.param_type),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>()
+            })
+            .unwrap_or_default();
+        serde_json::Value::Object(params).to_string()
+    }
+
     fn events_json(&self) -> serde_json::Value {
         serde_json::to_value(&self.state.events).unwrap_or(serde_json::Value::Array(vec![]))
     }
@@ -460,22 +483,6 @@ impl SimActorHandler for EntityActorHandler {
     fn pending_callbacks(&self) -> Vec<String> {
         self.last_custom_effects.clone()
     }
-}
-
-fn to_pascal_case(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
-    let mut uppercase = true;
-    for character in name.chars() {
-        if character == '_' {
-            uppercase = true;
-        } else if uppercase {
-            result.extend(character.to_uppercase());
-            uppercase = false;
-        } else {
-            result.push(character);
-        }
-    }
-    result
 }
 
 #[cfg(test)]

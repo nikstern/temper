@@ -11,6 +11,7 @@ pub use temper_failure::FailureCategory;
 use super::ResolvedFailureRoute;
 use super::field_invariant::FieldInvariant;
 
+mod action_param;
 mod deserialization;
 mod names;
 mod trigger_guard;
@@ -189,6 +190,10 @@ pub enum ActionParam {
         /// Target entity type when `param_type = "ref"` (ADR-0156).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity_type: Option<String>,
+        /// Whether callers may omit the parameter or supply JSON `null`.
+        /// IOA action parameters are required unless this is explicitly true.
+        #[serde(default, skip_serializing_if = "is_false")]
+        nullable: bool,
     },
 }
 
@@ -196,27 +201,8 @@ fn default_param_type() -> String {
     "string".to_string()
 }
 
-impl ActionParam {
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Named(n) => n,
-            Self::Typed { name, .. } => name,
-        }
-    }
-    pub fn param_type(&self) -> &str {
-        match self {
-            Self::Named(_) => "string",
-            Self::Typed { param_type, .. } => param_type,
-        }
-    }
-
-    /// Return the declared target entity type for a typed reference parameter.
-    pub fn entity_type(&self) -> Option<&str> {
-        match self {
-            Self::Named(_) => None,
-            Self::Typed { entity_type, .. } => entity_type.as_deref(),
-        }
-    }
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// An action in the I/O Automaton.

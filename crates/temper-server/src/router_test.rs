@@ -225,6 +225,28 @@ async fn persist_task_schema_bundle_in_scope(
 ) {
     let scoped_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml")
         .replace("Temper.Example", "Temper.ScopedExample");
+    persist_task_schema_bundle_with_csdl_in_scope(
+        store,
+        order_ioa,
+        scoped_csdl,
+        digest,
+        predecessor,
+        operation_tag,
+        scope,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_task_schema_bundle_with_csdl_in_scope(
+    store: &impl SchemaDeploymentStore,
+    order_ioa: &str,
+    scoped_csdl: String,
+    digest: &str,
+    predecessor: Option<&str>,
+    operation_tag: &str,
+    scope: &SchemaScope,
+) {
     store
         .submit_schema_bundle(SubmitSchemaBundle {
             bundle: SchemaBundleRecord {
@@ -630,6 +652,12 @@ fn test_state_with_account_verification_ioa() -> ServerState {
         <Property Name="Visibility" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <Action Name="MarkVerified" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.AccountVerificationTest.Owner" Nullable="false"/>
+        <Parameter Name="VerificationProvider" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="VerificationSubject" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="VerifiedAt" Type="Edm.String" Nullable="false"/>
+      </Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Owners" EntityType="Temper.AccountVerificationTest.Owner"/>
         <EntitySet Name="Repositories" EntityType="Temper.AccountVerificationTest.Repository"/>
@@ -2521,6 +2549,118 @@ async fn test_post_bound_action() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "Cancelled");
+}
+
+#[tokio::test]
+async fn test_bound_action_schema_rejection_precedes_transition() {
+    let state = test_state_with_ioa();
+    let app = authenticated_router(state.clone());
+
+    for (entity_id, body, expected_code) in [
+        ("missing-reason", r#"{}"#, "MissingActionParameter"),
+        (
+            "null-reason",
+            r#"{"Reason":null}"#,
+            "MissingActionParameter",
+        ),
+        (
+            "wrong-reason",
+            r#"{"Reason":7}"#,
+            "ActionParameterTypeMismatch",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/tdata/Orders('{entity_id}')/Temper.Example.CancelOrder"
+                ))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(error["error"]["code"], expected_code);
+
+        let entity = state
+            .get_tenant_entity_state(&TenantId::default(), "Order", entity_id)
+            .await
+            .expect("authorization may load the actor, but rejection must leave it unchanged");
+        assert_eq!(entity.state.status, "Draft");
+        assert!(entity.state.events.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_unknown_bound_action_does_not_skip_schema() {
+    let state = test_state_with_ioa();
+    let app = authenticated_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::post("/tdata/Orders('x')/Temper.Example.NotAnAction")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["code"], "UnknownBoundAction");
+}
+
+fn test_state_with_fs_directory() -> ServerState {
+    let csdl_xml = include_str!("../../../os-apps/temper-fs/specs/model.csdl.xml");
+    let directory_ioa = include_str!("../../../os-apps/temper-fs/specs/directory.ioa.toml");
+    let csdl = parse_csdl(csdl_xml).unwrap();
+    let system = ActorSystem::new("test-fs-directory");
+    let mut specs = std::collections::BTreeMap::new();
+    specs.insert("Directory".to_string(), directory_ioa.to_string());
+    ServerState::with_specs(system, csdl, csdl_xml.to_string(), specs).unwrap()
+}
+
+#[tokio::test]
+async fn test_directory_create_bound_action_does_not_skip_schema() {
+    let state = test_state_with_fs_directory();
+    let app = authenticated_router(state);
+
+    for (body, expected_code) in [
+        ("{}", "MissingActionParameter"),
+        (
+            r#"{"name":7,"path":"/docs","workspace_id":"ws"}"#,
+            "ActionParameterTypeMismatch",
+        ),
+        (
+            r#"{"name":"docs","path":"/docs","workspace_id":"ws","extra":true}"#,
+            "ActionParameterTypeMismatch",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/tdata/Directories('dir-1')/Temper.FS.Create")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "body={body}");
+        let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(error["error"]["code"], expected_code, "body={body}");
+    }
 }
 
 #[tokio::test]
