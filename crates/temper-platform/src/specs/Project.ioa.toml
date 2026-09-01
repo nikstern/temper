@@ -1,6 +1,7 @@
 [automaton]
 name = "Project"
 initial = "Created"
+lifecycle_property = "Status"
 states = ["Created", "Building", "Verified", "Archived"]
 
 [[state]]

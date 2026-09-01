@@ -10,9 +10,11 @@
 
 pub mod automaton;
 pub mod bundle;
+pub mod canonical;
 pub mod cross_invariant;
 pub mod csdl;
-pub mod model;
+#[path = "model/mod.rs"]
+pub mod legacy_model;
 pub mod naming;
 
 /// TLA+ specification extractor (legacy — prefer [`automaton`] for new specs).
@@ -28,6 +30,10 @@ pub use bundle::{
     BundleError, BundleErrorCode, CanonicalIoaSpec, IoaSourceInput, MigrationArtifactInput,
     PolicyArtifactInput, ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput,
     WasmArtifactInput, scoped_module_data_closure_digest,
+    scoped_module_data_closure_digest_with_version,
+};
+pub use canonical::{
+    CanonicalActionContract, CanonicalActionParameter, CanonicalEntityModel, CanonicalSpecModel,
 };
 pub use cross_invariant::{
     CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity, CrossInvariantOperator,
@@ -36,6 +42,8 @@ pub use cross_invariant::{
     parse_related_status_in_assert,
 };
 pub use csdl::{CsdlDocument, CsdlParseError, parse_csdl};
-pub use model::{SpecModel, SpecSource, build_spec_model, build_spec_model_mixed};
+pub use legacy_model::{
+    LegacySpecModel, LegacySpecSource, build_legacy_spec_model, build_legacy_spec_model_mixed,
+};
 pub use naming::{to_pascal_case, to_snake_case};
 pub use tlaplus::{Invariant, StateMachine, Transition, extract_state_machine};

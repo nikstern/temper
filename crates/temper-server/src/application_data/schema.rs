@@ -448,6 +448,7 @@ mod action_param_tests {
             entity_type: "Temper.Task".into(),
             entity_set: "Tasks".into(),
             generated_name: "Task".into(),
+            lifecycle_states: Vec::new(),
             properties: Vec::new(),
             actions: vec![ManifestActionV1 {
                 canonical_name: "Close".into(),

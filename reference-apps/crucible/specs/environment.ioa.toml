@@ -12,6 +12,7 @@
 name = "Environment"
 states = ["Active", "Archived"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # --- Actions ---
 

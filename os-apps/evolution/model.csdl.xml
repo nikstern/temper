@@ -6,7 +6,7 @@
       <EntityType Name="EvolutionRun">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="SkillName" Type="Edm.String"/>
         <Property Name="TargetEntityType" Type="Edm.String"/>
         <Property Name="AutonomyLevel" Type="Edm.String"/>
@@ -22,7 +22,7 @@
       <EntityType Name="SentinelMonitor">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="CheckCount" Type="Edm.Int64"/>
         <Property Name="AlertCount" Type="Edm.Int64"/>
         <Property Name="EvolutionRunsCreated" Type="Edm.Int64"/>

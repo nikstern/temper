@@ -1,6 +1,7 @@
 [automaton]
 name = "Collaborator"
 initial = "Invited"
+lifecycle_property = "Status"
 states = ["Invited", "Active", "Removed"]
 
 [[action]]

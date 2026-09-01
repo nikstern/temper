@@ -2,6 +2,7 @@
 name = "Promotion"
 states = ["Pending", "Promoted", "RolledBack", "Failed"]
 initial = "Pending"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Pending", "Promoted"]
 
 [[state]]

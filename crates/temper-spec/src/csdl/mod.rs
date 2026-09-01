@@ -6,6 +6,7 @@ mod types;
 
 pub use emit::emit_csdl_xml;
 pub use merge::merge_csdl;
+pub(crate) use parser::parse_csdl_frozen_v1;
 pub use parser::{CsdlParseError, parse_csdl};
 pub use stream_capability::{
     StreamCapabilityError, StreamCapabilityMutabilityV1, VerifiedStreamCapabilityV1,

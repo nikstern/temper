@@ -47,6 +47,7 @@ fn fallback_order_matches_declared_direction_and_null_rules() {
         entity_type: "Temper.Task".into(),
         entity_set: "Tasks".into(),
         generated_name: "Task".into(),
+        lifecycle_states: Vec::new(),
         properties: vec![temper_wasm_sdk::data::ManifestPropertyV1 {
             canonical_name: "Estimate".into(),
             generated_name: "estimate".into(),
@@ -103,6 +104,7 @@ fn fallback_orders_by_host_owned_commit_sequence() {
         entity_type: "Temper.Task".into(),
         entity_set: "Tasks".into(),
         generated_name: "Task".into(),
+        lifecycle_states: Vec::new(),
         properties: Vec::new(),
         actions: Vec::new(),
     };

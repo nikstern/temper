@@ -31,6 +31,7 @@ const IOA: &str = r#"[automaton]
 name = "Task"
 states = ["Open", "Done"]
 initial = "Open"
+lifecycle_property = "state"
 
 [[action]]
 name = "Complete"

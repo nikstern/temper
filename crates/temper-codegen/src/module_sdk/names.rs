@@ -46,7 +46,7 @@ pub(super) fn rust_scalar_type(type_name: &str) -> &'static str {
     }
 }
 
-fn is_rust_keyword(value: &str) -> bool {
+pub(super) fn is_rust_keyword(value: &str) -> bool {
     matches!(
         value,
         "as" | "break"
@@ -88,6 +88,23 @@ fn is_rust_keyword(value: &str) -> bool {
             | "dyn"
             | "gen"
     )
+}
+
+pub(super) fn checked_enum_variant(
+    type_name: &str,
+    wire_value: &str,
+) -> Result<String, ModuleSdkCodegenError> {
+    let variant = rust_type_name(wire_value);
+    let starts_valid = variant
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+    if !starts_valid || is_rust_keyword(&variant) {
+        return Err(ModuleSdkCodegenError::IdentifierCollision(format!(
+            "{type_name}::{variant} from lifecycle state {wire_value:?}"
+        )));
+    }
+    Ok(variant)
 }
 
 pub(super) fn reject_generated_collisions<'a>(

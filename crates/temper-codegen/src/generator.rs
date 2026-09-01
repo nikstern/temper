@@ -1,7 +1,7 @@
 //! Top-level code generator that orchestrates entity, message, and state machine generation.
 
+use temper_spec::CanonicalSpecModel;
 use temper_spec::csdl::{Action, Function, Schema};
-use temper_spec::model::SpecModel;
 
 use crate::entity;
 use crate::messages;
@@ -32,12 +32,12 @@ pub struct GeneratedModule {
 
 /// Generate a complete Rust module for an entity from the unified spec model.
 pub fn generate_entity_module(
-    spec: &SpecModel,
+    spec: &CanonicalSpecModel,
     entity_name: &str,
 ) -> Result<GeneratedModule, CodegenError> {
     // Find the domain schema (skip vocabulary schemas)
     let schema = spec
-        .csdl
+        .emitted_csdl()
         .schemas
         .iter()
         .find(|s| s.entity_types.iter().any(|e| e.name == entity_name))
@@ -71,8 +71,16 @@ pub fn generate_entity_module(
     source.push('\n');
 
     // State machine (if TLA+ spec is available)
-    if let Some(sm) = spec.state_machines.get(entity_name) {
-        source.push_str(&state_machine::generate_state_machine(entity_name, sm));
+    let qualified = format!("{namespace}.{entity_name}");
+    if let Some(automaton) = spec
+        .behavioral_entity(&qualified)
+        .and_then(|entity| entity.automaton())
+    {
+        let state_machine = temper_spec::to_state_machine(automaton);
+        source.push_str(&state_machine::generate_state_machine(
+            entity_name,
+            &state_machine,
+        ));
         source.push('\n');
     }
 
@@ -133,19 +141,20 @@ fn find_bound_functions<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use temper_spec::IoaSourceInput;
     use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
 
-    fn load_reference_spec() -> SpecModel {
+    fn load_reference_spec() -> CanonicalSpecModel {
         let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-        let order_tla = include_str!("../../../test-fixtures/specs/order.tla");
-
         let csdl = parse_csdl(csdl_xml).unwrap();
-        let mut tla_sources = HashMap::new();
-        tla_sources.insert("Order".to_string(), order_tla.to_string());
-
-        build_spec_model(csdl, tla_sources)
+        CanonicalSpecModel::link_v2_sources(
+            &csdl,
+            &[IoaSourceInput {
+                entity_type: "Temper.Example.Order".into(),
+                source: include_str!("../../../test-fixtures/specs/order.ioa.toml").into(),
+            }],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -183,7 +192,7 @@ mod tests {
         assert!(module.source.contains("GetOrderTotal"));
 
         // Should have invariant names
-        assert!(module.source.contains("TypeInvariant"));
+        assert!(module.source.contains("SubmitRequiresItems"));
         assert!(module.source.contains("ShipRequiresPayment"));
     }
 

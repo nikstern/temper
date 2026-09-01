@@ -9,6 +9,7 @@
 name = "Agent"
 states = ["Idle", "Assigned", "Working", "Blocked", "Completed", "Failed"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

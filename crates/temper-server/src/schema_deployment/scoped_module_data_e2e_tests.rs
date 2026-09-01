@@ -161,9 +161,9 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
     let closure = scoped_module_data_closure_digest(CSDL, sources.clone())
         .expect("fixture closure should canonicalize");
     let generated = temper_codegen::generate_module_sdk(
-        &temper_spec::parse_csdl(canonical.canonical_csdl())
-            .expect("canonical fixture CSDL should parse"),
-        &sources,
+        canonical
+            .canonical_model()
+            .expect("v2 bundle contains canonical model"),
         MODULE_NAME,
         &closure,
         &closure,
@@ -223,7 +223,7 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
                 scope: scope.clone(),
                 expected_predecessor: None,
                 expected_digest: digest.clone(),
-                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1
+                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2
                     .into(),
                 csdl: CSDL.into(),
                 ioa: sources

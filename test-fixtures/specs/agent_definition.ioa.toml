@@ -6,6 +6,7 @@
 name = "AgentDefinition"
 states = ["Active", "Archived"]
 initial = "Active"
+lifecycle_property = "Status"
 
 [[state]]
 name = "processes_started"

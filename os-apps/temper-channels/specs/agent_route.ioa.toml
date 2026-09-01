@@ -7,6 +7,7 @@
 name = "AgentRoute"
 states = ["Active", "Disabled"]
 initial = "Active"
+lifecycle_property = "Status"
 
 [[state]]
 name = "binding_tier"

@@ -1,3 +1,4 @@
+enum FileLifecycleState
 struct FileId
 struct File
 struct FileClient

@@ -21,6 +21,7 @@
 name = "TemperAgent"
 states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
 initial = "Created"
+lifecycle_property = "Status"
 
 # --- State Variables: Core ---
 

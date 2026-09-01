@@ -8,6 +8,7 @@
 name = "Issue"
 states = ["Backlog", "InProgress", "Review", "Done", "Archived"]
 initial = "Backlog"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

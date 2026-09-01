@@ -1,6 +1,7 @@
 [automaton]
 name = "FeatureRequest"
 initial = "Open"
+lifecycle_property = "Status"
 states = ["Open", "Acknowledged", "Planned", "WontFix", "Resolved"]
 
 [[action]]

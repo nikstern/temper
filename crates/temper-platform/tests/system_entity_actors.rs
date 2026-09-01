@@ -15,11 +15,30 @@ use temper_server::{EntityActor, EntityMsg, EntityResponse};
 mod common;
 
 use common::specs::{
-    SYSTEM_MODEL_CSDL_XML, catalog_table_rw, collaborator_table_rw, project_table_rw,
-    tenant_table_rw, version_table_rw,
+    CATALOG_ENTRY_IOA, COLLABORATOR_IOA, PROJECT_IOA, SYSTEM_MODEL_CSDL_XML, TENANT_IOA,
+    VERSION_IOA, catalog_table_rw, collaborator_table_rw, project_table_rw, tenant_table_rw,
+    version_table_rw,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
+
+fn canonical_system_model() -> temper_spec::CanonicalSpecModel {
+    let csdl = temper_spec::parse_csdl(SYSTEM_MODEL_CSDL_XML).unwrap();
+    let sources = [
+        ("Project", PROJECT_IOA),
+        ("Tenant", TENANT_IOA),
+        ("CatalogEntry", CATALOG_ENTRY_IOA),
+        ("Collaborator", COLLABORATOR_IOA),
+        ("Version", VERSION_IOA),
+    ]
+    .into_iter()
+    .map(|(entity, source)| temper_spec::IoaSourceInput {
+        entity_type: format!("Temper.System.{entity}"),
+        source: source.into(),
+    })
+    .collect::<Vec<_>>();
+    temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &sources).unwrap()
+}
 
 // =========================================================================
 // PROJECT — Production EntityActor
@@ -598,13 +617,7 @@ async fn actor_multiple_system_entities_independent() {
 #[test]
 fn codegen_system_entities_produce_valid_modules() {
     use temper_codegen::generate_entity_module;
-    use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
-
-    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
-    let csdl = parse_csdl(csdl_xml).expect("system CSDL should parse");
-
-    let spec = build_spec_model(csdl, std::collections::HashMap::new());
+    let spec = canonical_system_model();
 
     // Generate Tier 1 compiled code for each system entity
     for entity_name in &[
@@ -645,12 +658,7 @@ fn codegen_system_entities_produce_valid_modules() {
 #[test]
 fn codegen_project_has_typed_fields() {
     use temper_codegen::generate_entity_module;
-    use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
-
-    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
-    let csdl = parse_csdl(csdl_xml).unwrap();
-    let spec = build_spec_model(csdl, std::collections::HashMap::new());
+    let spec = canonical_system_model();
 
     let module = generate_entity_module(&spec, "Project").unwrap();
 
@@ -680,12 +688,7 @@ fn codegen_project_has_typed_fields() {
 #[test]
 fn codegen_tenant_has_project_reference() {
     use temper_codegen::generate_entity_module;
-    use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
-
-    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
-    let csdl = parse_csdl(csdl_xml).unwrap();
-    let spec = build_spec_model(csdl, std::collections::HashMap::new());
+    let spec = canonical_system_model();
 
     let module = generate_entity_module(&spec, "Tenant").unwrap();
 

@@ -4,6 +4,7 @@
 name = "HeartbeatRun"
 states = ["Scheduled", "CheckingIn", "Working", "Completed", "Failed", "Cancelled"]
 initial = "Scheduled"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

@@ -5,6 +5,7 @@
 name = "Compactor"
 states = ["Idle", "Compacting", "Failed"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 [[state]]
 name = "compactions_done"

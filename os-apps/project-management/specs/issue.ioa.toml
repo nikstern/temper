@@ -11,6 +11,7 @@
 name = "Issue"
 states = ["Backlog", "Triage", "Todo", "Planning", "Planned", "InProgress", "InReview", "Done", "Cancelled", "Archived"]
 initial = "Backlog"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

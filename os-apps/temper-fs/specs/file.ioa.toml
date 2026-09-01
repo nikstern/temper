@@ -8,6 +8,7 @@
 name = "File"
 states = ["Created", "Ready", "Locked", "Archived"]
 initial = "Created"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

@@ -70,6 +70,12 @@ impl SwapController {
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
     }
+
+    /// Record a table replacement performed while a registry-wide batch holds
+    /// every affected table's write lock.
+    pub fn record_batch_swap(&self) {
+        self.version.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 // ---------------------------------------------------------------------------

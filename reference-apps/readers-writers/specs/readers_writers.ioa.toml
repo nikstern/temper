@@ -13,6 +13,7 @@
 name = "ReadersWriters"
 states = ["Idle", "Reading", "Writing"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 # --- Projected state variables verified by Temper ---
 

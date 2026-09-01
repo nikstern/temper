@@ -24,7 +24,7 @@ fn workspace_free_restart_preserves_canonical_default_behavior() {
         r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Customer"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Unconfigured"/><Property Name="FailureReason" Type="Edm.String" Nullable="false" DefaultValue=""/></EntityType><EntityContainer Name="Container"><EntitySet Name="Customers" EntityType="Temper.Example.Customer"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#,
     )
     .expect("restart fixture CSDL parses");
-    let binding = temper_codegen::generate_module_sdk(
+    let binding = temper_codegen::generate_module_sdk_v1(
         &csdl,
         &[temper_spec::bundle::IoaSourceInput {
             entity_type: "Temper.Example.Customer".into(),

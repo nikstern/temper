@@ -29,12 +29,48 @@ pub(super) fn verify_materialized_bundle(
         }
         let bundle = load_app_bundle(&app_path)
             .ok_or_else(|| format!("materialized app '{}' could not be parsed", app.name))?;
-        if let Some(csdl) = &bundle.csdl {
-            temper_spec::csdl::parse_csdl(csdl)
-                .map_err(|error| format!("CSDL verification failed for '{}': {error}", app.name))?;
+        let csdl = bundle
+            .csdl
+            .as_deref()
+            .map(temper_spec::csdl::parse_csdl)
+            .transpose()
+            .map_err(|error| format!("CSDL verification failed for '{}': {error}", app.name))?;
+        if bundle.specs.is_empty() {
+            continue;
         }
-        for (entity_type, source) in &bundle.specs {
-            let result = temper_verify::cascade::VerificationCascade::from_ioa(source)
+        let csdl = csdl
+            .as_ref()
+            .ok_or_else(|| format!("materialized app '{}' has IOA specs but no CSDL", app.name))?;
+        let sources = bundle
+            .specs
+            .iter()
+            .map(|(entity_type, source)| {
+                let matches = csdl
+                    .schemas
+                    .iter()
+                    .filter(|schema| schema.entity_type(entity_type).is_some())
+                    .map(|schema| format!("{}.{}", schema.namespace, entity_type))
+                    .collect::<Vec<_>>();
+                let [qualified] = matches.as_slice() else {
+                    return Err(format!(
+                        "materialized app '{}' entity '{}' has no unique CSDL type",
+                        app.name, entity_type
+                    ));
+                };
+                Ok(temper_spec::IoaSourceInput {
+                    entity_type: qualified.clone(),
+                    source: source.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let model = temper_spec::CanonicalSpecModel::link_v2_sources(csdl, &sources)
+            .map_err(|error| format!("canonical linking failed for '{}': {error}", app.name))?;
+        for source in &sources {
+            let automaton = model
+                .behavioral_entity(&source.entity_type)
+                .and_then(|entity| entity.automaton())
+                .expect("linked source must retain its canonical automaton");
+            let result = temper_verify::cascade::VerificationCascade::from_automaton(automaton)
                 .with_sim_seeds(5)
                 .with_prop_test_cases(100)
                 .with_fail_fast()
@@ -42,7 +78,7 @@ pub(super) fn verify_materialized_bundle(
             if !result.all_passed {
                 return Err(format!(
                     "verification cascade rejected '{}.{}'",
-                    app.name, entity_type
+                    app.name, source.entity_type
                 ));
             }
         }
@@ -90,5 +126,31 @@ mod tests {
             error.contains("does not match"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn verification_accepts_an_app_without_specs_or_csdl() {
+        let view = tempfile::tempdir().unwrap();
+        let app_path = view.path().join("sample");
+        std::fs::create_dir_all(&app_path).unwrap();
+        std::fs::write(
+            app_path.join("app.toml"),
+            "name = \"sample\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(app_path.join("APP.md"), "# Sample\n").unwrap();
+        let manifest = CanonicalBundleManifestV1 {
+            schema_version: 1,
+            root_app: "sample".to_string(),
+            apps: vec![CanonicalAppManifest {
+                name: "sample".to_string(),
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                files: Vec::new(),
+            }],
+            bundle_digest: String::new(),
+        };
+
+        verify_materialized_bundle(view.path(), &manifest).unwrap();
     }
 }

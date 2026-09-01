@@ -2946,6 +2946,7 @@ async fn test_install_app_skill_docs_are_query_readable_by_canonical_path_fields
 name = "Soul"
 states = ["Created", "Published"]
 initial = "Created"
+lifecycle_property = "Status"
 
 [[action]]
 name = "Create"
@@ -2960,6 +2961,11 @@ kind = "input"
 from = ["Created", "Published"]
 to = "Published"
 "#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("specs/model.csdl.xml"),
+        r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="SkillDoc" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Soul"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Status" Type="Edm.String" Nullable="false"/><Property Name="name" Type="Edm.String" Nullable="false"/><Property Name="description" Type="Edm.String" Nullable="false"/><Property Name="content_file_id" Type="Edm.String" Nullable="false"/></EntityType><Action Name="Create" IsBound="true"><Parameter Name="binding" Type="SkillDoc.Soul" Nullable="false"/><Parameter Name="name" Type="Edm.String" Nullable="false"/><Parameter Name="description" Type="Edm.String" Nullable="false"/><Parameter Name="content_file_id" Type="Edm.String" Nullable="false"/></Action><Action Name="Publish" IsBound="true"><Parameter Name="binding" Type="SkillDoc.Soul" Nullable="false"/></Action><EntityContainer Name="Container"><EntitySet Name="Souls" EntityType="SkillDoc.Soul"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#,
     )
     .unwrap();
 
@@ -3167,14 +3173,18 @@ async fn test_install_os_app_rebuilds_reaction_dispatcher_for_inline_entity_trig
       <EntityType Name="Order">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="PaymentId" Type="Edm.String"/>
       </EntityType>
       <EntityType Name="Payment">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
+      <Action Name="AddItem" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.InstallTest.Order" Nullable="false"/><Parameter Name="payment_id" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="SubmitOrder" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.InstallTest.Order" Nullable="false"/></Action>
+      <Action Name="ConfirmOrder" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.InstallTest.Order" Nullable="false"/></Action>
+      <Action Name="AuthorizePayment" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.InstallTest.Payment" Nullable="false"/></Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Orders" EntityType="Temper.InstallTest.Order"/>
         <EntitySet Name="Payments" EntityType="Temper.InstallTest.Payment"/>
@@ -3190,6 +3200,7 @@ async fn test_install_os_app_rebuilds_reaction_dispatcher_for_inline_entity_trig
 name = "Order"
 states = ["Draft", "Submitted", "Confirmed"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 [[state]]
 name = "payment_id"
@@ -3233,6 +3244,7 @@ field = "payment_id"
 name = "Payment"
 states = ["Pending", "Authorized"]
 initial = "Pending"
+lifecycle_property = "Status"
 
 [[action]]
 name = "AuthorizePayment"

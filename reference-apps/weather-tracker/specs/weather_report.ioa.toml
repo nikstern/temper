@@ -2,6 +2,7 @@
 name = "WeatherReport"
 states = ["Collecting", "Fetching", "Ready", "Archived"]
 initial = "Collecting"
+lifecycle_property = "state"
 
 [[action]]
 name = "FetchWeatherData"

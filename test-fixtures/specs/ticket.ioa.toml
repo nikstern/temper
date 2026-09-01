@@ -8,6 +8,7 @@
 name = "Ticket"
 states = ["Open", "InProgress", "WaitingOnCustomer", "Resolved", "Closed"]
 initial = "Open"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

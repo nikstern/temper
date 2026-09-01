@@ -2,6 +2,7 @@
 name = "ViabilityConstraint"
 states = ["Draft", "Pinned", "Active", "Archived"]
 initial = "Draft"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Draft", "Pinned", "Active"]
 
 [[action]]

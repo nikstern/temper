@@ -4,13 +4,13 @@ use std::collections::BTreeSet;
 
 use crate::csdl::{
     Action, Annotation, CsdlDocument, EntityContainer, EntityType, Function, Schema, emit_csdl_xml,
-    parse_csdl,
+    parse_csdl_frozen_v1,
 };
 
 use super::{BundleError, BundleErrorCode};
 
 pub(super) fn canonical_csdl(source: &str) -> Result<String, BundleError> {
-    let mut document = parse_csdl(source).map_err(|error| {
+    let mut document = parse_csdl_frozen_v1(source).map_err(|error| {
         BundleError::new(
             BundleErrorCode::InvalidCsdl,
             format!("failed to parse CSDL: {error}"),
@@ -26,7 +26,7 @@ pub(super) fn canonical_csdl(source: &str) -> Result<String, BundleError> {
     Ok(emit_csdl_xml(&document))
 }
 
-fn canonicalize_document(document: &mut CsdlDocument) -> Result<(), BundleError> {
+pub(crate) fn canonicalize_document(document: &mut CsdlDocument) -> Result<(), BundleError> {
     ensure_unique(
         "CSDL namespace",
         document.schemas.iter().map(|s| s.namespace.as_str()),

@@ -1,6 +1,7 @@
 [automaton]
 name = "Analysis"
 initial = "Open"
+lifecycle_property = "Status"
 states = ["Open", "Reviewed", "Accepted", "Rejected"]
 
 [[action]]

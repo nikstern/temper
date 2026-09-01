@@ -1,6 +1,7 @@
 [automaton]
 name = "Tenant"
 initial = "Pending"
+lifecycle_property = "Status"
 states = ["Pending", "Deploying", "Active", "Suspended", "Archived"]
 
 [[action]]

@@ -37,12 +37,13 @@ const IOA: &str = r#"[automaton]
 name = "Task"
 states = ["Open"]
 initial = "Open"
+lifecycle_property = "Status"
 "#;
 
 const CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
 <edmx:DataServices><Schema Namespace="Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-<EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Title" Type="Edm.String"/></EntityType>
+<EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Title" Type="Edm.String"/><Property Name="Status" Type="Edm.String" Nullable="false"/></EntityType>
 <EntityContainer Name="Default"><EntitySet Name="Tasks" EntityType="Example.Task"/></EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
 
@@ -50,6 +51,7 @@ const STREAM_IOA: &str = r#"[automaton]
 name = "File"
 states = ["Ready"]
 initial = "Ready"
+lifecycle_property = "Status"
 
 [[action]]
 name = "StreamUpdated"
@@ -69,7 +71,7 @@ const ACTIVE_STREAM_CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
 <edmx:DataServices><Schema Namespace="Example" xmlns="http://docs.oasis-open.org/odata/ns/edm">
 <EntityType Name="File" HasStream="true">
-<Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/>
+<Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Status" Type="Edm.String" Nullable="false"/>
 <Annotation Term="Temper.Vocab.Stream.Mutability" String="Mutable"/>
 <Annotation Term="Temper.Vocab.Stream.DescriptorContractVersion" Int="1"/>
 <Annotation Term="Temper.Vocab.Stream.MigrationPublicationAction" String="StreamUpdated"/>
@@ -109,7 +111,7 @@ fn request() -> SubmitSchemaBundleRequestV1 {
         },
         expected_predecessor: None,
         expected_digest: compiled.digest().into(),
-        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1.into(),
+        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2.into(),
         csdl: CSDL.into(),
         ioa: vec![SchemaIoaSourceV1 {
             entity_type: "Example.Task".into(),

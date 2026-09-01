@@ -8,7 +8,7 @@
       <EntityType Name="LeadPlan">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="test_workflow_id" Type="Edm.String"/>
         <Property Name="review_workflow_id" Type="Edm.String"/>
         <Property Name="deploy_workflow_id" Type="Edm.String"/>
@@ -28,7 +28,7 @@
       <EntityType Name="TestWorkflow">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="test_count" Type="Edm.String"/>
         <Property Name="coverage" Type="Edm.String"/>
         <Property Name="failures" Type="Edm.String"/>
@@ -38,7 +38,7 @@
       <EntityType Name="ReviewWorkflow">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="reviewer" Type="Edm.String"/>
         <Property Name="comments" Type="Edm.String"/>
         <Property Name="change_requests" Type="Edm.String"/>
@@ -48,7 +48,7 @@
       <EntityType Name="DeployWorkflow">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="environment" Type="Edm.String"/>
         <Property Name="version" Type="Edm.String"/>
         <Property Name="deploy_url" Type="Edm.String"/>

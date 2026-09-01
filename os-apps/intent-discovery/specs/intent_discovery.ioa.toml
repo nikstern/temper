@@ -2,6 +2,7 @@
 name = "IntentDiscovery"
 states = ["Triggered", "Gathering", "Analyzing", "Proposing", "Complete", "Failed"]
 initial = "Triggered"
+lifecycle_property = "Status"
 
 [[state]]
 name = "signal_summary_present"

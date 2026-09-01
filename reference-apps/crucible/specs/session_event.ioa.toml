@@ -65,6 +65,7 @@
 name = "SessionEvent"
 states = ["Active"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # --- Cross-field validation (ADR-0041, ADR-0045) ---
 

@@ -12,6 +12,7 @@
 name = "Message"
 states = ["Written"]
 initial = "Written"
+lifecycle_property = "Status"
 
 [[action]]
 name = "Write"

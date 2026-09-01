@@ -7,6 +7,7 @@
 name = "HeartbeatMonitor"
 states = ["Idle", "Scanning"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 [[state]]
 name = "scan_interval_seconds"

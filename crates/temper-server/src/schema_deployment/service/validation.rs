@@ -48,13 +48,15 @@ impl GovernedSchemaDeploymentService<'_> {
                     )
                 })
                 .collect::<BTreeMap<_, _>>();
-            let target_spec = config.entities.get(entity_type).ok_or_else(|| {
-                ServiceError::new(
-                    "migration_rejected",
-                    format!("target bundle has no entity type '{entity_type}'"),
-                    false,
-                )
-            })?;
+            let target_spec = registry
+                .get_scoped_spec_at_digest(tenant, scope, bundle_digest, entity_type)
+                .ok_or_else(|| {
+                    ServiceError::new(
+                        "migration_rejected",
+                        format!("target bundle has no entity type '{entity_type}'"),
+                        false,
+                    )
+                })?;
             let references = target_spec
                 .table()
                 .state_var_metadata

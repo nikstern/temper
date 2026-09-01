@@ -4,6 +4,7 @@
 name = "BudgetLedger"
 states = ["Recorded"]
 initial = "Recorded"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

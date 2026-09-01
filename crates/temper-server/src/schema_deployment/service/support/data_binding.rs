@@ -71,11 +71,27 @@ pub(super) async fn verify_scoped_module_data_bindings(
             },
         )
         .collect::<Vec<_>>();
-    let closure_digest = temper_spec::bundle::scoped_module_data_closure_digest(
+    let closure_digest = temper_spec::bundle::scoped_module_data_closure_digest_with_version(
         &record.bundle.canonical_csdl,
         ioa.clone(),
+        &record.bundle.canonicalization_version,
     )
     .map_err(|error| ServiceError::new("verification_failed", error.to_string(), false))?;
+    let canonical_model = match record.bundle.canonicalization_version.as_str() {
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2 => Some(
+            temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &ioa).map_err(|error| {
+                ServiceError::new("verification_failed", error.to_string(), false)
+            })?,
+        ),
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1 => None,
+        version => {
+            return Err(ServiceError::new(
+                "verification_failed",
+                format!("unsupported canonicalization version '{version}'"),
+                false,
+            ));
+        }
+    };
     let tenant = TenantId::new(&record.bundle.tenant);
     for (module_name, stored) in &record.bundle.wasm_module_data_bindings {
         let Some(artifact_digest) = record.bundle.wasm_module_digests.get(module_name) else {
@@ -97,15 +113,26 @@ pub(super) async fn verify_scoped_module_data_bindings(
         {
             return Ok(false);
         }
-        let regenerated = temper_codegen::generate_module_sdk(
-            &csdl,
-            &ioa,
-            module_name,
-            &closure_digest,
-            &closure_digest,
-            artifact_hash,
-            supplied.grant.clone(),
-        )
+        let regenerated = if let Some(model) = &canonical_model {
+            temper_codegen::generate_module_sdk(
+                model,
+                module_name,
+                &closure_digest,
+                &closure_digest,
+                artifact_hash,
+                supplied.grant.clone(),
+            )
+        } else {
+            temper_codegen::generate_module_sdk_v1(
+                &csdl,
+                &ioa,
+                module_name,
+                &closure_digest,
+                &closure_digest,
+                artifact_hash,
+                supplied.grant.clone(),
+            )
+        }
         .map_err(|error| ServiceError::new("verification_failed", error.to_string(), false))?;
         let wasm = state
             .load_scoped_wasm_artifact_bytes(&tenant, module_name, artifact_hash)
@@ -149,6 +176,7 @@ mod tests {
                 entity_type: "Temper.Task".into(),
                 entity_set: "Tasks".into(),
                 generated_name: "Task".into(),
+                lifecycle_states: Vec::new(),
                 properties: Vec::new(),
                 actions: vec![ManifestActionV1 {
                     canonical_name: "Close".into(),

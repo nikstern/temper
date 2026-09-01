@@ -137,13 +137,6 @@ const ROOT_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <Action Name="Complete" IsBound="true">
         <Parameter Name="bindingParameter" Type="Example.Root.Task" Nullable="false"/>
       </Action>
-      <Action Name="Start" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Example.Root.Task" Nullable="false"/>
-      </Action>
-      <Action Name="RecordTransientFailureV1" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Example.Root.Task" Nullable="false"/>
-        <Parameter Name="failure" Type="failure_v1" Nullable="false"/>
-      </Action>
       <EntityContainer Name="Default">
         <EntitySet Name="Tasks" EntityType="Example.Root.Task"/>
       </EntityContainer>
@@ -178,6 +171,7 @@ fn ioa(name: &str) -> String {
 name = "{name}"
 states = ["Open", "Done"]
 initial = "Open"
+lifecycle_property = "state"
 
 [[action]]
 name = "Complete"
@@ -194,6 +188,7 @@ fn typed_failure_ioa(name: &str) -> String {
 name = "{name}"
 states = ["Open", "Running", "RetryScheduled"]
 initial = "Open"
+lifecycle_property = "state"
 
 [[action]]
 name = "Start"
@@ -258,7 +253,20 @@ type = "Paw.FS.File"
         "version = 1\n\n[[local]]\nname = \"dependency\"\npath = \"../dependency\"\n",
     )
     .unwrap();
-    std::fs::write(root.join("specs/model.csdl.xml"), ROOT_CSDL).unwrap();
+    let root_csdl = if root_ioa.contains("RecordTransientFailureV1") {
+        ROOT_CSDL
+        .replace(
+            "      <Action Name=\"Complete\" IsBound=\"true\">\n        <Parameter Name=\"bindingParameter\" Type=\"Example.Root.Task\" Nullable=\"false\"/>\n      </Action>\n",
+            "",
+        )
+        .replace(
+            "      <EntityContainer Name=\"Default\">",
+            "      <Action Name=\"Start\" IsBound=\"true\">\n        <Parameter Name=\"bindingParameter\" Type=\"Example.Root.Task\" Nullable=\"false\"/>\n      </Action>\n      <Action Name=\"RecordTransientFailureV1\" IsBound=\"true\">\n        <Parameter Name=\"bindingParameter\" Type=\"Example.Root.Task\" Nullable=\"false\"/>\n        <Parameter Name=\"failure\" Type=\"failure_v1\" Nullable=\"false\"/>\n      </Action>\n      <EntityContainer Name=\"Default\">",
+        )
+    } else {
+        ROOT_CSDL.to_string()
+    };
+    std::fs::write(root.join("specs/model.csdl.xml"), root_csdl).unwrap();
     std::fs::write(root.join("specs/task.ioa.toml"), root_ioa).unwrap();
     std::fs::write(
         dependency.join("app.toml"),

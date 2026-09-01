@@ -11,6 +11,7 @@
 name = "SentinelMonitor"
 states = ["Active", "Checking", "Triggering"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

@@ -36,16 +36,33 @@ fn merge_schema(schemas: &mut Vec<Schema>, incoming_schema: &Schema) {
         &incoming_schema.enum_types,
         |item| item.name.as_str(),
     );
-    merge_replace_by_name(
-        &mut result_schema.actions,
-        &incoming_schema.actions,
-        |item| item.name.as_str(),
-    );
-    merge_replace_by_name(
-        &mut result_schema.functions,
-        &incoming_schema.functions,
-        |item| item.name.as_str(),
-    );
+    for incoming in &incoming_schema.actions {
+        if let Some(position) = result_schema.actions.iter().position(|existing| {
+            existing.name == incoming.name && existing.binding_type() == incoming.binding_type()
+        }) {
+            result_schema.actions[position] = incoming.clone();
+        } else {
+            result_schema.actions.push(incoming.clone());
+        }
+    }
+    for incoming in &incoming_schema.functions {
+        if let Some(position) = result_schema.functions.iter().position(|existing| {
+            existing.name == incoming.name
+                && existing.is_bound == incoming.is_bound
+                && existing
+                    .parameters
+                    .first()
+                    .map(|parameter| &parameter.type_name)
+                    == incoming
+                        .parameters
+                        .first()
+                        .map(|parameter| &parameter.type_name)
+        }) {
+            result_schema.functions[position] = incoming.clone();
+        } else {
+            result_schema.functions.push(incoming.clone());
+        }
+    }
 
     for container in &incoming_schema.entity_containers {
         merge_entity_container(&mut result_schema.entity_containers, container);

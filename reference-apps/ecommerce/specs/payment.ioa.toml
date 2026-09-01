@@ -8,6 +8,7 @@
 name = "Payment"
 states = ["Pending", "Authorized", "Captured", "Failed", "Refunded", "PartiallyRefunded"]
 initial = "Pending"
+lifecycle_property = "Status"
 
 # --- Actions: Payment Lifecycle ---
 

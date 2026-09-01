@@ -2,6 +2,7 @@
 name = "SelectionPressure"
 states = ["Draft", "Active", "Archived"]
 initial = "Draft"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Draft", "Active"]
 
 [[action]]

@@ -2,6 +2,7 @@
 name = "Signal"
 states = ["Recorded", "Linked", "Ignored", "ObservationFailed", "Archived"]
 initial = "Recorded"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Recorded", "Linked", "Ignored", "ObservationFailed"]
 
 [[action]]

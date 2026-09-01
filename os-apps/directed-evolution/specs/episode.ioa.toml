@@ -2,6 +2,7 @@
 name = "Episode"
 states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting", "Completed", "Stopped", "Failed"]
 initial = "Draft"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Draft", "Negotiating", "Running", "Paused", "Selecting", "Promoting"]
 
 [[state]]

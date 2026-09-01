@@ -162,7 +162,7 @@ async fn governed_migration_materializes_shadow_and_atomically_cuts_over() {
         },
         expected_predecessor: Some(source_receipt.bundle_digest.clone()),
         expected_digest: compiled.digest().into(),
-        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1.into(),
+        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2.into(),
         csdl: CSDL.into(),
         ioa: vec![SchemaIoaSourceV1 {
             entity_type: "Example.Task".into(),

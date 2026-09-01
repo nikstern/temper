@@ -5,12 +5,39 @@ use std::sync::Arc;
 
 use temper_jit::swap::SwapController;
 use temper_jit::table::TransitionTable;
+use temper_spec::CanonicalSpecModel;
 use temper_spec::automaton::{Automaton, Integration, Webhook};
 use temper_spec::cross_invariant::{CrossInvariantSpec, DeletePolicy};
 use temper_spec::csdl::CsdlDocument;
 use temper_wasm_sdk::data::ModuleSdkManifest;
 
 use crate::trigger::types::ReactionRule;
+
+/// Optional metadata applied while registering a canonical tenant model.
+#[derive(Debug, Clone, Default)]
+pub struct TenantRegistrationOptions {
+    /// Reaction rules installed alongside the model.
+    pub reactions: Vec<ReactionRule>,
+    /// Optional cross-entity invariant source.
+    pub cross_invariants_source: Option<String>,
+    /// Whether to merge the submitted structural CSDL and IOA sources.
+    pub merge: bool,
+}
+
+impl TenantRegistrationOptions {
+    /// Construct registration options from their three orthogonal inputs.
+    pub fn new(
+        reactions: Vec<ReactionRule>,
+        cross_invariants_source: Option<String>,
+        merge: bool,
+    ) -> Self {
+        Self {
+            reactions,
+            cross_invariants_source,
+            merge,
+        }
+    }
+}
 
 /// Exact immutable WASM descriptor owned by one scoped schema bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +124,10 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// Canonical CSDL/IOA linking failed before registry mutation.
+    CanonicalLink { tenant: String, source: String },
+    /// An actor-visible transition table was poisoned before atomic activation.
+    TableLockPoisoned { tenant: String, entity_type: String },
     /// One immutable scoped digest was staged with different content.
     ScopedBundleConflict {
         tenant: String,
@@ -132,6 +163,17 @@ impl std::fmt::Display for RegistryError {
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
                 )
             }
+            Self::CanonicalLink { tenant, source } => write!(
+                f,
+                "failed to link canonical entity model for tenant '{tenant}': {source}"
+            ),
+            Self::TableLockPoisoned {
+                tenant,
+                entity_type,
+            } => write!(
+                f,
+                "transition table lock poisoned for tenant '{tenant}', entity '{entity_type}'"
+            ),
             Self::ScopedBundleConflict {
                 tenant,
                 scope,
@@ -189,6 +231,8 @@ pub struct RelationGraph {
 /// A registered tenant with its specs and entity configuration.
 #[derive(Debug, Clone)]
 pub struct TenantConfig {
+    /// Immutable linked CSDL/IOA model swapped as one registry revision.
+    pub canonical_model: Arc<CanonicalSpecModel>,
     /// The CSDL document describing this tenant's entity model.
     pub csdl: Arc<CsdlDocument>,
     /// Raw CSDL XML for serving via `$metadata`.

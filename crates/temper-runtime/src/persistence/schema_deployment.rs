@@ -73,6 +73,9 @@ pub struct SchemaBundleRecord {
     pub digest: String,
     /// Optional immutable predecessor digest.
     pub predecessor_digest: Option<String>,
+    /// Durable canonicalization contract used to interpret and retry this bundle.
+    #[serde(default = "default_schema_bundle_canonicalization_version")]
+    pub canonicalization_version: String,
     /// Canonical CSDL XML bytes represented as UTF-8.
     pub canonical_csdl: String,
     /// Fully-qualified entity type to canonical IOA TOML.
@@ -92,6 +95,10 @@ pub struct SchemaBundleRecord {
     pub migration_abi_version: Option<String>,
     /// Canonical serialized positive verification and migration budgets.
     pub canonical_budgets: String,
+}
+
+fn default_schema_bundle_canonicalization_version() -> String {
+    "scoped-spec-bundle/v1".into()
 }
 
 /// Monotonic deployment lifecycle from ADR-0159.

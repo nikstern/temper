@@ -57,10 +57,7 @@
 
       <!-- ============ Enums ============ -->
 
-      <EnumType Name="EnvironmentStatus">
-        <Member Name="Active" Value="0"/>
-        <Member Name="Archived" Value="1"/>
-      </EnumType>
+      <EnumType Name="EnvironmentStatus"/>
 
       <!--
         ConfigType is modeled as an Edm.String rather than an EnumType so
@@ -100,14 +97,6 @@
         <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
         <NavigationProperty Name="AllowedHosts" Type="Collection(Temper.Crucible.EnvironmentAllowedHost)"/>
         <NavigationProperty Name="Packages" Type="Collection(Temper.Crucible.EnvironmentPackage)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-            <String>Archived</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -125,13 +114,6 @@
         <NavigationProperty Name="Environment" Type="Temper.Crucible.Environment" Nullable="false">
           <ReferentialConstraint Property="EnvironmentId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="EnvironmentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment_allowed_host.cedar"/>
       </EntityType>
@@ -149,13 +131,6 @@
         <NavigationProperty Name="Environment" Type="Temper.Crucible.Environment" Nullable="false">
           <ReferentialConstraint Property="EnvironmentId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="EnvironmentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/environment_package.cedar"/>
       </EntityType>
@@ -204,14 +179,6 @@
         <NavigationProperty Name="Tools" Type="Collection(Temper.Crucible.AgentTool)"/>
         <NavigationProperty Name="Versions" Type="Collection(Temper.Crucible.AgentVersion)"/>
         <NavigationProperty Name="CallableAgents" Type="Collection(Temper.Crucible.CallableAgent)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-            <String>Archived</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/managed_agent.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -231,13 +198,6 @@
         <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
           <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_mcp_server.cedar"/>
       </EntityType>
@@ -255,13 +215,6 @@
         <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
           <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_skill.cedar"/>
       </EntityType>
@@ -289,13 +242,6 @@
           <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
         </NavigationProperty>
         <NavigationProperty Name="Configs" Type="Collection(Temper.Crucible.AgentToolConfig)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_tool.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -315,13 +261,6 @@
         <NavigationProperty Name="AgentTool" Type="Temper.Crucible.AgentTool" Nullable="false">
           <ReferentialConstraint Property="AgentToolId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="AgentToolId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_tool_config.cedar"/>
       </EntityType>
@@ -339,13 +278,6 @@
         <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
           <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/agent_version.cedar"/>
       </EntityType>
@@ -362,13 +294,6 @@
         <NavigationProperty Name="ManagedAgent" Type="Temper.Crucible.ManagedAgent" Nullable="false">
           <ReferentialConstraint Property="AgentId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="AgentId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/callable_agent.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -430,17 +355,6 @@
         <NavigationProperty Name="Resources" Type="Collection(Temper.Crucible.SessionResource)"/>
         <NavigationProperty Name="Events" Type="Collection(Temper.Crucible.SessionEvent)"/>
         <NavigationProperty Name="Threads" Type="Collection(Temper.Crucible.SessionThread)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Rescheduling</String>
-            <String>Running</String>
-            <String>Idle</String>
-            <String>Terminated</String>
-            <String>Archived</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Rescheduling"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -462,15 +376,6 @@
         <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
           <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Running</String>
-            <String>Idle</String>
-            <String>Terminated</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Running"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_thread.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -507,13 +412,6 @@
         <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
           <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_resource.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -583,13 +481,6 @@
         <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
           <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_event.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -609,14 +500,6 @@
         <Property Name="UpdatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
         <Property Name="ArchivedAt" Type="Edm.DateTimeOffset"/>
         <NavigationProperty Name="Memories" Type="Collection(Temper.Crucible.Memory)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-            <String>Archived</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory_store.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -638,11 +521,6 @@
           <ReferentialConstraint Property="MemoryStoreId" ReferencedProperty="Id"/>
         </NavigationProperty>
         <NavigationProperty Name="Versions" Type="Collection(Temper.Crucible.MemoryVersion)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="MemoryStoreId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -665,14 +543,6 @@
         <NavigationProperty Name="Memory" Type="Temper.Crucible.Memory" Nullable="false">
           <ReferentialConstraint Property="MemoryId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Active</String>
-            <String>Redacted</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="MemoryId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/memory_version.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -699,16 +569,6 @@
         <NavigationProperty Name="Session" Type="Temper.Crucible.Session" Nullable="false">
           <ReferentialConstraint Property="SessionId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Draft</String>
-            <String>Active</String>
-            <String>Paused</String>
-            <String>Expired</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="SessionId"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/session_schedule.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -723,14 +583,6 @@
         <Property Name="LastCheckAt" Type="Edm.DateTimeOffset"/>
         <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Idle</String>
-            <String>Checking</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Idle"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/crucible_scheduler.cedar"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
@@ -742,10 +594,6 @@
       <Action Name="ArchiveEnvironment" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Environment" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Environment"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Archive an environment. Retains history but makes the environment non-operational. Archived is terminal."/>
       </Action>
@@ -753,10 +601,6 @@
       <Action Name="ArchiveManagedAgent" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.ManagedAgent" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.ManagedAgent"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Archive a managed agent. Mirrors Anthropic's POST /v1/agents/{id}/archive. Archived is terminal."/>
       </Action>
@@ -766,10 +610,6 @@
       <Action Name="StartSession" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Session" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Session"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Rescheduling</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Running"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Transition a rescheduled session to Running after the runtime has placed it on an environment."/>
       </Action>
@@ -777,10 +617,6 @@
       <Action Name="IdleSession" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Session" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Session"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Running</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Idle"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Mark a running session as Idle when the agent yields."/>
       </Action>
@@ -788,10 +624,6 @@
       <Action Name="ResumeSession" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Session" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Session"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Idle</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Running"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Resume an idle session back to Running."/>
       </Action>
@@ -799,13 +631,6 @@
       <Action Name="RescheduleSession" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Session" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Session"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection>
-            <String>Running</String>
-            <String>Idle</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Rescheduling"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Pause a running or idle session and mark it for rehoming onto a new environment."/>
       </Action>
@@ -813,14 +638,6 @@
       <Action Name="TerminateSession" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Session" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Session"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection>
-            <String>Rescheduling</String>
-            <String>Running</String>
-            <String>Idle</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Terminated"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Terminate a session. Mirrors Anthropic's implicit cleanup semantics. Clients should set TerminatedAt."/>
       </Action>
@@ -828,10 +645,6 @@
       <Action Name="ArchiveMemoryStore" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.MemoryStore" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.MemoryStore"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Archive a memory store. Prevents new memory writes. Existing memories are preserved read-only."/>
       </Action>
@@ -839,10 +652,6 @@
       <Action Name="RedactVersion" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.MemoryVersion" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.MemoryVersion"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Redacted"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Redact a memory version. Clears Content, ContentSha256, ContentSizeBytes, and Path while preserving Operation, MemoryId, SessionId, and timestamps."/>
       </Action>
@@ -850,10 +659,6 @@
       <Action Name="ArchiveSession" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.Session" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.Session"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Terminated</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Archived"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Archive a terminated session. Mirrors Anthropic's POST /v1/sessions/{id}/archive but requires TerminateSession first. Archived is terminal."/>
       </Action>
@@ -863,10 +668,6 @@
       <Action Name="IdleThread" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionThread" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionThread"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Running</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Idle"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Mark a running thread as Idle when the sub-agent yields."/>
       </Action>
@@ -874,10 +675,6 @@
       <Action Name="ResumeThread" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionThread" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionThread"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Idle</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Running"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Resume an idle thread back to Running."/>
       </Action>
@@ -885,13 +682,6 @@
       <Action Name="TerminateThread" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionThread" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionThread"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection>
-            <String>Running</String>
-            <String>Idle</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Terminated"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Terminate the thread when the sub-agent finishes its delegated task."/>
       </Action>
@@ -901,37 +691,21 @@
       <Action Name="ActivateSchedule" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionSchedule"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Draft</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
       </Action>
 
       <Action Name="PauseSchedule" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionSchedule"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Paused"/>
       </Action>
 
       <Action Name="ResumeSchedule" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionSchedule"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Paused</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
       </Action>
 
       <Action Name="ExpireSchedule" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Crucible.SessionSchedule" Nullable="false"/>
         <ReturnType Type="Temper.Crucible.SessionSchedule"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Expired"/>
       </Action>
 
       <!-- ============ Entity Container ============ -->

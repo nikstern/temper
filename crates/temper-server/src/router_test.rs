@@ -136,10 +136,24 @@ fn test_state_with_active_task_schema() -> ServerState {
     ))
 }
 
+fn scoped_order_csdl() -> String {
+    include_str!("../../../test-fixtures/specs/model.csdl.xml")
+        .replace("Temper.Example", "Temper.ScopedExample")
+        .replace(
+            "      <EntityContainer Name=\"ExampleService\">",
+            r#"      <Action Name="Configure" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ScopedExample.Order" Nullable="false"/>
+      </Action>
+      <Action Name="Simulate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.ScopedExample.Order" Nullable="false"/>
+      </Action>
+      <EntityContainer Name="ExampleService">"#,
+        )
+}
+
 fn test_state_with_active_task_schema_and_ioa(order_ioa: &str) -> ServerState {
     let state = test_state_with_ioa();
-    let global_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml");
-    let scoped_csdl = global_csdl.replace("Temper.Example", "Temper.ScopedExample");
+    let scoped_csdl = scoped_order_csdl();
     let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
     let scope = SchemaScope {
         kind: SchemaScopeKind::Task,
@@ -223,8 +237,7 @@ async fn persist_task_schema_bundle_in_scope(
     operation_tag: &str,
     scope: &SchemaScope,
 ) {
-    let scoped_csdl = include_str!("../../../test-fixtures/specs/model.csdl.xml")
-        .replace("Temper.Example", "Temper.ScopedExample");
+    let scoped_csdl = scoped_order_csdl();
     persist_task_schema_bundle_with_csdl_in_scope(
         store,
         order_ioa,
@@ -254,6 +267,7 @@ async fn persist_task_schema_bundle_with_csdl_in_scope(
                 scope: scope.clone(),
                 digest: digest.to_string(),
                 predecessor_digest: predecessor.map(str::to_string),
+                canonicalization_version: "scoped-spec-bundle/v1".into(),
                 canonical_csdl: scoped_csdl,
                 canonical_ioa: std::collections::BTreeMap::from([(
                     "Order".into(),

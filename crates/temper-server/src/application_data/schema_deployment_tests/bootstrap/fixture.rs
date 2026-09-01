@@ -28,7 +28,7 @@ pub(super) fn bootstrap_bundle_request() -> SubmitSchemaBundleRequestV1 {
         },
         expected_predecessor: None,
         expected_digest: compiled.digest().into(),
-        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1.into(),
+        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2.into(),
         csdl: csdl.into(),
         ioa: vec![SchemaIoaSourceV1 {
             entity_type: "Temper.Example.Customer".into(),

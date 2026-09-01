@@ -52,17 +52,34 @@ const CSDL: &str = r#"
 #[test]
 fn representative_generated_surface_compiles() {
     let csdl = parse_csdl(CSDL).unwrap();
-    let generated = generate_module_sdk(
-        &csdl,
-        &[IoaSourceInput {
-            entity_type: "Temper.Generated.File".into(),
-            source: r#"[automaton]
+    let sources = [IoaSourceInput {
+        entity_type: "Temper.Generated.File".into(),
+        source: r#"[automaton]
 name = "File"
 states = ["Open", "Done"]
 initial = "Open"
+lifecycle_property = "Status"
+
+[[action]]
+name = "Complete"
+kind = "input"
+to = "Done"
+params = [{ name = "Note", type = "string", nullable = true }]
+
+[[action]]
+name = "Snapshot"
+kind = "input"
+
+[[action]]
+name = "HandleFailure"
+kind = "input"
+params = [{ name = "Failure", type = "Temper.FailureEnvelopeV1" }]
 "#
-            .into(),
-        }],
+        .into(),
+    }];
+    let model = temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &sources).unwrap();
+    let generated = generate_module_sdk(
+        &model,
         "worker",
         "closure",
         "closure",

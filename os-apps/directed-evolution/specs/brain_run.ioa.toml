@@ -2,6 +2,7 @@
 name = "BrainRun"
 states = ["Queued", "Running", "Succeeded", "Failed", "Cancelled"]
 initial = "Queued"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Queued", "Running"]
 
 [[state]]

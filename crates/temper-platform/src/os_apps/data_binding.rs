@@ -118,9 +118,10 @@ pub(super) fn verify_module_config_data_binding_with_csdl(
     if binding.artifact_digest != artifact_digest {
         return Err("module data binding artifact digest mismatch".into());
     }
+    let canonical_model = temper_spec::CanonicalSpecModel::link_v2_sources(csdl, ioa_sources)
+        .map_err(|error| format!("canonical model linking failed: {error}"))?;
     let regenerated = temper_codegen::generate_module_sdk(
-        csdl,
-        ioa_sources,
+        &canonical_model,
         module_name,
         closure_id,
         closure_id,
@@ -309,6 +310,7 @@ mod tests {
 name = "Task"
 states = ["Open", "Done"]
 initial = "Open"
+lifecycle_property = "State"
 "#;
 
     fn qualified_ioa() -> Vec<temper_spec::bundle::IoaSourceInput> {
@@ -344,9 +346,10 @@ initial = "Open"
     #[test]
     fn exact_binding_must_be_carried_by_loaded_artifact() {
         let csdl = parse_csdl(CSDL).unwrap();
+        let model = temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &qualified_ioa())
+            .expect("fixture canonical model links");
         let generated = temper_codegen::generate_module_sdk(
-            &csdl,
-            &qualified_ioa(),
+            &model,
             "worker",
             "closure",
             "closure",
@@ -357,8 +360,7 @@ initial = "Open"
         let packaged =
             temper_codegen::package_generated_module_sdk(b"\0asm\x01\0\0\0", generated).unwrap();
         let regenerated = temper_codegen::generate_module_sdk(
-            &csdl,
-            &qualified_ioa(),
+            &model,
             "worker",
             "closure",
             "closure",

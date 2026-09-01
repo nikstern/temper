@@ -8,6 +8,7 @@
 name = "EscalationPolicy"
 states = ["Idle", "Active", "Exhausted"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

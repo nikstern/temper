@@ -6,7 +6,7 @@
       <EntityType Name="HeartbeatRun">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="AgentId" Type="Edm.String"/>
         <Property Name="OrgId" Type="Edm.String"/>
         <Property Name="WakeReason" Type="Edm.String"/>
@@ -25,7 +25,7 @@
       <EntityType Name="Organization">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String"/>
         <Property Name="Description" Type="Edm.String"/>
         <Property Name="MemberCount" Type="Edm.Int64"/>
@@ -37,7 +37,7 @@
       <EntityType Name="BudgetLedger">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="OrgId" Type="Edm.String"/>
         <Property Name="AgentId" Type="Edm.String"/>
         <Property Name="RunId" Type="Edm.String"/>

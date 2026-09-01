@@ -14,5 +14,6 @@
 name = "AgentVersion"
 states = ["Active"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # No actions. Snapshots are append-only from the platform's perspective.

@@ -12,6 +12,7 @@
 name = "MemoryVersion"
 states = ["Active", "Redacted"]
 initial = "Active"
+lifecycle_property = "Status"
 
 [[action]]
 name = "RedactVersion"

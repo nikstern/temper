@@ -31,6 +31,7 @@ fn action_manifest(nullable: bool, closure: &str) -> ModuleSdkManifest {
             entity_type: "Temper.App.Task".into(),
             entity_set: "Tasks".into(),
             generated_name: "Task".into(),
+            lifecycle_states: Vec::new(),
             properties: Vec::new(),
             actions: vec![ManifestActionV1 {
                 canonical_name: "Close".into(),

@@ -186,6 +186,7 @@ async fn persist_active_scoped_echo_bundle(
                 scope: scope.clone(),
                 digest: digest.to_string(),
                 predecessor_digest: None,
+                canonicalization_version: "scoped-spec-bundle/v1".into(),
                 canonical_csdl: ECHO_CSDL_XML.to_string(),
                 canonical_ioa: std::collections::BTreeMap::from([(
                     "EchoTest".to_string(),

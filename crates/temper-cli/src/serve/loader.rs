@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 
 use crate::util::to_pascal_case;
 use temper_runtime::tenant::TenantId;
-use temper_server::registry::SpecRegistry;
+use temper_server::registry::{SpecRegistry, TenantRegistrationOptions};
 use temper_server::trigger::registry::parse_reactions;
 use temper_spec::automaton::{
     LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle, lint_automaton,
@@ -227,14 +227,12 @@ pub(super) fn load_into_registry(
         .collect();
 
     registry
-        .try_register_tenant_with_reactions_and_constraints(
+        .try_register_tenant_v2_with_reactions_and_constraints(
             tenant,
             csdl,
             csdl_xml,
             &ioa_pairs,
-            reactions,
-            cross_invariants_toml.clone(),
-            false,
+            TenantRegistrationOptions::new(reactions, cross_invariants_toml.clone(), false),
         )
         .with_context(|| format!("Failed to register tenant '{tenant}'"))?;
 

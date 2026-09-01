@@ -1,7 +1,8 @@
 //! Deterministic, capability-scoped Rust client generation for WASM modules.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use temper_spec::CanonicalSpecModel;
 use temper_spec::csdl::{Action, CsdlDocument, EntityType, emit_csdl_xml};
 use temper_wasm_sdk::data::{
     ArtifactModuleSdkBinding, DataOperationKind, EntityDataGrant, ManifestActionV1,
@@ -11,6 +12,7 @@ use temper_wasm_sdk::data::{
 
 mod defaults;
 mod entity_results;
+mod legacy;
 mod names;
 mod property_sources;
 mod schema_helpers;
@@ -19,92 +21,16 @@ mod stream_capabilities;
 mod types;
 use defaults::manifest_property;
 use entity_results::{emit_entity_value_types, generated_entity_names, validate_entity_results};
-use names::{reject_generated_collisions, rust_field_name};
+use names::{checked_enum_variant, reject_generated_collisions, rust_field_name};
 use property_sources::assign_entity_property_sources;
 use schema_helpers::{entity_sets, enum_members};
-use source_types::{emit_artifact_binding, emit_named_property_type, hex_sha256};
+use source_types::{
+    emit_artifact_binding, emit_named_property_type, hex_sha256, register_generated_type,
+};
 use stream_capabilities::stream_capabilities_for_grant;
 mod client_emitter;
 use client_emitter::{EntityClientSpec, emit_entity_client};
-pub use types::{GeneratedModuleSdk, PackagedModuleSdk};
-
-/// A fail-closed schema or naming error during module SDK generation.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ModuleSdkCodegenError {
-    #[error("invalid module data grant: {0}")]
-    InvalidGrant(String),
-    #[error("granted entity type '{0}' is absent from the verified CSDL closure")]
-    MissingEntity(String),
-    #[error("entity type '{0}' has no entity set in the verified CSDL closure")]
-    MissingEntitySet(String),
-    #[error("granted schema symbol '{symbol}' is absent from entity '{entity_type}'")]
-    MissingSymbol { entity_type: String, symbol: String },
-    #[error(
-        "granted bound action '{action}' is ambiguous on entity '{entity_type}': {matches} exact overloads match"
-    )]
-    AmbiguousBoundAction {
-        entity_type: String,
-        action: String,
-        matches: usize,
-    },
-    #[error("generated Rust identifier collision '{0}'")]
-    IdentifierCollision(String),
-    #[error("invalid default '{value}' for schema symbol '{symbol}' of type '{type_name}'")]
-    InvalidDefault {
-        symbol: String,
-        type_name: String,
-        value: String,
-    },
-    #[error("granted entity type '{0}' has no verified IOA source")]
-    MissingIoaSource(String),
-    #[error("verified IOA source for '{entity_type}' is invalid: {message}")]
-    InvalidIoaSource {
-        entity_type: String,
-        message: String,
-    },
-    #[error("entity '{entity_type}' has unsupported canonical key properties {key_properties:?}")]
-    UnsupportedEntityKey {
-        entity_type: String,
-        key_properties: Vec<String>,
-    },
-    #[error(
-        "entity '{entity_type}' has no canonical lifecycle property for IOA initial state '{initial_state}'"
-    )]
-    MissingLifecycleProperty {
-        entity_type: String,
-        initial_state: String,
-    },
-    #[error(
-        "entity '{entity_type}' has ambiguous canonical lifecycle properties {candidates:?} for IOA initial state '{initial_state}'"
-    )]
-    AmbiguousLifecycleProperty {
-        entity_type: String,
-        initial_state: String,
-        candidates: Vec<String>,
-    },
-    #[error(
-        "entity '{entity_type}' lifecycle property '{property}' default does not match IOA initial state '{initial_state}'"
-    )]
-    LifecycleDefaultMismatch {
-        entity_type: String,
-        property: String,
-        initial_state: String,
-    },
-    #[error(
-        "bound action '{action}' on '{entity_type}' returns different entity type '{result_type}'"
-    )]
-    UnsupportedEntityResult {
-        action: String,
-        entity_type: String,
-        result_type: String,
-    },
-    #[error("failed to construct module SDK manifest: {0}")]
-    Manifest(String),
-    #[error("invalid verified stream capability: {0}")]
-    StreamCapability(String),
-    #[error("failed to bind compiled module artifact: {0}")]
-    ArtifactBinding(String),
-}
+pub use types::{GeneratedModuleSdk, ModuleSdkCodegenError, PackagedModuleSdk};
 
 /// Bind generated metadata into compiled WebAssembly and finalize its digest.
 ///
@@ -127,6 +53,26 @@ pub fn package_generated_module_sdk(
 
 /// Generate a module-specific Rust client from a verified closure and exact grant.
 pub fn generate_module_sdk(
+    model: &CanonicalSpecModel,
+    module_name: &str,
+    closure_digest: &str,
+    dependency_lock_digest: &str,
+    artifact_digest: &str,
+    grant: ModuleDataGrant,
+) -> Result<GeneratedModuleSdk, ModuleSdkCodegenError> {
+    generate_module_sdk_impl(
+        model,
+        module_name,
+        closure_digest,
+        dependency_lock_digest,
+        artifact_digest,
+        grant,
+        true,
+    )
+}
+
+/// Regenerate a persisted v1 binding with its frozen lifecycle inference and ABI shape.
+pub fn generate_module_sdk_v1(
     csdl: &CsdlDocument,
     ioa_sources: &[temper_spec::bundle::IoaSourceInput],
     module_name: &str,
@@ -135,6 +81,28 @@ pub fn generate_module_sdk(
     artifact_digest: &str,
     grant: ModuleDataGrant,
 ) -> Result<GeneratedModuleSdk, ModuleSdkCodegenError> {
+    let model = legacy::model_v1(csdl, ioa_sources)?;
+    generate_module_sdk_impl(
+        &model,
+        module_name,
+        closure_digest,
+        dependency_lock_digest,
+        artifact_digest,
+        grant,
+        false,
+    )
+}
+
+fn generate_module_sdk_impl(
+    model: &CanonicalSpecModel,
+    module_name: &str,
+    closure_digest: &str,
+    dependency_lock_digest: &str,
+    artifact_digest: &str,
+    grant: ModuleDataGrant,
+    include_lifecycle_contract: bool,
+) -> Result<GeneratedModuleSdk, ModuleSdkCodegenError> {
+    let csdl = model.emitted_csdl();
     grant
         .validate()
         .map_err(ModuleSdkCodegenError::InvalidGrant)?;
@@ -145,7 +113,19 @@ pub fn generate_module_sdk(
     let generated_entity_names = generated_entity_names(csdl, &grant)?;
     let mut entities = Vec::new();
     let mut used_symbols = BTreeSet::new();
-    let mut generated_named_types = BTreeSet::new();
+    let mut generated_named_types = BTreeMap::new();
+    for (canonical, generated) in &generated_entity_names {
+        register_generated_type(
+            &mut generated_named_types,
+            generated.clone(),
+            format!("entity type '{canonical}'"),
+        )?;
+        register_generated_type(
+            &mut generated_named_types,
+            format!("{generated}Id"),
+            format!("entity ID type for '{canonical}'"),
+        )?;
+    }
     let mut source = String::from(
         "// @generated by temper-codegen; do not edit.\nuse temper_wasm_sdk::data::*;\n\nfn invalid_generated_value(error: serde_json::Error) -> ModuleDataError { ModuleDataError::new(ModuleDataErrorKind::InvalidRequest, \"GeneratedValueEncodingFailed\", error.to_string(), Retryability::Never) }\n\n",
     );
@@ -198,13 +178,23 @@ pub fn generate_module_sdk(
         } else {
             Vec::new()
         };
-        if entity_value_required {
+        let lifecycle_states = if entity_value_required {
             assign_entity_property_sources(
+                model,
                 &entity_grant.entity_type,
                 entity,
-                ioa_sources,
                 &mut properties,
-            )?;
+            )?
+        } else {
+            model
+                .behavioral_entity(&entity_grant.entity_type)
+                .map(|entity| entity.lifecycle_states().to_vec())
+                .unwrap_or_default()
+        };
+        if include_lifecycle_contract {
+            for state in &lifecycle_states {
+                used_symbols.insert(format!("lifecycle:{}:{state}", entity_grant.entity_type));
+            }
         }
         for property in &properties {
             used_symbols.insert(format!(
@@ -222,6 +212,33 @@ pub fn generate_module_sdk(
                 .iter()
                 .map(|property| (&property.canonical_name, &property.generated_name)),
         )?;
+        let string_lifecycle_type = (include_lifecycle_contract
+            && properties.iter().any(|property| {
+                property.source == ManifestValueSourceV1::LifecycleStatus
+                    && property.type_name == "Edm.String"
+            }))
+        .then(|| format!("{generated}LifecycleState"));
+        if let Some(type_name) = &string_lifecycle_type {
+            let owner = format!("string lifecycle type for '{}'", entity_grant.entity_type);
+            register_generated_type(&mut generated_named_types, type_name.clone(), owner)?;
+            source.push_str(&format!(
+                "#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]\npub enum {type_name} {{\n"
+            ));
+            let mut generated_members = BTreeSet::new();
+            for state in &lifecycle_states {
+                let member = checked_enum_variant(type_name, state)?;
+                if !generated_members.insert(member.clone()) {
+                    return Err(ModuleSdkCodegenError::IdentifierCollision(format!(
+                        "{type_name}::{member}"
+                    )));
+                }
+                source.push_str(&format!(
+                    "    #[serde(rename = {})]\n    {member},\n",
+                    format_args!("{state:?}")
+                ));
+            }
+            source.push_str("}\n\n");
+        }
         if entity_grant.query_order_by_sequence
             && properties.iter().any(|property| {
                 entity_grant
@@ -299,12 +316,12 @@ pub fn generate_module_sdk(
         )?;
         if entity_value_required {
             for property in &properties {
-                emit_named_property_type(&mut source, property, &mut generated_named_types);
+                emit_named_property_type(&mut source, property, &mut generated_named_types)?;
             }
         }
         for action in &manifest_actions {
             for parameter in &action.parameters {
-                emit_named_property_type(&mut source, parameter, &mut generated_named_types);
+                emit_named_property_type(&mut source, parameter, &mut generated_named_types)?;
             }
             if let Some(type_name) = &action.result_type
                 && !generated_entity_names.contains_key(type_name)
@@ -321,11 +338,16 @@ pub fn generate_module_sdk(
                         enum_members: action.result_enum_members.clone(),
                     },
                     &mut generated_named_types,
-                );
+                )?;
             }
         }
         if entity_value_required {
-            emit_entity_value_types(&mut source, &generated, &properties);
+            emit_entity_value_types(
+                &mut source,
+                &generated,
+                &properties,
+                string_lifecycle_type.as_deref(),
+            );
         }
         emit_entity_client(
             &mut source,
@@ -337,12 +359,18 @@ pub fn generate_module_sdk(
                 grant: &grant,
                 entity_grant,
                 generated_entity_names: &generated_entity_names,
+                string_lifecycle_type: string_lifecycle_type.as_deref(),
             },
         );
         entities.push(ManifestEntityV1 {
             entity_type: entity_grant.entity_type.clone(),
             entity_set: entity_set.to_string(),
             generated_name: generated,
+            lifecycle_states: if include_lifecycle_contract {
+                lifecycle_states
+            } else {
+                Vec::new()
+            },
             properties,
             actions: manifest_actions,
         });

@@ -7,6 +7,7 @@
 name = "Directory"
 states = ["Active", "Archived"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

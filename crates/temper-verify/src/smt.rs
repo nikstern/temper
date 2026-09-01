@@ -73,10 +73,15 @@ fn verify_symbolic_inner(
 ) -> SmtResult {
     let model = build_model_from_ioa(ioa_toml, max_counter)
         .expect("SMT: IOA spec should have been validated before symbolic verification");
-    let mut approximation_notes = approximation_notes(&model);
+    verify_symbolic_model(&model, resource_budget)
+}
+
+/// Run symbolic verification on a pre-built model from a canonical automaton.
+pub fn verify_symbolic_model(model: &TemperModel, resource_budget: Option<u32>) -> SmtResult {
+    let mut approximation_notes = approximation_notes(model);
     let approximate = !approximation_notes.is_empty();
 
-    let query_upper_bound = solver_query_upper_bound(&model);
+    let query_upper_bound = solver_query_upper_bound(model);
     let per_query_budget = resource_budget.map(|budget| budget / query_upper_bound);
     if per_query_budget == Some(0) {
         approximation_notes.push(format!(
@@ -86,17 +91,17 @@ fn verify_symbolic_inner(
             guard_satisfiability: Vec::new(),
             inductive_invariants: Vec::new(),
             reference_contracts: Vec::new(),
-            unreachable_states: check_unreachable_states(&model),
+            unreachable_states: check_unreachable_states(model),
             approximate: true,
             approximation_notes,
             all_passed: false,
         };
     }
 
-    let guard_sat = check_guard_satisfiability(&model, max_counter, per_query_budget);
-    let inductive = check_invariant_induction(&model, max_counter, per_query_budget);
-    let reference_contracts = check_reference_contract_induction(&model, per_query_budget);
-    let unreachable = check_unreachable_states(&model);
+    let guard_sat = check_guard_satisfiability(model, model.default_max_counter, per_query_budget);
+    let inductive = check_invariant_induction(model, model.default_max_counter, per_query_budget);
+    let reference_contracts = check_reference_contract_induction(model, per_query_budget);
+    let unreachable = check_unreachable_states(model);
 
     // Unreachable states are warnings, not failures — specs may declare states
     // that are only reachable through composition or external actions.

@@ -1,7 +1,7 @@
 use temper_spec::{
     BundleErrorCode, IoaSourceInput, MigrationArtifactInput, PolicyArtifactInput,
     ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput, WasmArtifactInput,
-    parse_automaton, parse_csdl, scoped_module_data_closure_digest,
+    parse_automaton, parse_csdl, scoped_module_data_closure_digest_with_version,
 };
 
 const ALPHA_IOA: &str = r#"
@@ -192,12 +192,12 @@ fn input(csdl_xml: &str, ioa_sources: Vec<(&str, &str)>) -> ScopedSpecBundleInpu
 
 #[test]
 fn canonical_bundle_identity_ignores_formatting_and_input_order() {
-    let first = ScopedSpecBundle::compile(input(
+    let first = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", ALPHA_IOA), ("Example.Beta", BETA_IOA)],
     ))
     .expect("first bundle should compile");
-    let second = ScopedSpecBundle::compile(input(
+    let second = ScopedSpecBundle::compile_v1(input(
         REORDERED_CSDL,
         vec![
             ("Example.Beta", &format!("\n{BETA_IOA}\n")),
@@ -221,7 +221,7 @@ fn canonical_bundle_identity_ignores_formatting_and_input_order() {
 
 #[test]
 fn canonical_sources_round_trip_without_changing_identity() {
-    let compiled = ScopedSpecBundle::compile(input(
+    let compiled = ScopedSpecBundle::compile_v1(input(
         REORDERED_CSDL,
         vec![("Example.Beta", BETA_IOA), ("Example.Alpha", ALPHA_IOA)],
     ))
@@ -237,7 +237,7 @@ fn canonical_sources_round_trip_without_changing_identity() {
         );
     }
 
-    let recompiled = ScopedSpecBundle::compile(ScopedSpecBundleInput {
+    let recompiled = ScopedSpecBundle::compile_v1(ScopedSpecBundleInput {
         scope_id: compiled.scope_id().into(),
         predecessor_digest: compiled.predecessor_digest().map(str::to_string),
         csdl_xml: compiled.canonical_csdl().into(),
@@ -261,7 +261,7 @@ fn canonical_sources_round_trip_without_changing_identity() {
 
 #[test]
 fn canonical_source_preserves_actions_after_nested_trigger_config() {
-    let compiled = ScopedSpecBundle::compile(input(
+    let compiled = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", ACTION_TRIGGER_TIMEOUT_IOA)],
     ))
@@ -294,7 +294,7 @@ fn canonical_source_preserves_actions_after_nested_trigger_config() {
 
 #[test]
 fn canonical_bundle_preserves_typed_failure_callback_parameters() {
-    let compiled = ScopedSpecBundle::compile(input(
+    let compiled = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", TYPED_FAILURE_ROUTE_IOA)],
     ))
@@ -312,7 +312,7 @@ fn canonical_bundle_preserves_typed_failure_callback_parameters() {
     assert_eq!(callback.params[0].name(), "failure");
     assert_eq!(callback.params[0].param_type(), "failure_v1");
 
-    let recompiled = ScopedSpecBundle::compile(ScopedSpecBundleInput {
+    let recompiled = ScopedSpecBundle::compile_v1(ScopedSpecBundleInput {
         scope_id: compiled.scope_id().into(),
         predecessor_digest: compiled.predecessor_digest().map(str::to_string),
         csdl_xml: compiled.canonical_csdl().into(),
@@ -335,7 +335,7 @@ fn canonical_bundle_preserves_typed_failure_callback_parameters() {
 
 #[test]
 fn bundle_identity_is_bound_to_scope_predecessor_and_semantics() {
-    let baseline = ScopedSpecBundle::compile(input(
+    let baseline = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", ALPHA_IOA), ("Example.Beta", BETA_IOA)],
     ))
@@ -348,7 +348,9 @@ fn bundle_identity_is_bound_to_scope_predecessor_and_semantics() {
     different_scope.scope_id = "task-43".into();
     assert_ne!(
         baseline.digest(),
-        ScopedSpecBundle::compile(different_scope).unwrap().digest()
+        ScopedSpecBundle::compile_v1(different_scope)
+            .unwrap()
+            .digest()
     );
 
     let mut with_predecessor = input(
@@ -358,13 +360,13 @@ fn bundle_identity_is_bound_to_scope_predecessor_and_semantics() {
     with_predecessor.predecessor_digest = Some(format!("sha256:{}", "a".repeat(64)));
     assert_ne!(
         baseline.digest(),
-        ScopedSpecBundle::compile(with_predecessor)
+        ScopedSpecBundle::compile_v1(with_predecessor)
             .unwrap()
             .digest()
     );
 
     let changed = ALPHA_IOA.replace("to = \"Ready\"", "to = \"Draft\"");
-    let semantic_change = ScopedSpecBundle::compile(input(
+    let semantic_change = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", &changed), ("Example.Beta", BETA_IOA)],
     ))
@@ -431,8 +433,8 @@ fn named_artifacts_are_ordered_and_line_endings_are_canonical() {
     second.migration = first.migration.clone();
 
     assert_eq!(
-        ScopedSpecBundle::compile(first).unwrap(),
-        ScopedSpecBundle::compile(second).unwrap()
+        ScopedSpecBundle::compile_v1(first).unwrap(),
+        ScopedSpecBundle::compile_v1(second).unwrap()
     );
 }
 
@@ -449,15 +451,15 @@ fn module_data_binding_digest_is_part_of_bundle_identity() {
     bound.wasm_modules[0].data_binding_digest = Some(format!("sha256:{}", "b".repeat(64)));
 
     assert_ne!(
-        ScopedSpecBundle::compile(unbound).unwrap().digest(),
-        ScopedSpecBundle::compile(bound).unwrap().digest(),
+        ScopedSpecBundle::compile_v1(unbound).unwrap().digest(),
+        ScopedSpecBundle::compile_v1(bound).unwrap().digest(),
         "typed-data authority must be immutable bundle content"
     );
 }
 
 #[test]
 fn module_data_closure_digest_is_canonical_and_excludes_artifacts() {
-    let ordered = scoped_module_data_closure_digest(
+    let ordered = scoped_module_data_closure_digest_with_version(
         ORDERED_CSDL,
         vec![
             IoaSourceInput {
@@ -469,9 +471,10 @@ fn module_data_closure_digest_is_canonical_and_excludes_artifacts() {
                 source: BETA_IOA.into(),
             },
         ],
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1,
     )
     .unwrap();
-    let reordered = scoped_module_data_closure_digest(
+    let reordered = scoped_module_data_closure_digest_with_version(
         REORDERED_CSDL,
         vec![
             IoaSourceInput {
@@ -483,11 +486,44 @@ fn module_data_closure_digest_is_canonical_and_excludes_artifacts() {
                 source: ALPHA_IOA.into(),
             },
         ],
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1,
     )
     .unwrap();
 
     assert_eq!(ordered, reordered);
     assert!(ordered.starts_with("sha256:"));
+}
+
+#[test]
+fn frozen_v1_identity_retains_empty_enum_parser_semantics() {
+    let csdl = ORDERED_CSDL.replace(
+        "<EntityType Name=\"Alpha\">",
+        "<EnumType Name=\"Reserved\"/><EntityType Name=\"Alpha\">",
+    );
+    let compiled =
+        ScopedSpecBundle::compile_v1(input(&csdl, vec![("Example.Alpha", ALPHA_IOA)])).unwrap();
+
+    assert!(!compiled.canonical_csdl().contains("Reserved"));
+    assert_eq!(
+        compiled.digest(),
+        "sha256:880eae7536158b102c4f2c0a2b5a331eec49876107c36c8c9d27ee3fd340989b"
+    );
+}
+
+#[test]
+fn frozen_v1_identity_retains_empty_collection_parser_semantics() {
+    let csdl = ORDERED_CSDL.replace(
+        "<EntityType Name=\"Alpha\">",
+        "<EntityType Name=\"Alpha\"><Annotation Term=\"Example.Empty\"><Collection/></Annotation>",
+    );
+    let compiled =
+        ScopedSpecBundle::compile_v1(input(&csdl, vec![("Example.Alpha", ALPHA_IOA)])).unwrap();
+
+    assert!(compiled.canonical_csdl().contains("String=\"\""));
+    assert_eq!(
+        compiled.digest(),
+        "sha256:48ead691b0fc7f5e467c20335b314551778ae2d8ced2f38925061a46b09031ad"
+    );
 }
 
 #[test]
@@ -504,21 +540,23 @@ fn artifact_duplicates_and_zero_budgets_fail_closed() {
         },
     ];
     assert_eq!(
-        ScopedSpecBundle::compile(duplicate).unwrap_err().code(),
+        ScopedSpecBundle::compile_v1(duplicate).unwrap_err().code(),
         BundleErrorCode::DuplicateSymbol
     );
 
     let mut zero_budget = input(ORDERED_CSDL, vec![("Example.Alpha", ALPHA_IOA)]);
     zero_budget.budgets.migration_entities_per_batch = 0;
     assert_eq!(
-        ScopedSpecBundle::compile(zero_budget).unwrap_err().code(),
+        ScopedSpecBundle::compile_v1(zero_budget)
+            .unwrap_err()
+            .code(),
         BundleErrorCode::BudgetExceeded
     );
 }
 
 #[test]
 fn duplicate_ioa_entity_is_rejected_without_last_writer_wins() {
-    let error = ScopedSpecBundle::compile(input(
+    let error = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", ALPHA_IOA), ("Example.Alpha", ALPHA_IOA)],
     ))
@@ -534,7 +572,7 @@ fn duplicate_csdl_entity_is_rejected() {
         "      <EntityType Name=\"Beta\">",
         "      <EntityType Name=\"Alpha\"><Property Name=\"Other\" Type=\"Edm.String\"/></EntityType>\n      <EntityType Name=\"Beta\">",
     );
-    let error = ScopedSpecBundle::compile(input(
+    let error = ScopedSpecBundle::compile_v1(input(
         &csdl,
         vec![("Example.Alpha", ALPHA_IOA), ("Example.Beta", BETA_IOA)],
     ))
@@ -547,7 +585,7 @@ fn duplicate_csdl_entity_is_rejected() {
 #[test]
 fn ioa_key_must_match_the_typed_automaton_name() {
     let error =
-        ScopedSpecBundle::compile(input(ORDERED_CSDL, vec![("Example.NotAlpha", ALPHA_IOA)]))
+        ScopedSpecBundle::compile_v1(input(ORDERED_CSDL, vec![("Example.NotAlpha", ALPHA_IOA)]))
             .unwrap_err();
 
     assert_eq!(error.code(), BundleErrorCode::EntityNameMismatch);
@@ -560,32 +598,38 @@ fn invalid_inputs_have_stable_error_codes() {
     let mut empty_scope = input(ORDERED_CSDL, vec![("Example.Alpha", ALPHA_IOA)]);
     empty_scope.scope_id = "  ".into();
     assert_eq!(
-        ScopedSpecBundle::compile(empty_scope).unwrap_err().code(),
+        ScopedSpecBundle::compile_v1(empty_scope)
+            .unwrap_err()
+            .code(),
         BundleErrorCode::InvalidScope
     );
 
     let invalid_ioa = input(ORDERED_CSDL, vec![("Example.Alpha", "not = [valid")]);
     assert_eq!(
-        ScopedSpecBundle::compile(invalid_ioa).unwrap_err().code(),
+        ScopedSpecBundle::compile_v1(invalid_ioa)
+            .unwrap_err()
+            .code(),
         BundleErrorCode::InvalidIoa
     );
 
     let invalid_csdl = input("<broken", vec![("Example.Alpha", ALPHA_IOA)]);
     assert_eq!(
-        ScopedSpecBundle::compile(invalid_csdl).unwrap_err().code(),
+        ScopedSpecBundle::compile_v1(invalid_csdl)
+            .unwrap_err()
+            .code(),
         BundleErrorCode::InvalidCsdl
     );
 
     let no_ioa = input(ORDERED_CSDL, vec![]);
     assert_eq!(
-        ScopedSpecBundle::compile(no_ioa).unwrap_err().code(),
+        ScopedSpecBundle::compile_v1(no_ioa).unwrap_err().code(),
         BundleErrorCode::InvalidIoa
     );
 
     let mut invalid_predecessor = input(ORDERED_CSDL, vec![("Example.Alpha", ALPHA_IOA)]);
     invalid_predecessor.predecessor_digest = Some("SHA256:not-canonical".into());
     assert_eq!(
-        ScopedSpecBundle::compile(invalid_predecessor)
+        ScopedSpecBundle::compile_v1(invalid_predecessor)
             .unwrap_err()
             .code(),
         BundleErrorCode::InvalidPredecessor
@@ -593,7 +637,7 @@ fn invalid_inputs_have_stable_error_codes() {
 
     let huge_name = format!("Example.{}", "é".repeat(8_000));
     let bounded_error =
-        ScopedSpecBundle::compile(input(ORDERED_CSDL, vec![(huge_name.as_str(), ALPHA_IOA)]))
+        ScopedSpecBundle::compile_v1(input(ORDERED_CSDL, vec![(huge_name.as_str(), ALPHA_IOA)]))
             .unwrap_err()
             .to_string();
     assert!(bounded_error.len() <= 1_100);
@@ -615,7 +659,7 @@ entity_type = "Beta"
 initial = ""
 "#;
 
-    let error = ScopedSpecBundle::compile(input(
+    let error = ScopedSpecBundle::compile_v1(input(
         ORDERED_CSDL,
         vec![("Example.Alpha", referencing_ioa)],
     ))
@@ -645,7 +689,7 @@ initial = ""
         "        <Property Name=\"Label\" Type=\"Edm.String\"/>\n        <Property Name=\"beta_id\" Type=\"Edm.Guid\"/>\n        <NavigationProperty Name=\"Beta\" Type=\"Example.Alpha\"><ReferentialConstraint Property=\"beta_id\" ReferencedProperty=\"Id\"/></NavigationProperty>",
     );
 
-    let error = ScopedSpecBundle::compile(input(
+    let error = ScopedSpecBundle::compile_v1(input(
         &contradictory_csdl,
         vec![
             ("Example.Alpha", referencing_ioa),
@@ -681,8 +725,8 @@ from = ["Draft"]
 params = [{ name = "delta", type = "Edm.Int64", nullable = true }]
 effect = [{ type = "increment", var = "count", amount = "delta" }]
 "#;
-    let error =
-        ScopedSpecBundle::compile(input(ORDERED_CSDL, vec![("Example.Alpha", ioa)])).unwrap_err();
+    let error = ScopedSpecBundle::compile_v1(input(ORDERED_CSDL, vec![("Example.Alpha", ioa)]))
+        .unwrap_err();
     assert!(
         error
             .to_string()
@@ -708,7 +752,8 @@ params = [{ name = "Code", type = "Edm.String" }]
         "      <Action Name=\"Ready\" IsBound=\"true\"><Parameter Name=\"bindingParameter\" Type=\"Example.Alpha\" Nullable=\"false\"/></Action>",
         "      <Action Name=\"Ready\" IsBound=\"true\"><Parameter Name=\"bindingParameter\" Type=\"Example.Alpha\" Nullable=\"false\"/><Parameter Name=\"Code\" Type=\"Edm.String\"/></Action>",
     );
-    let error = ScopedSpecBundle::compile(input(&csdl, vec![("Example.Alpha", ioa)])).unwrap_err();
+    let error =
+        ScopedSpecBundle::compile_v1(input(&csdl, vec![("Example.Alpha", ioa)])).unwrap_err();
     assert!(
         error
             .to_string()

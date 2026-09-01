@@ -6,7 +6,7 @@
       <EntityType Name="AdaptationGoal">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="GoalStatement" Type="Edm.String"/>
         <Property Name="CreatedByBrainRunId" Type="Edm.String"/>
@@ -17,7 +17,7 @@
       <EntityType Name="AutonomyPolicy">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="PolicyJson" Type="Edm.String"/>
         <Property Name="CreatedBy" Type="Edm.String"/>
@@ -29,7 +29,7 @@
       <EntityType Name="BrainRun">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Started" Type="Edm.Boolean"/>
         <Property Name="Role" Type="Edm.String"/>
         <Property Name="WorkItemId" Type="Edm.String"/>
@@ -47,7 +47,7 @@
       <EntityType Name="Direction">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasProvenance" Type="Edm.Boolean"/>
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="PressureIdsJson" Type="Edm.String"/>
@@ -68,7 +68,7 @@
       <EntityType Name="EliminationRule">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="RuleStatement" Type="Edm.String"/>
         <Property Name="MetricIdsJson" Type="Edm.String"/>
@@ -80,7 +80,7 @@
       <EntityType Name="Episode">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasContract" Type="Edm.Boolean"/>
         <Property Name="GenerationCount" Type="Edm.Int64"/>
         <Property Name="WinnerSelected" Type="Edm.Boolean"/>
@@ -110,7 +110,7 @@
       <EntityType Name="EpisodeStartRequest">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasContract" Type="Edm.Boolean"/>
         <Property Name="DirectionId" Type="Edm.String"/>
         <Property Name="OrganismId" Type="Edm.String"/>
@@ -137,7 +137,7 @@
       <EntityType Name="EvaluationStage">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="StageName" Type="Edm.String"/>
         <Property Name="StageKind" Type="Edm.String"/>
@@ -150,7 +150,7 @@
       <EntityType Name="EvidenceArtifact">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ArtifactKind" Type="Edm.String"/>
         <Property Name="Uri" Type="Edm.String"/>
         <Property Name="Summary" Type="Edm.String"/>
@@ -164,7 +164,7 @@
       <EntityType Name="Generation">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="VariantCount" Type="Edm.Int64"/>
         <Property Name="SurvivorCount" Type="Edm.Int64"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
@@ -182,7 +182,7 @@
       <EntityType Name="LineageEdge">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="ParentVersionId" Type="Edm.String"/>
         <Property Name="ChildVersionId" Type="Edm.String"/>
@@ -195,7 +195,7 @@
       <EntityType Name="Measurement">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="MetricDefinitionId" Type="Edm.String"/>
         <Property Name="StageResultId" Type="Edm.String"/>
         <Property Name="TrialId" Type="Edm.String"/>
@@ -209,7 +209,7 @@
       <EntityType Name="MetricDefinition">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="MetricName" Type="Edm.String"/>
         <Property Name="MetricKind" Type="Edm.String"/>
         <Property Name="Unit" Type="Edm.String"/>
@@ -221,7 +221,7 @@
       <EntityType Name="Mutation">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="VariantId" Type="Edm.String"/>
         <Property Name="Summary" Type="Edm.String"/>
         <Property Name="ChangedFilesJson" Type="Edm.String"/>
@@ -233,7 +233,7 @@
       <EntityType Name="Organism">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasParentVersion" Type="Edm.Boolean"/>
         <Property Name="VersionCount" Type="Edm.Int64"/>
         <Property Name="Name" Type="Edm.String"/>
@@ -249,7 +249,7 @@
       <EntityType Name="OrganismVersion">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="IsParent" Type="Edm.Boolean"/>
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="AppRef" Type="Edm.String"/>
@@ -264,7 +264,7 @@
       <EntityType Name="Pressure">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="OrganismId" Type="Edm.String"/>
         <Property Name="PressureClass" Type="Edm.String"/>
         <Property Name="Summary" Type="Edm.String"/>
@@ -278,7 +278,7 @@
       <EntityType Name="Promotion">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasEvidence" Type="Edm.Boolean"/>
         <Property Name="Materialized" Type="Edm.Boolean"/>
         <Property Name="MaterializationFailed" Type="Edm.Boolean"/>
@@ -301,7 +301,7 @@
       <EntityType Name="ScoringRule">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="RuleStatement" Type="Edm.String"/>
         <Property Name="MetricIdsJson" Type="Edm.String"/>
@@ -313,7 +313,7 @@
       <EntityType Name="SelectionPressure">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="SelectionStatement" Type="Edm.String"/>
         <Property Name="MetricIdsJson" Type="Edm.String"/>
@@ -326,7 +326,7 @@
       <EntityType Name="Signal">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Source" Type="Edm.String"/>
         <Property Name="SignalKind" Type="Edm.String"/>
         <Property Name="OrganismId" Type="Edm.String"/>
@@ -345,7 +345,7 @@
       <EntityType Name="StageResult">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasEvidence" Type="Edm.Boolean"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="GenerationId" Type="Edm.String"/>
@@ -363,7 +363,7 @@
       <EntityType Name="Trial">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasAgent" Type="Edm.Boolean"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="VariantId" Type="Edm.String"/>
@@ -380,7 +380,7 @@
       <EntityType Name="Variant">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HasMutation" Type="Edm.Boolean"/>
         <Property Name="StageResults" Type="Edm.Int64"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
@@ -406,7 +406,7 @@
       <EntityType Name="ViabilityConstraint">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="EpisodeId" Type="Edm.String"/>
         <Property Name="ConstraintStatement" Type="Edm.String"/>
         <Property Name="ConstraintKind" Type="Edm.String"/>
@@ -418,7 +418,7 @@
       <EntityType Name="WorkItem">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Claimed" Type="Edm.Boolean"/>
         <Property Name="Role" Type="Edm.String"/>
         <Property Name="TargetEntityType" Type="Edm.String"/>

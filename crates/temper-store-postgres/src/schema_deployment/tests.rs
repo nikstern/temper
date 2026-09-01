@@ -37,6 +37,7 @@ fn submission(
             scope: scope.clone(),
             digest: bundle_digest.to_string(),
             predecessor_digest: None,
+            canonicalization_version: "scoped-spec-bundle/v1".into(),
             canonical_csdl: "<canonical/>".to_string(),
             canonical_ioa: BTreeMap::from([(
                 "Example.Task".to_string(),

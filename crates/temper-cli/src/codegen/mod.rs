@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use temper_codegen::generate_entity_module;
 use temper_spec::csdl::parse_csdl;
-use temper_spec::model::{SpecSource, build_spec_model_mixed};
+use temper_spec::{CanonicalSpecModel, IoaSourceInput};
 
 use crate::util::{to_pascal_case, to_snake_case};
 
@@ -49,48 +49,31 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
         println!("  Found {} IOA spec file(s)", ioa_sources.len());
     }
 
-    // Read TLA+ spec files (legacy format)
-    let tla_sources = read_tla_sources(specs_path)?;
-    if !tla_sources.is_empty() {
-        println!("  Found {} TLA+ spec file(s)", tla_sources.len());
-    }
-
-    if ioa_sources.is_empty() && tla_sources.is_empty() {
-        println!("  No spec files found (state machines will be skipped)");
-    }
-
-    // Merge sources: IOA takes precedence over TLA+ for the same entity name
-    let mut sources: HashMap<String, SpecSource> = tla_sources
-        .into_iter()
-        .map(|(k, v)| (k, SpecSource::Tla(v)))
-        .collect();
-    for (name, ioa_text) in ioa_sources {
-        sources.insert(name, SpecSource::Ioa(ioa_text));
-    }
-
-    // Build the unified spec model
-    let spec = build_spec_model_mixed(csdl, sources);
-
-    // Report validation results
-    if !spec.validation.errors.is_empty() {
-        println!("\n  Validation errors:");
-        for err in &spec.validation.errors {
-            println!("    ERROR: {err}");
-        }
-    }
-    if !spec.validation.warnings.is_empty() {
-        println!("\n  Validation warnings:");
-        for warn in &spec.validation.warnings {
-            println!("    WARN: {warn}");
-        }
-    }
-
-    if !spec.validation.is_valid() {
+    if ioa_sources.is_empty() {
         anyhow::bail!(
-            "Specification validation failed with {} error(s). Fix errors before generating code.",
-            spec.validation.errors.len()
+            "No IOA spec files found; production code generation does not accept legacy TLA+ inputs"
         );
     }
+    let sources = ioa_sources
+        .into_iter()
+        .map(|(name, source)| {
+            let matches = csdl
+                .schemas
+                .iter()
+                .filter(|schema| schema.entity_types.iter().any(|entity| entity.name == name))
+                .map(|schema| format!("{}.{}", schema.namespace, name))
+                .collect::<Vec<_>>();
+            let [entity_type] = matches.as_slice() else {
+                anyhow::bail!("IOA entity '{name}' has no unique CSDL type");
+            };
+            Ok(IoaSourceInput {
+                entity_type: entity_type.clone(),
+                source,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let spec = CanonicalSpecModel::link_v2_sources(&csdl, &sources)
+        .map_err(|error| anyhow::anyhow!("canonical model linking failed: {error}"))?;
 
     // Create output directory
     fs::create_dir_all(output_path).with_context(|| {
@@ -102,7 +85,7 @@ pub fn run(specs_dir: &str, output_dir: &str) -> Result<()> {
 
     // Collect all entity type names from non-vocabulary schemas
     let entity_names: Vec<String> = spec
-        .csdl
+        .emitted_csdl()
         .schemas
         .iter()
         .filter(|s| !s.entity_types.is_empty())
@@ -195,9 +178,6 @@ fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, String>> {
     Ok(sources)
 }
 
-// read_tla_sources is shared via crate::util::read_tla_sources
-use crate::util::read_tla_sources;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +185,10 @@ mod tests {
     #[test]
     fn test_codegen_from_reference_specs() {
         // Use the example specs that ship with the project
-        let specs_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/specs");
+        let specs_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference-apps/ecommerce/specs"
+        );
         let specs_path = Path::new(specs_dir);
 
         // Verify the reference specs exist before testing

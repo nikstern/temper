@@ -8,6 +8,7 @@
 name = "AgentMemory"
 states = ["Active", "Archived"]
 initial = "Active"
+lifecycle_property = "Status"
 
 [[state]]
 name = "key"

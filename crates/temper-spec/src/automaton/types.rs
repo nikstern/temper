@@ -132,6 +132,12 @@ pub struct AutomatonMeta {
     pub states: Vec<String>,
     /// Initial status value.
     pub initial: String,
+    /// CSDL structural property that exposes the runtime lifecycle state.
+    ///
+    /// Scoped bundle v2 requires this declaration. It remains optional in the
+    /// parser so persisted v1 sources can be restored by the frozen v1 linker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_property: Option<String>,
     /// States that are permitted to be indefinite (no `[[state_timeout]]`
     /// declaration required). Used by ADR-0050's liveness rule. Each entry
     /// must be a declared state name. Convention: authors add a nearby

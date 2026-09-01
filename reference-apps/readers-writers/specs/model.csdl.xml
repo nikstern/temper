@@ -12,11 +12,7 @@
     </Schema>
 
     <Schema Namespace="Temper.ReadersWriters" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-      <EnumType Name="ReadersWritersStatus">
-        <Member Name="Idle" Value="0"/>
-        <Member Name="Reading" Value="1"/>
-        <Member Name="Writing" Value="2"/>
-      </EnumType>
+      <EnumType Name="ReadersWritersStatus"/>
 
       <ComplexType Name="WaitRequest">
         <Property Name="kind" Type="Edm.String" Nullable="false"/>
@@ -43,15 +39,6 @@
         <Property Name="proposed_readers" Type="Collection(Edm.Int32)"/>
         <Property Name="proposed_writers" Type="Collection(Edm.Int32)"/>
         <Property Name="proposed_waiting" Type="Collection(Temper.ReadersWriters.WaitRequest)"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Idle</String>
-            <String>Reading</String>
-            <String>Writing</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Idle"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/readers_writers.cedar"/>
       </EntityType>
@@ -60,35 +47,23 @@
         <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
-        </Annotation>
       </Action>
 
       <Action Name="TryWrite" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
-        </Annotation>
       </Action>
 
       <Action Name="ReadOrWrite" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Idle</String><String>Reading</String><String>Writing</String></Collection>
-        </Annotation>
       </Action>
 
       <Action Name="Stop" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.ReadersWriters.ReadersWriters" Nullable="false"/>
         <Parameter Name="actor" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.ReadersWriters.ReadersWriters"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Reading</String><String>Writing</String></Collection>
-        </Annotation>
       </Action>
 
       <Action Name="ValidateProposal" IsBound="true">

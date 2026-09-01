@@ -168,9 +168,15 @@ pub(super) fn parse_annotation_children(
     }
 
     let mut collection_items = Vec::new();
+    let mut saw_collection = false;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref element))
+                if local_name(element) == "Collection" =>
+            {
+                saw_collection = true;
+            }
             Ok(quick_xml::events::Event::Start(ref element)) if local_name(element) == "String" => {
                 let raw = reader.read_text(element.name())?;
                 let decoded = raw.decode().map_err(quick_xml::Error::from)?;
@@ -193,10 +199,10 @@ pub(super) fn parse_annotation_children(
         buf.clear();
     }
 
-    let value = if collection_items.is_empty() {
-        AnnotationValue::String(String::new())
-    } else {
+    let value = if saw_collection {
         AnnotationValue::Collection(collection_items)
+    } else {
+        AnnotationValue::String(String::new())
     };
 
     Ok(Annotation { term, value })
