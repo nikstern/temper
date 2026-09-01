@@ -264,8 +264,27 @@ pub(super) fn resolve_entity_type_for_pin(
             .read()
             .expect("registry lock poisoned")
             .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
-            .and_then(|config| config.entity_set_map.get(entity_set).cloned()),
+            .and_then(|config| config.entity_set_map.get(entity_set).cloned())
+            .map(|entity_type| runtime_entity_type(&entity_type).to_string()),
         None => resolve_entity_type(state, tenant, entity_set),
+    }
+}
+
+fn runtime_entity_type(entity_type: &str) -> &str {
+    entity_type.rsplit('.').next().unwrap_or(entity_type)
+}
+
+#[cfg(test)]
+mod scoped_entity_type_tests {
+    use super::runtime_entity_type;
+
+    #[test]
+    fn qualified_scoped_type_resolves_to_the_runtime_automaton_name() {
+        assert_eq!(
+            runtime_entity_type("TemperPaw.ArcAgi2Scoped.ArcSynthesisRun"),
+            "ArcSynthesisRun"
+        );
+        assert_eq!(runtime_entity_type("ArcSynthesisRun"), "ArcSynthesisRun");
     }
 }
 
