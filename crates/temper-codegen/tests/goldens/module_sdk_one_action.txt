@@ -1,7 +1,9 @@
 enum TaskLifecycleState
 struct TaskId
+struct TaskIdRef
 struct Task
 struct TaskStartWorkInput
+fn new
 struct TaskClient
 const ENTITY_TYPE
 fn new

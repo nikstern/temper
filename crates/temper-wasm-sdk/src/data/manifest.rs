@@ -16,6 +16,8 @@ mod stream;
 pub use operation::DataOperationKind;
 pub use stream::*;
 
+include!("manifest/write_contract.rs");
+
 /// Per-module application-data capability declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -272,62 +274,8 @@ pub struct ManifestEntityV1 {
     pub actions: Vec<ManifestActionV1>,
 }
 
-/// Canonical property metadata used for typed generation and host validation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManifestPropertyV1 {
-    /// Case-sensitive CSDL property or parameter name.
-    pub canonical_name: String,
-    /// Generated Rust field name.
-    pub generated_name: String,
-    /// Fully qualified CSDL scalar, enum, or reference type.
-    pub type_name: String,
-    /// Whether the canonical value may be null.
-    pub nullable: bool,
-    /// Immutable authority that supplies this canonical value.
-    pub source: ManifestValueSourceV1,
-    /// Generation-validated canonical JSON value for the declared CSDL default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_value: Option<serde_json::Value>,
-    /// Closed enum members, empty for non-enum properties.
-    #[serde(default)]
-    pub enum_members: Vec<String>,
-}
-
-/// Closed authority for one generated canonical value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManifestValueSourceV1 {
-    /// Value supplied in an action input object.
-    Input,
-    /// Value read from committed sparse entity fields.
-    StoredField,
-    /// Host-owned immutable entity identifier.
-    EntityId,
-    /// Host-owned persisted IOA lifecycle status.
-    LifecycleStatus,
-}
-
-/// Canonical action metadata used for typed generation and host validation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManifestActionV1 {
-    /// Case-sensitive IOA/CSDL action name.
-    pub canonical_name: String,
-    /// Generated Rust method name.
-    pub generated_name: String,
-    /// Non-binding action parameters.
-    #[serde(default)]
-    pub parameters: Vec<ManifestPropertyV1>,
-    /// Canonical result type when the action returns a value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
-    /// Closed enum members for an enum result type.
-    #[serde(default)]
-    pub result_enum_members: Vec<String>,
-    /// Whether this action uses the verified composite-action path.
-    pub composite: bool,
-}
+/// Current generated module SDK manifest contract version.
+pub const MODULE_SDK_MANIFEST_CONTRACT_VERSION_V2: u32 = 2;
 
 /// Deterministically ordered binding packaged with a compiled module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +283,12 @@ pub struct ManifestActionV1 {
 pub struct ModuleSdkManifest {
     /// Version of the application-data host ABI.
     pub abi: u32,
+    /// Version of the generated manifest and Rust surface contract.
+    ///
+    /// Absent only for authenticated historical bindings. This is independent
+    /// of the application-data transport ABI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_version: Option<u32>,
     /// Exact app-manifest module name.
     pub module_name: String,
     /// Digest of the immutable resolved application closure.
@@ -397,6 +351,7 @@ impl ModuleSdkManifest {
         let used_symbols_digest = digest_json(&used_symbols)?;
         Ok(Self {
             abi: DATA_ABI_VERSION_V1,
+            contract_version: Some(MODULE_SDK_MANIFEST_CONTRACT_VERSION_V2),
             module_name: module_name.into(),
             dependency_lock_digest: metadata.dependency_lock,
             closure_digest: metadata.closure,
@@ -439,6 +394,51 @@ impl ModuleSdkManifest {
         stream::validate_stream_capabilities(&self.stream_capabilities)?;
         if self.generator_version != env!("CARGO_PKG_VERSION") {
             return Err("module SDK generator version mismatch".into());
+        }
+        match self.contract_version {
+            None => {}
+            Some(MODULE_SDK_MANIFEST_CONTRACT_VERSION_V2) => {
+                for entity in &self.entities {
+                    if entity
+                        .properties
+                        .iter()
+                        .any(|property| property.write_policy.is_none())
+                    {
+                        return Err("module SDK v2 entity property lacks write policy".into());
+                    }
+                    for action in &entity.actions {
+                        let Some(cardinality) = action.result_cardinality else {
+                            return Err("module SDK v2 action lacks result cardinality".into());
+                        };
+                        if matches!(cardinality, ManifestActionResultCardinalityV1::Void)
+                            != action.result_type.is_none()
+                        {
+                            return Err(
+                                "module SDK action result cardinality contradicts result type"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
+            Some(version) => {
+                return Err(format!(
+                    "unsupported module SDK manifest contract version {version}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify a binding submitted for a new module publication.
+    ///
+    /// Persisted manifests without a contract version remain readable for
+    /// restart compatibility, but new publications must carry the complete
+    /// current write-policy and action-result metadata.
+    pub fn verify_current_binding(&self) -> Result<(), String> {
+        self.verify_binding()?;
+        if self.contract_version != Some(MODULE_SDK_MANIFEST_CONTRACT_VERSION_V2) {
+            return Err("new module SDK bindings require manifest contract version 2".into());
         }
         Ok(())
     }

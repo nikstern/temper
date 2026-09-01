@@ -24,9 +24,10 @@ fn main() {
     ];
     let closure = scoped_module_data_closure_digest(CSDL, ioa.clone())
         .expect("fixture closure is canonical");
+    let model = temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &ioa)
+        .expect("fixture canonical model links");
     let generated = temper_codegen::generate_module_sdk(
-        &csdl,
-        &ioa,
+        &model,
         "scoped_client",
         &closure,
         &closure,

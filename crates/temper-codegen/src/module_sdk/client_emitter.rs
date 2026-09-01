@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 
 use temper_wasm_sdk::data::{
-    DataOperationKind, EntityDataGrant, FileOperationKind, ManifestActionV1, ManifestPropertyV1,
+    DataOperationKind, EntityDataGrant, FileOperationKind, ManifestActionResultCardinalityV1,
+    ManifestActionV1, ManifestCreateRoleV1, ManifestPatchRoleV1, ManifestPropertyV1,
     ModuleDataGrant,
 };
 
 use super::names::rust_type_name;
-use super::source_types::{emit_query_types, generated_rust_type, generated_type_name};
+use super::source_types::{emit_query_types, generated_command_type, generated_type_name};
 
 pub(super) struct EntityClientSpec<'a> {
     pub(super) generated: &'a str,
@@ -19,6 +20,244 @@ pub(super) struct EntityClientSpec<'a> {
     pub(super) entity_grant: &'a EntityDataGrant,
     pub(super) generated_entity_names: &'a BTreeMap<String, String>,
     pub(super) string_lifecycle_type: Option<&'a str>,
+}
+
+fn emit_create_command(source: &mut String, generated: &str, properties: &[ManifestPropertyV1]) {
+    let admitted = properties
+        .iter()
+        .filter(|property| {
+            property
+                .write_policy
+                .expect("current generated property must carry write policy")
+                .create
+                != ManifestCreateRoleV1::Forbidden
+        })
+        .collect::<Vec<_>>();
+    source.push_str(&format!(
+        "#[derive(Debug, Clone, serde::Serialize)]\npub struct {generated}Create<'a> {{\n"
+    ));
+    for property in &admitted {
+        let command_type = generated_command_type(property, Some(generated));
+        let policy = property.write_policy.expect("checked generated policy");
+        let (field_type, serde) = if policy.create == ManifestCreateRoleV1::Required {
+            (
+                command_type,
+                format!("#[serde(rename = {:?})]", property.canonical_name),
+            )
+        } else if property.nullable {
+            (
+                format!("Option<Option<{command_type}>>"),
+                format!(
+                    "#[serde(rename = {:?}, skip_serializing_if = \"Option::is_none\")]",
+                    property.canonical_name
+                ),
+            )
+        } else {
+            (
+                format!("Option<{command_type}>"),
+                format!(
+                    "#[serde(rename = {:?}, skip_serializing_if = \"Option::is_none\")]",
+                    property.canonical_name
+                ),
+            )
+        };
+        source.push_str(&format!(
+            "    {serde}\n    {}: {field_type},\n",
+            property.generated_name
+        ));
+    }
+    source.push_str("    #[serde(skip)]\n    _borrow: std::marker::PhantomData<&'a ()>,\n}\n");
+    let required = admitted
+        .iter()
+        .filter(|property| {
+            property
+                .write_policy
+                .expect("checked generated policy")
+                .create
+                == ManifestCreateRoleV1::Required
+        })
+        .collect::<Vec<_>>();
+    let params = required
+        .iter()
+        .map(|property| {
+            format!(
+                "{}: {}",
+                property.generated_name,
+                generated_command_type(property, Some(generated))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    source.push_str(&format!(
+        "impl<'a> {generated}Create<'a> {{\n    pub fn new({params}) -> Self {{ Self {{\n"
+    ));
+    for property in &admitted {
+        if property
+            .write_policy
+            .expect("checked generated policy")
+            .create
+            == ManifestCreateRoleV1::Required
+        {
+            source.push_str(&format!(
+                "        {}: {},\n",
+                property.generated_name, property.generated_name
+            ));
+        } else {
+            source.push_str(&format!("        {}: None,\n", property.generated_name));
+        }
+    }
+    source.push_str("        _borrow: std::marker::PhantomData,\n    } }\n");
+    for property in admitted.iter().filter(|property| {
+        property
+            .write_policy
+            .expect("checked generated policy")
+            .create
+            == ManifestCreateRoleV1::Optional
+    }) {
+        let field = &property.generated_name;
+        let command_type = generated_command_type(property, Some(generated));
+        if property.nullable {
+            source.push_str(&format!(
+                "    pub fn with_{field}(mut self, value: {command_type}) -> Self {{ self.{field} = Some(Some(value)); self }}\n    pub fn with_{field}_null(mut self) -> Self {{ self.{field} = Some(None); self }}\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "    pub fn with_{field}(mut self, value: {command_type}) -> Self {{ self.{field} = Some(value); self }}\n"
+            ));
+        }
+    }
+    source.push_str("}\n\n");
+}
+
+fn emit_patch_command(source: &mut String, generated: &str, properties: &[ManifestPropertyV1]) {
+    let admitted = properties
+        .iter()
+        .filter(|property| {
+            property
+                .write_policy
+                .expect("current generated property must carry write policy")
+                .patch
+                == ManifestPatchRoleV1::Writable
+        })
+        .collect::<Vec<_>>();
+    source.push_str(&format!(
+        "#[derive(Debug, Clone, Default, serde::Serialize)]\npub struct {generated}Patch<'a> {{\n"
+    ));
+    for property in &admitted {
+        let command_type = generated_command_type(property, Some(generated));
+        let field_type = if property.nullable {
+            format!("NullablePatch<{command_type}>")
+        } else {
+            format!("Option<{command_type}>")
+        };
+        let skip = if property.nullable {
+            "NullablePatch::is_unchanged"
+        } else {
+            "Option::is_none"
+        };
+        source.push_str(&format!(
+            "    #[serde(rename = {:?}, skip_serializing_if = \"{skip}\")]\n    {}: {field_type},\n",
+            property.canonical_name, property.generated_name
+        ));
+    }
+    source.push_str("    #[serde(skip)]\n    _borrow: std::marker::PhantomData<&'a ()>,\n}\n");
+    source.push_str(&format!(
+        "impl<'a> {generated}Patch<'a> {{\n    pub fn new() -> Self {{ Self::default() }}\n"
+    ));
+    for property in &admitted {
+        let field = &property.generated_name;
+        let command_type = generated_command_type(property, Some(generated));
+        if property.nullable {
+            source.push_str(&format!(
+                "    pub fn with_{field}(mut self, value: {command_type}) -> Self {{ self.{field} = NullablePatch::Value(value); self }}\n    pub fn with_{field}_null(mut self) -> Self {{ self.{field} = NullablePatch::Null; self }}\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "    pub fn with_{field}(mut self, value: {command_type}) -> Self {{ self.{field} = Some(value); self }}\n"
+            ));
+        }
+    }
+    source.push_str("}\n\n");
+}
+
+fn emit_action_command(source: &mut String, generated: &str, action: &ManifestActionV1) {
+    let action_type = format!(
+        "{}{}Input",
+        generated,
+        rust_type_name(&action.canonical_name)
+    );
+    source.push_str(&format!(
+        "#[derive(Debug, Clone, serde::Serialize)]\npub struct {action_type}<'a> {{\n"
+    ));
+    for parameter in &action.parameters {
+        let command_type = generated_command_type(parameter, None);
+        let optional = parameter.nullable || parameter.default_value.is_some();
+        let field_type = if optional && parameter.nullable {
+            format!("Option<Option<{command_type}>>")
+        } else if optional {
+            format!("Option<{command_type}>")
+        } else {
+            command_type
+        };
+        let skip = if optional {
+            ", skip_serializing_if = \"Option::is_none\""
+        } else {
+            ""
+        };
+        source.push_str(&format!(
+            "    #[serde(rename = {:?}{skip})]\n    {}: {field_type},\n",
+            parameter.canonical_name, parameter.generated_name
+        ));
+    }
+    source.push_str("    #[serde(skip)]\n    _borrow: std::marker::PhantomData<&'a ()>,\n}\n");
+    let required = action
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.nullable && parameter.default_value.is_none())
+        .collect::<Vec<_>>();
+    let params = required
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{}: {}",
+                parameter.generated_name,
+                generated_command_type(parameter, None)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    source.push_str(&format!(
+        "impl<'a> {action_type}<'a> {{\n    pub fn new({params}) -> Self {{ Self {{\n"
+    ));
+    for parameter in &action.parameters {
+        if !parameter.nullable && parameter.default_value.is_none() {
+            source.push_str(&format!(
+                "        {}: {},\n",
+                parameter.generated_name, parameter.generated_name
+            ));
+        } else {
+            source.push_str(&format!("        {}: None,\n", parameter.generated_name));
+        }
+    }
+    source.push_str("        _borrow: std::marker::PhantomData,\n    } }\n");
+    for parameter in action
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.nullable || parameter.default_value.is_some())
+    {
+        let field = &parameter.generated_name;
+        let command_type = generated_command_type(parameter, None);
+        if parameter.nullable {
+            source.push_str(&format!(
+                "    pub fn with_{field}(mut self, value: {command_type}) -> Self {{ self.{field} = Some(Some(value)); self }}\n    pub fn with_{field}_null(mut self) -> Self {{ self.{field} = Some(None); self }}\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "    pub fn with_{field}(mut self, value: {command_type}) -> Self {{ self.{field} = Some(value); self }}\n"
+            ));
+        }
+    }
+    source.push_str("}\n\n");
 }
 
 pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>) {
@@ -38,40 +277,10 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
     let entity_patch = grant.permits(DataOperationKind::EntityPatch, canonical, None);
 
     if entity_create {
-        source.push_str(&format!(
-            "#[derive(Debug, Clone, serde::Serialize)]\npub struct {generated}Create {{\n"
-        ));
-        for property in properties {
-            let rust_type = generated_rust_type(property, string_lifecycle_type);
-            let rust_type = if property.nullable {
-                format!("Option<{rust_type}>")
-            } else {
-                rust_type
-            };
-            source.push_str(&format!(
-                "    #[serde(rename = \"{}\")]\n    pub {}: {},\n",
-                property.canonical_name, property.generated_name, rust_type
-            ));
-        }
-        source.push_str("}\n\n");
+        emit_create_command(source, generated, properties);
     }
     if entity_patch {
-        source.push_str(&format!(
-            "#[derive(Debug, Clone, Default, serde::Serialize)]\npub struct {generated}Patch {{\n"
-        ));
-        for property in properties {
-            let rust_type = generated_rust_type(property, string_lifecycle_type);
-            let rust_type = if property.nullable {
-                format!("Option<Option<{rust_type}>>")
-            } else {
-                format!("Option<{rust_type}>")
-            };
-            source.push_str(&format!(
-                "    #[serde(rename = \"{}\", skip_serializing_if = \"Option::is_none\")]\n    pub {}: {},\n",
-                property.canonical_name, property.generated_name, rust_type
-            ));
-        }
-        source.push_str("}\n\n");
+        emit_patch_command(source, generated, properties);
     }
     for action in actions {
         let operation_granted = if action.composite {
@@ -86,27 +295,7 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
         if !operation_granted {
             continue;
         }
-        let action_type = format!(
-            "{}{}Input",
-            generated,
-            rust_type_name(&action.canonical_name)
-        );
-        source.push_str(&format!(
-            "#[derive(Debug, Clone, serde::Serialize)]\npub struct {action_type} {{\n"
-        ));
-        for parameter in &action.parameters {
-            let rust_type = generated_rust_type(parameter, None);
-            let rust_type = if parameter.nullable {
-                format!("Option<{rust_type}>")
-            } else {
-                rust_type
-            };
-            source.push_str(&format!(
-                "    #[serde(rename = \"{}\")]\n    pub {}: {},\n",
-                parameter.canonical_name, parameter.generated_name, rust_type
-            ));
-        }
-        source.push_str("}\n\n");
+        emit_action_command(source, generated, action);
     }
     if entity_query {
         emit_query_types(
@@ -121,16 +310,16 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
         "pub struct {generated}Client {{ data: DataClient }}\nimpl {generated}Client {{\n    pub const ENTITY_TYPE: &'static str = \"{canonical}\";\n    pub fn new() -> Self {{ Self {{ data: DataClient::default() }} }}\n"
     ));
     if entity_get {
-        source.push_str(&format!("    pub fn get(&mut self, id: impl Into<String>) -> Result<TypedEntity<{generated}>, ModuleDataError> {{ decode_entity(self.data.call(DataOperationV1::EntityGet {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.into(), at_least_sequence: None }})?) }}\n"));
+        source.push_str(&format!("    pub fn get(&mut self, id: impl AsRef<str>) -> Result<TypedEntity<{generated}>, ModuleDataError> {{ decode_entity(self.data.call(DataOperationV1::EntityGet {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.as_ref().into(), at_least_sequence: None }})?) }}\n    pub fn get_at_least(&mut self, id: impl AsRef<str>, at_least_sequence: u64) -> Result<TypedEntity<{generated}>, ModuleDataError> {{ decode_entity(self.data.call(DataOperationV1::EntityGet {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.as_ref().into(), at_least_sequence: Some(at_least_sequence) }})?) }}\n    pub fn read_committed(&mut self, commit: &CommitToken) -> Result<TypedEntity<{generated}>, ModuleDataError> {{ if commit.entity_type != Self::ENTITY_TYPE {{ return Err(ModuleDataError::new(ModuleDataErrorKind::SchemaMismatch, \"CommitTokenEntityTypeMismatch\", \"commit token belongs to a different entity type\", Retryability::Never)); }} self.get_at_least(&commit.entity_id, commit.sequence) }}\n"));
     }
     if entity_query {
         source.push_str(&format!("    pub fn query(&mut self, filter: Option<{generated}Filter>, order_by: Vec<{generated}Order>, page: PageV1) -> Result<TypedPage<{generated}>, ModuleDataError> {{ decode_page(self.data.call(DataOperationV1::EntityQuery {{ entity_type: Self::ENTITY_TYPE.into(), filter: filter.map(|value| value.0), order_by: order_by.into_iter().map(|value| value.0).collect(), page }})?) }}\n"));
     }
     if entity_create {
-        source.push_str(&format!("    pub fn create(&mut self, value: {generated}Create) -> Result<TypedWrite<{generated}>, ModuleDataError> {{ decode_write(self.data.call(DataOperationV1::EntityCreate {{ entity_type: Self::ENTITY_TYPE.into(), value: serde_json::to_value(value).map_err(invalid_generated_value)?.as_object().cloned().unwrap_or_default() }})?) }}\n"));
+        source.push_str(&format!("    pub fn create(&mut self, value: &{generated}Create<'_>) -> Result<TypedWrite<{generated}>, ModuleDataError> {{ decode_write(self.data.call(DataOperationV1::EntityCreate {{ entity_type: Self::ENTITY_TYPE.into(), value: encode_command_object(value)? }})?) }}\n"));
     }
     if entity_patch {
-        source.push_str(&format!("    pub fn patch(&mut self, id: impl Into<String>, expected_sequence: Option<u64>, value: {generated}Patch) -> Result<TypedWrite<{generated}>, ModuleDataError> {{ decode_write(self.data.call(DataOperationV1::EntityPatch {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.into(), expected_sequence, value: serde_json::to_value(value).map_err(invalid_generated_value)?.as_object().cloned().unwrap_or_default() }})?) }}\n"));
+        source.push_str(&format!("    pub fn patch(&mut self, id: impl AsRef<str>, expected_sequence: Option<u64>, value: &{generated}Patch<'_>) -> Result<TypedWrite<{generated}>, ModuleDataError> {{ decode_write(self.data.call(DataOperationV1::EntityPatch {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.as_ref().into(), expected_sequence, value: encode_command_object(value)? }})?) }}\n"));
     }
     for action in actions {
         let operation_granted = if action.composite {
@@ -156,8 +345,8 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
         } else {
             "ActionInvoke"
         };
-        let result_type = action.result_type.as_deref().map_or_else(
-            || "serde_json::Value".to_string(),
+        let base_result_type = action.result_type.as_deref().map_or_else(
+            || "()".to_string(),
             |type_name| {
                 generated_entity_names
                     .get(type_name)
@@ -165,7 +354,17 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
                     .unwrap_or_else(|| generated_type_name(type_name, &action.result_enum_members))
             },
         );
-        source.push_str(&format!("    pub fn {method}(&mut self, id: impl Into<String>, expected_sequence: Option<u64>, params: {action_type}) -> Result<TypedAction<{result_type}>, ModuleDataError> {{ decode_action(self.data.call(DataOperationV1::{operation} {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.into(), action: \"{}\".into(), expected_sequence, params: serde_json::to_value(params).map_err(invalid_generated_value)?.as_object().cloned().unwrap_or_default() }})?) }}\n", action.canonical_name));
+        let result_type = match action
+            .result_cardinality
+            .expect("current generated action must carry result cardinality")
+        {
+            ManifestActionResultCardinalityV1::Void => "()".to_string(),
+            ManifestActionResultCardinalityV1::Required => base_result_type,
+            ManifestActionResultCardinalityV1::Nullable => {
+                format!("Option<{base_result_type}>")
+            }
+        };
+        source.push_str(&format!("    pub fn {method}(&mut self, id: impl AsRef<str>, expected_sequence: Option<u64>, params: &{action_type}<'_>) -> Result<TypedAction<{result_type}>, ModuleDataError> {{ decode_action(self.data.call(DataOperationV1::{operation} {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.as_ref().into(), action: \"{}\".into(), expected_sequence, params: encode_command_object(params)? }})?) }}\n", action.canonical_name));
     }
     if grant.operations.contains(&DataOperationKind::FileRead)
         && entity_grant

@@ -6,7 +6,7 @@ use temper_spec::csdl::{CsdlDocument, EntityType};
 use temper_wasm_sdk::data::{ManifestPropertyV1, ModuleDataGrant};
 
 use super::names::rust_type_name;
-use super::source_types::generated_rust_type;
+use super::source_types::{emit_id_types, generated_rust_type};
 use super::{ModuleSdkCodegenError, resolve_entity};
 
 pub(super) fn resolve_csdl_entity<'a>(
@@ -77,9 +77,7 @@ pub(super) fn emit_entity_value_types(
     properties: &[ManifestPropertyV1],
     string_lifecycle_type: Option<&str>,
 ) {
-    source.push_str(&format!(
-        "#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]\n#[serde(transparent)]\npub struct {generated}Id(pub String);\n\n"
-    ));
+    emit_id_types(source, &format!("{generated}Id"));
     source.push_str(&format!(
         "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\npub struct {generated} {{\n"
     ));

@@ -14,7 +14,7 @@ use super::tests::call;
 use super::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use crate::state::ServerState;
 
-const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Provenance" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="SolverSession"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Unconfigured"/><Property Name="RegionState" Type="Edm.String" Nullable="false" DefaultValue="CA"/></EntityType><Action Name="Activate" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Provenance.SolverSession" Nullable="false"/><ReturnType Type="Temper.Provenance.SolverSession" Nullable="false"/></Action><EntityContainer Name="Container"><EntitySet Name="SolverSessions" EntityType="Temper.Provenance.SolverSession"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Provenance" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="SolverSession"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Unconfigured"/><Property Name="RegionState" Type="Edm.String" Nullable="false" DefaultValue="CA"/></EntityType><Action Name="Activate" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Provenance.SolverSession" Nullable="false"/><ReturnType Type="Temper.Provenance.SolverSession" Nullable="false"/></Action><Action Name="Reset" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Provenance.SolverSession" Nullable="false"/></Action><EntityContainer Name="Container"><EntitySet Name="SolverSessions" EntityType="Temper.Provenance.SolverSession"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
 
 const IOA: &str = r#"[automaton]
 name = "SolverSession"
@@ -27,6 +27,12 @@ name = "Activate"
 kind = "input"
 from = ["Unconfigured"]
 to = "Active"
+
+[[action]]
+name = "Reset"
+kind = "input"
+from = ["Active"]
+to = "Unconfigured"
 "#;
 
 #[tokio::test]
@@ -40,7 +46,7 @@ async fn state_lifecycle_projects_transition_through_generated_action_and_keyed_
         operations: operations.clone(),
         entities: vec![EntityDataGrant {
             entity_type: "Temper.Provenance.SolverSession".into(),
-            actions: BTreeSet::from(["Activate".into()]),
+            actions: BTreeSet::from(["Activate".into(), "Reset".into()]),
             ..EntityDataGrant::default()
         }],
         ..ModuleDataGrant::default()
@@ -79,14 +85,18 @@ async fn state_lifecycle_projects_transition_through_generated_action_and_keyed_
         &invocation,
         DataOperationV1::EntityCreate {
             entity_type: "Temper.Provenance.SolverSession".into(),
-            value: serde_json::json!({"Id": id, "State": "Unconfigured"})
+            value: serde_json::json!({"Id": id})
                 .as_object()
                 .cloned()
                 .expect("fixture create is an object"),
         },
     )
     .await;
-    assert!(matches!(created.outcome, DataOutcomeV1::Ok { .. }));
+    assert!(
+        matches!(created.outcome, DataOutcomeV1::Ok { .. }),
+        "fixture create failed: {:?}",
+        created.outcome
+    );
     let action = call(
         &invocation,
         DataOperationV1::ActionInvoke {
@@ -129,16 +139,49 @@ async fn state_lifecycle_projects_transition_through_generated_action_and_keyed_
     assert_eq!(value["State"], serde_json::json!("Active"));
     assert_eq!(value["RegionState"], serde_json::json!("CA"));
 
-    assert_generated_client_decodes(generated.source, id, action, keyed);
+    let reset = call(
+        &invocation,
+        DataOperationV1::ActionInvoke {
+            entity_type: "Temper.Provenance.SolverSession".into(),
+            entity_id: id.into(),
+            action: "Reset".into(),
+            expected_sequence: None,
+            params: serde_json::Map::new(),
+        },
+    )
+    .await;
+    let DataOutcomeV1::Ok {
+        result:
+            DataResultV1::Action {
+                commit: reset_commit,
+                result: None,
+                result_omitted: false,
+            },
+    } = &reset.outcome
+    else {
+        panic!("void Reset should commit without fabricating a result")
+    };
+
+    assert_generated_client_decodes(
+        generated.source,
+        id,
+        reset_commit.sequence,
+        action,
+        keyed,
+        reset,
+    );
 }
 
 fn assert_generated_client_decodes(
     source: String,
     id: &str,
+    reset_sequence: u64,
     action: temper_wasm_sdk::data::DataResponseV1,
     keyed: temper_wasm_sdk::data::DataResponseV1,
+    reset: temper_wasm_sdk::data::DataResponseV1,
 ) {
-    let responses = serde_json::to_string(&vec![action, keyed]).expect("responses serialize");
+    let responses =
+        serde_json::to_string(&vec![action, keyed, reset]).expect("responses serialize");
     let usage = format!(
         r#"
 #[test]
@@ -146,13 +189,17 @@ fn state_lifecycle_decodes_from_action_and_keyed_read() {{
     let responses: Vec<DataResponseV1> = serde_json::from_str({responses:?}).unwrap();
     install_native_data_host_for_test(responses);
     let mut client = SolverSessionClient::new();
-    let activated = client.activate("{id}", None, SolverSessionActivateInput {{}}).unwrap();
+    let activate = SolverSessionActivateInput::new();
+    let activated = client.activate("{id}", None, &activate).unwrap();
     let value = activated.result.unwrap();
     assert_eq!(value.state, SolverSessionLifecycleState::Active);
     assert_eq!(value.region_state, "CA");
     let read = client.get("{id}").unwrap();
     assert_eq!(read.value.state, SolverSessionLifecycleState::Active);
     assert_eq!(read.value.region_state, "CA");
+    let reset = SolverSessionResetInput::new();
+    let commit = client.reset("{id}", None, &reset).unwrap().void_result().unwrap();
+    assert_eq!(commit.sequence, {reset_sequence});
 }}
 "#
     );
@@ -178,7 +225,8 @@ fn state_lifecycle_decodes_from_action_and_keyed_read() {{
         .expect("generated crate test runs");
     assert!(
         output.status.success(),
-        "generated client rejected lifecycle responses:\n{}",
+        "generated client rejected lifecycle responses:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }

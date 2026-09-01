@@ -152,7 +152,7 @@ impl AppManifest {
                     )
                 })?;
                 binding
-                    .verify_binding()
+                    .verify_current_binding()
                     .map_err(|error| format!("WASM module '{}': {error}", module.name))?;
                 if binding.module_name != module.name {
                     return Err(format!(

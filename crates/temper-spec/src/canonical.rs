@@ -13,6 +13,8 @@ const STATES_TERM: &str = "Temper.Vocab.StateMachine.States";
 const INITIAL_STATE_TERM: &str = "Temper.Vocab.StateMachine.InitialState";
 const VALID_FROM_STATES_TERM: &str = "Temper.Vocab.StateMachine.ValidFromStates";
 const TARGET_STATE_TERM: &str = "Temper.Vocab.StateMachine.TargetState";
+const CREATE_PROPERTIES_TERM: &str = "Temper.Vocab.Write.CreateProperties";
+const PATCH_PROPERTIES_TERM: &str = "Temper.Vocab.Write.PatchProperties";
 
 /// One CSDL parameter in a linked bound-action wire contract.
 #[derive(Debug, Clone)]
@@ -61,6 +63,8 @@ pub struct CanonicalEntityModel {
     initial_state: Option<String>,
     /// Linked callable action contracts keyed by action identity.
     actions: BTreeMap<String, CanonicalActionContract>,
+    /// Effective operation-specific caller write ownership.
+    write_contract: CanonicalEntityWriteContract,
 }
 
 /// Fully linked immutable schema model consumed by bundle v2 downstream paths.
@@ -151,6 +155,10 @@ impl CanonicalEntityModel {
     pub fn actions(&self) -> &BTreeMap<String, CanonicalActionContract> {
         &self.actions
     }
+    /// Effective operation-specific caller write ownership.
+    pub fn write_contract(&self) -> &CanonicalEntityWriteContract {
+        &self.write_contract
+    }
 }
 
 impl CanonicalSpecModel {
@@ -198,6 +206,10 @@ impl CanonicalSpecModel {
                         automaton,
                         lifecycle_property: lifecycle_properties.get(&entity_type).cloned(),
                         actions: BTreeMap::new(),
+                        write_contract: legacy_write_contract(
+                            entity,
+                            lifecycle_properties.get(&entity_type).map(String::as_str),
+                        ),
                     },
                 );
             }
@@ -228,6 +240,11 @@ impl CanonicalSpecModel {
                     automaton: Some(automaton),
                     lifecycle_property,
                     actions: BTreeMap::new(),
+                    write_contract: CanonicalEntityWriteContract {
+                        explicit: false,
+                        create_properties: BTreeSet::new(),
+                        patch_properties: BTreeSet::new(),
+                    },
                 },
             );
         }
@@ -378,6 +395,17 @@ impl CanonicalSpecModel {
             &lifecycle_enum_states,
         )?;
 
+        let mut write_contracts = BTreeMap::new();
+        for (entity_type, (schema_index, entity_index)) in &locations {
+            let entity = &document.schemas[*schema_index].entity_types[*entity_index];
+            let contract = link_write_contract(
+                entity_type,
+                entity,
+                lifecycle_properties.get(entity_type).map(String::as_str),
+            )?;
+            write_contracts.insert(entity_type.clone(), contract);
+        }
+
         strip_behavior(
             &mut document,
             &locations,
@@ -413,6 +441,9 @@ impl CanonicalSpecModel {
             let initial_state = automaton
                 .as_ref()
                 .map(|value| value.automaton.initial.clone());
+            let write_contract = write_contracts
+                .remove(&entity_type)
+                .expect("every structural entity must have a linked write contract");
             debug_assert!(emitted_locations.contains_key(&entity_type));
             entities.insert(
                 entity_type.clone(),
@@ -424,6 +455,7 @@ impl CanonicalSpecModel {
                     lifecycle_states,
                     initial_state,
                     actions,
+                    write_contract,
                 },
             );
         }
@@ -454,5 +486,6 @@ impl CanonicalSpecModel {
     }
 }
 
+include!("canonical/write.rs");
 include!("canonical/validation.rs");
 include!("canonical/projection.rs");

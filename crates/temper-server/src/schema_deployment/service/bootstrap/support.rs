@@ -204,16 +204,29 @@ pub(super) fn validation_entity(
                 "entity type is absent from the exact bundle closure",
             )
         })?;
-    let fields = serde_json::from_str(&operation.command.canonical_initial_fields_json).map_err(
-        |error| {
-            validation_error(
-                temper_wasm_sdk::data::ModuleDataErrorKind::InvalidRequest,
-                "InvalidInitialFields",
-                error.to_string(),
-            )
-        },
+    let mut fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        &operation.command.canonical_initial_fields_json,
+    )
+    .map_err(|error| {
+        validation_error(
+            temper_wasm_sdk::data::ModuleDataErrorKind::InvalidRequest,
+            "InvalidInitialFields",
+            error.to_string(),
+        )
+    })?;
+    for property in &entity.properties {
+        if property.source == temper_wasm_sdk::data::ManifestValueSourceV1::EntityId {
+            fields.insert(
+                property.canonical_name.clone(),
+                operation.command.entity_id.clone().into(),
+            );
+        }
+    }
+    validate_manifest_entity_object(
+        entity,
+        &fields,
+        crate::application_data::EntityWriteOperation::Create,
     )?;
-    validate_manifest_entity_object(entity, &fields, true)?;
     if let Some(action) = operation.command.initial_action.as_ref() {
         let params = serde_json::from_str(&action.canonical_parameters_json).map_err(|error| {
             validation_error(

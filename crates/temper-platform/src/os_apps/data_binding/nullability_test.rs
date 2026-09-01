@@ -44,9 +44,13 @@ fn action_manifest(nullable: bool, closure: &str) -> ModuleSdkManifest {
                     source: ManifestValueSourceV1::Input,
                     default_value: None,
                     enum_members: Vec::new(),
+                    write_policy: None,
                 }],
                 result_type: None,
                 result_enum_members: Vec::new(),
+                result_cardinality: Some(
+                    temper_wasm_sdk::data::ManifestActionResultCardinalityV1::Void,
+                ),
                 composite: false,
             }],
         }],

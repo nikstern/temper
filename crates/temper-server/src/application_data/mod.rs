@@ -1,5 +1,6 @@
 //! Governed, transport-neutral application-data service for WASM modules.
 
+mod action;
 mod authority;
 mod batch;
 mod helpers;
@@ -16,6 +17,7 @@ mod telemetry;
 /// Canonicalize committed entity state with the production module-data response path.
 pub use schema::canonicalize_entity_for_test;
 
+pub(crate) use schema::EntityWriteOperation;
 pub(crate) use schema::canonical_manifest_entity_value_from_parts;
 pub(crate) use schema::{validate_manifest_action_params, validate_manifest_entity_object};
 pub(crate) use service::GovernedApplicationDataService;
@@ -304,7 +306,7 @@ impl ApplicationDataInvocation {
         mut value: serde_json::Map<String, serde_json::Value>,
     ) -> Result<DataResultV1, ModuleDataError> {
         self.require(DataOperationKind::EntityCreate, entity_type, None)?;
-        self.validate_entity_object(entity_type, &value, true)?;
+        self.validate_entity_object(entity_type, &value, EntityWriteOperation::Create)?;
         let entity_id = extract_id(&value)?;
         self.authorize_value("create", entity_type, Some(&entity_id), Some(&value))?;
         if self.target_entity_exists(entity_type, &entity_id).await? {
@@ -365,7 +367,7 @@ impl ApplicationDataInvocation {
         value: serde_json::Map<String, serde_json::Value>,
     ) -> Result<DataResultV1, ModuleDataError> {
         self.require(DataOperationKind::EntityPatch, entity_type, None)?;
-        self.validate_entity_object(entity_type, &value, false)?;
+        self.validate_entity_object(entity_type, &value, EntityWriteOperation::Patch)?;
         let current = self.get_target_entity(entity_type, entity_id).await?;
         let current_value = current
             .state
@@ -426,74 +428,5 @@ impl ApplicationDataInvocation {
             response.state.sequence_nr,
             serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)?),
         ))
-    }
-
-    async fn action_invoke(
-        &self,
-        kind: DataOperationKind,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        expected: Option<u64>,
-        params: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<DataResultV1, ModuleDataError> {
-        self.require(kind, entity_type, Some(action))?;
-        self.validate_action_params(entity_type, action, &params)?;
-        self.authorize(action, entity_type, Some(entity_id))?;
-        let current = self.get_target_entity(entity_type, entity_id).await?;
-        self.state
-            .enforce_commons_verified_owner_for_action(
-                &self.authority.tenant,
-                short_type(entity_type),
-                &current.state.fields,
-                &serde_json::Value::Object(params.clone()),
-            )
-            .await
-            .map_err(|_| {
-                data_error(
-                    ModuleDataErrorKind::AuthorizationDenied,
-                    "AccountVerificationRequired",
-                    "commons account verification rejected the action",
-                )
-            })?;
-        let agent = self.operation_agent_context(expected);
-        let response = GovernedApplicationDataService::new(&self.state)
-            .action(
-                &self.authority.tenant,
-                short_type(entity_type),
-                entity_id,
-                action,
-                params.into(),
-                &agent,
-            )
-            .await
-            .map_err(internal_error)?;
-        if !response.success {
-            if response.error.as_deref() == Some("SequenceConflict") {
-                return Err(data_error(
-                    ModuleDataErrorKind::Conflict,
-                    "SequenceConflict",
-                    "entity sequence does not match expected_sequence",
-                ));
-            }
-            return Err(data_error(
-                ModuleDataErrorKind::GuardRejected,
-                "ActionRejected",
-                response.error.as_deref().unwrap_or("action rejected"),
-            ));
-        }
-        let result =
-            if let Some(result_entity_type) = self.action_result_entity_type(entity_type, action) {
-                serde_json::Value::Object(
-                    self.canonical_entity_value(result_entity_type, &response.state)?,
-                )
-            } else {
-                response.state.fields
-            };
-        Ok(DataResultV1::Action {
-            commit: commit(entity_type, entity_id, response.state.sequence_nr),
-            result: Some(result),
-            result_omitted: false,
-        })
     }
 }
