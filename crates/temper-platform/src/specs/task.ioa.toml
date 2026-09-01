@@ -9,6 +9,7 @@
 name = "Task"
 states = ["Open", "Claimed", "InProgress", "Review", "Done", "Cancelled"]
 initial = "Open"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

@@ -10,8 +10,10 @@ use std::collections::BTreeMap;
 use temper_runtime::tenant::TenantId;
 use temper_server::platform_store::{PlatformStore, SpecVerificationUpdate};
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
+#[cfg(test)]
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
+use temper_spec::{CanonicalSpecModel, IoaSourceInput};
 use temper_store_turso::spec_content_hash;
 use temper_verify::cascade::VerificationCascade;
 
@@ -136,11 +138,33 @@ fn bootstrap_tenant_specs_inner(
         specs.len()
     );
 
-    // Validate all specs parse.
-    for (entity_type, ioa_source) in specs {
-        automaton::parse_automaton(ioa_source)
-            .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to parse: {e}"));
-    }
+    let csdl =
+        parse_csdl(csdl_source).unwrap_or_else(|e| panic!("{label} CSDL failed to parse: {e}"));
+    let canonical_sources = specs
+        .iter()
+        .map(|(entity_type, ioa_source)| {
+            let matches = csdl
+                .schemas
+                .iter()
+                .filter(|schema| {
+                    schema
+                        .entity_types
+                        .iter()
+                        .any(|candidate| candidate.name == *entity_type)
+                })
+                .map(|schema| format!("{}.{}", schema.namespace, entity_type))
+                .collect::<Vec<_>>();
+            let [qualified] = matches.as_slice() else {
+                panic!("{label} entity {entity_type} has no unique CSDL type");
+            };
+            IoaSourceInput {
+                entity_type: qualified.clone(),
+                source: (*ioa_source).to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let canonical_model = CanonicalSpecModel::link_v2_sources(&csdl, &canonical_sources)
+        .unwrap_or_else(|e| panic!("{label} canonical linking failed: {e}"));
 
     // Hash-gated verification: only run the cascade for specs whose
     // content has changed since the last successful verification.
@@ -166,7 +190,15 @@ fn bootstrap_tenant_specs_inner(
                 "Spec {entity_type} needs verification (hash={}…), running cascade",
                 &hash[..8]
             );
-            let cascade = VerificationCascade::from_ioa(ioa_source)
+            let qualified = canonical_sources
+                .iter()
+                .find(|source| source.source == *ioa_source)
+                .expect("every bootstrap IOA source was canonicalized");
+            let automaton = canonical_model
+                .behavioral_entity(&qualified.entity_type)
+                .and_then(|entity| entity.automaton())
+                .expect("every bootstrap source has a canonical automaton");
+            let cascade = VerificationCascade::from_automaton(automaton)
                 .with_sim_seeds(3)
                 .with_prop_test_cases(20);
             let result = cascade.run();
@@ -178,23 +210,21 @@ fn bootstrap_tenant_specs_inner(
         spec_hashes.push((entity_type.to_string(), hash));
     }
 
-    // Parse CSDL schema.
-    let csdl =
-        parse_csdl(csdl_source).unwrap_or_else(|e| panic!("{label} CSDL failed to parse: {e}"));
-
     // Register tenant and mark specs as pre-verified.
     let tenant_id = TenantId::new(tenant);
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_v2_with_reactions_and_constraints(
                 tenant_id.clone(),
-                csdl,
-                csdl_source.to_string(),
+                canonical_model.emitted_csdl().clone(),
+                canonical_model.emitted_csdl_xml().to_owned(),
                 specs,
-                Vec::new(),
-                cross_invariants_source.map(str::to_string),
-                merge,
+                temper_server::registry::TenantRegistrationOptions {
+                    reactions: Vec::new(),
+                    cross_invariants_source: cross_invariants_source.map(str::to_string),
+                    merge,
+                },
             )
             .unwrap_or_else(|e| panic!("failed to register {label} specs for '{tenant}': {e}"));
         let now = temper_runtime::scheduler::sim_now().to_rfc3339();
@@ -710,6 +740,7 @@ mod tests {
       <EntityType Name="Widget">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
       <EntityContainer Name="ExampleService">
         <EntitySet Name="Widgets" EntityType="Temper.Example.Widget"/>
@@ -722,6 +753,7 @@ mod tests {
 name = "Widget"
 states = ["Created"]
 initial = "Created"
+lifecycle_property = "Status"
 "#;
 
         {

@@ -10,6 +10,7 @@ states = [
     "BlockedChild", "Suspended", "Terminated", "Failed",
 ]
 initial = "Created"
+lifecycle_property = "Status"
 
 [automaton.timeouts]
 BlockedInference = "120s"

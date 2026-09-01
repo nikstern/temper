@@ -1,6 +1,7 @@
 [automaton]
 name = "Problem"
 initial = "Open"
+lifecycle_property = "Status"
 states = ["Open", "Reviewed", "Resolved", "Superseded"]
 
 [[action]]

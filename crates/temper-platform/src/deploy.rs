@@ -15,6 +15,7 @@ use opentelemetry::trace::{Span, Status, Tracer};
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
+use temper_spec::{CanonicalSpecModel, IoaSourceInput};
 use temper_store_turso::spec_content_hash;
 use temper_verify::cascade::{CascadeResult, VerificationCascade};
 
@@ -71,6 +72,19 @@ pub struct EntityDeployResult {
 
 /// Orchestrates the verify-and-deploy pipeline.
 pub struct DeployPipeline;
+
+fn failed_entity_results(input: &DeployInput) -> Vec<EntityDeployResult> {
+    input
+        .entities
+        .iter()
+        .map(|entity| EntityDeployResult {
+            entity_name: entity.entity_type.clone(),
+            verified: false,
+            ioa_source: entity.ioa_source.clone(),
+            cascade: None,
+        })
+        .collect()
+}
 
 fn admit_collection_sources(state: &PlatformState, input: &DeployInput) -> Result<(), String> {
     let tenant = TenantId::new(&input.tenant_name);
@@ -161,6 +175,65 @@ impl DeployPipeline {
             };
         }
 
+        let parsed_csdl = match parse_csdl(&input.csdl_xml) {
+            Ok(csdl) => csdl,
+            Err(error) => {
+                return DeployResult {
+                    success: false,
+                    tenant: input.tenant_name.clone(),
+                    entity_results: failed_entity_results(input),
+                    summary: format!("Deployment failed: invalid CSDL: {error}"),
+                };
+            }
+        };
+        let mut qualified_sources = Vec::with_capacity(input.entities.len());
+        let mut qualified_by_submitted = std::collections::BTreeMap::new();
+        for entity in &input.entities {
+            let matches = parsed_csdl
+                .schemas
+                .iter()
+                .flat_map(|schema| {
+                    schema
+                        .entity_types
+                        .iter()
+                        .filter(move |candidate| candidate.name == entity.entity_type)
+                        .map(move |candidate| format!("{}.{}", schema.namespace, candidate.name))
+                })
+                .collect::<Vec<_>>();
+            let qualified = if entity.entity_type.contains('.') {
+                entity.entity_type.clone()
+            } else if let [qualified] = matches.as_slice() {
+                qualified.clone()
+            } else {
+                return DeployResult {
+                    success: false,
+                    tenant: input.tenant_name.clone(),
+                    entity_results: failed_entity_results(input),
+                    summary: format!(
+                        "Deployment failed: entity '{}' has no unique CSDL type",
+                        entity.entity_type
+                    ),
+                };
+            };
+            qualified_by_submitted.insert(entity.entity_type.clone(), qualified.clone());
+            qualified_sources.push(IoaSourceInput {
+                entity_type: qualified,
+                source: entity.ioa_source.clone(),
+            });
+        }
+        let canonical_model =
+            match CanonicalSpecModel::link_v2_sources(&parsed_csdl, &qualified_sources) {
+                Ok(model) => model,
+                Err(error) => {
+                    return DeployResult {
+                        success: false,
+                        tenant: input.tenant_name.clone(),
+                        entity_results: failed_entity_results(input),
+                        summary: format!("Deployment failed: canonical linking failed: {error}"),
+                    };
+                }
+            };
+
         // Step 1-2: Parse and verify each entity spec
         for entity in &input.entities {
             let mut entity_span = tracer
@@ -178,33 +251,15 @@ impl DeployPipeline {
                 summary: format!("Parsing and verifying spec for {}", entity.entity_type),
             });
 
-            // Parse the IOA spec
-            let parse_result = automaton::parse_automaton(&entity.ioa_source);
-            if let Err(e) = &parse_result {
-                state.broadcast(PlatformEvent::VerifyStatus {
-                    tenant: input.tenant_name.clone(),
-                    level: format!("{} Parse", entity.entity_type),
-                    status: VerifyStepStatus::Failed,
-                    summary: format!("Failed to parse IOA spec: {e}"),
-                });
-                entity_span.set_status(Status::Error {
-                    description: format!("parse failed: {e}").into(),
-                });
-                entity_span.set_attribute(KeyValue::new("temper.cascade_passed", false));
-                entity_span.end();
-                entity_results.push(EntityDeployResult {
-                    entity_name: entity.entity_type.clone(),
-                    verified: false,
-                    ioa_source: entity.ioa_source.clone(),
-                    cascade: None,
-                });
-                all_passed = false;
-                continue;
-            }
+            let qualified = &qualified_by_submitted[&entity.entity_type];
+            let automaton = canonical_model
+                .behavioral_entity(qualified)
+                .and_then(|linked| linked.automaton())
+                .expect("canonical linker returned every submitted automaton");
 
             // Validate WASM integration modules: every type="wasm" integration
             // must reference a module present in `input.wasm_modules`.
-            if let Ok(ref automaton) = parse_result {
+            {
                 let mut wasm_ok = true;
                 for integration in &automaton.integrations {
                     if integration.integration_type == "wasm"
@@ -250,7 +305,7 @@ impl DeployPipeline {
 
             // Generate suggested Cedar policies for WASM integrations (Tier 2).
             // These are informational — the developer must approve before they take effect.
-            if let Ok(ref automaton) = parse_result {
+            {
                 let has_wasm = automaton
                     .integrations
                     .iter()
@@ -308,7 +363,7 @@ impl DeployPipeline {
                     composite_report: None,
                 }
             } else {
-                let cascade = VerificationCascade::from_ioa(&entity.ioa_source)
+                let cascade = VerificationCascade::from_automaton(automaton)
                     .with_sim_seeds(3)
                     .with_prop_test_cases(20);
                 let r = cascade.run();
@@ -357,7 +412,7 @@ impl DeployPipeline {
 
         // Step 3-4: If all verified, parse CSDL and register tenant
         if all_passed && !input.entities.is_empty() {
-            match parse_csdl(&input.csdl_xml) {
+            match Ok::<_, std::convert::Infallible>(canonical_model.emitted_csdl().clone()) {
                 Ok(csdl) => {
                     // Collect IOA sources for registration
                     let ioa_pairs: Vec<(&str, &str)> = entity_results
@@ -368,11 +423,12 @@ impl DeployPipeline {
                     // Register tenant in the live registry.
                     let register_result = {
                         let mut registry = state.registry.write().unwrap();
-                        registry.try_register_tenant(
+                        registry.try_register_tenant_v2_with_reactions_and_constraints(
                             TenantId::new(&input.tenant_name),
                             csdl,
-                            input.csdl_xml.clone(),
+                            canonical_model.emitted_csdl_xml().to_owned(),
                             &ioa_pairs,
+                            temper_server::registry::TenantRegistrationOptions::default(),
                         )
                     };
 
@@ -524,6 +580,7 @@ mod tests {
 name = "Task"
 initial = "Open"
 states = ["Open", "InProgress", "Done"]
+lifecycle_property = "Status"
 
 [[action]]
 name = "StartWork"
@@ -547,13 +604,13 @@ kind = "internal"
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false" />
       </EntityType>
       <Action Name="StartWork" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Task" />
+        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Task" Nullable="false" />
       </Action>
       <Action Name="Complete" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Task" />
+        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Task" Nullable="false" />
       </Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Tasks" EntityType="Test.TaskTracker.Task" />
@@ -696,10 +753,27 @@ kind = "internal"
     #[test]
     fn test_deploy_multiple_entities() {
         let state = PlatformState::new(None);
+        let csdl_xml = TASK_CSDL.replace(
+            "      <EntityContainer Name=\"Container\">",
+            r#"      <EntityType Name="Bug">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="Status" Type="Edm.String" Nullable="false" />
+      </EntityType>
+      <Action Name="StartWork" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Bug" Nullable="false" />
+      </Action>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Test.TaskTracker.Bug" Nullable="false" />
+      </Action>
+      <EntityContainer Name="Container">"#,
+        );
 
         let input = DeployInput {
             tenant_name: "multi-tenant".into(),
-            csdl_xml: TASK_CSDL.into(),
+            csdl_xml,
             entities: vec![
                 EntitySpecSource {
                     entity_type: "Task".into(),

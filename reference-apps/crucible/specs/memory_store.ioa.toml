@@ -12,6 +12,7 @@
 name = "MemoryStore"
 states = ["Active", "Archived"]
 initial = "Active"
+lifecycle_property = "Status"
 
 [[action]]
 name = "ArchiveMemoryStore"

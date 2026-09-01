@@ -2,6 +2,7 @@
 name = "Direction"
 states = ["Proposed", "Selected", "Dismissed", "Archived"]
 initial = "Proposed"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Proposed", "Selected", "Dismissed"]
 
 [[state]]

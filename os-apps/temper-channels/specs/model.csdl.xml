@@ -6,7 +6,7 @@
       <EntityType Name="Channel">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ChannelType" Type="Edm.String"/>
         <Property Name="ChannelId" Type="Edm.String"/>
         <Property Name="GuildId" Type="Edm.String"/>
@@ -20,7 +20,7 @@
       <EntityType Name="AgentRoute">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="BindingTier" Type="Edm.String"/>
         <Property Name="ChannelId" Type="Edm.String"/>
         <Property Name="GuildId" Type="Edm.String"/>
@@ -32,7 +32,7 @@
       <EntityType Name="ChannelSession">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ChannelId" Type="Edm.String"/>
         <Property Name="ThreadId" Type="Edm.String"/>
         <Property Name="AuthorId" Type="Edm.String"/>

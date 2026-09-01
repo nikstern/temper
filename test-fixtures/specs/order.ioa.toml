@@ -8,6 +8,7 @@
 name = "Order"
 states = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "ReturnRequested", "Returned", "Refunded"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 # --- Declared keys (ADR-0153) ---
 # A declared alternate key the kernel indexes for O(log n) present/absent reads.

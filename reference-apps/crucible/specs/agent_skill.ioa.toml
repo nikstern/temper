@@ -12,6 +12,7 @@
 name = "AgentSkill"
 states = ["Active"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # --- Cross-field validation (ADR-0041) ---
 

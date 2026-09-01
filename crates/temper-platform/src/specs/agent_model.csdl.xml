@@ -6,7 +6,7 @@
       <EntityType Name="Plan">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="description" Type="Edm.String"/>
         <Property Name="task_count" Type="Edm.String"/>
         <Property Name="last_task_id" Type="Edm.String"/>
@@ -19,7 +19,7 @@
       <EntityType Name="Task">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="plan_id" Type="Edm.String"/>
         <Property Name="agent_id" Type="Edm.String"/>
         <Property Name="title" Type="Edm.String"/>
@@ -38,7 +38,7 @@
       <EntityType Name="AgentType">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="name" Type="Edm.String"/>
         <Property Name="system_prompt" Type="Edm.String"/>
         <Property Name="tool_set" Type="Edm.String"/>
@@ -77,7 +77,7 @@
       <EntityType Name="Agent">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="role" Type="Edm.String"/>
         <Property Name="goal" Type="Edm.String"/>
         <Property Name="model" Type="Edm.String"/>
@@ -106,10 +106,61 @@
         </NavigationProperty>
       </EntityType>
 
+      <Action Name="Assign" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="role" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="goal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Start" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+      </Action>
+      <Action Name="SetOrganization" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="org_id" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="reports_to" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="budget_monthly_cents" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Checkpoint" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="conversation" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="RecordCost" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="cost_cents" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="cost_consumed_cents" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Block" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Unblock" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+      </Action>
+      <Action Name="SpawnChild" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="role" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="goal" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="model" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Complete" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="result" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+        <Parameter Name="reason" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Reset" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Agent" Nullable="false"/>
+      </Action>
+
       <EntityType Name="ToolCall">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="agent_id" Type="Edm.String"/>
         <Property Name="tool_name" Type="Edm.String"/>
         <Property Name="tool_input" Type="Edm.String"/>
@@ -127,7 +178,7 @@
       <EntityType Name="Schedule">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="agent_type_id" Type="Edm.String"/>
         <Property Name="agent_role" Type="Edm.String"/>
         <Property Name="goal_template" Type="Edm.String"/>
@@ -143,7 +194,7 @@
       <EntityType Name="AgentCredential">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="agent_type_id" Type="Edm.String"/>
         <Property Name="agent_instance_id" Type="Edm.String"/>
         <Property Name="key_hash" Type="Edm.String"/>
@@ -159,7 +210,7 @@
       <EntityType Name="Policy">
         <Key><PropertyRef Name="id"/></Key>
         <Property Name="id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="name" Type="Edm.String"/>
         <Property Name="description" Type="Edm.String"/>
         <Property Name="cedar_statement" Type="Edm.String"/>
@@ -191,6 +242,48 @@
         <Parameter Name="bindingParameter" Type="Temper.AgentCredential" Nullable="false"/>
         <ReturnType Type="Temper.AgentCredential"/>
       </Action>
+
+      <Action Name="Activate" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Plan" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="AddTask" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Plan" Nullable="false"/>
+        <Parameter Name="title" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="description" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="Pause" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Plan" Nullable="false"/></Action>
+      <Action Name="Resume" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Plan" Nullable="false"/></Action>
+      <Action Name="Complete" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Plan" Nullable="false"/><Parameter Name="summary" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Fail" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Plan" Nullable="false"/><Parameter Name="reason" Type="Edm.String" Nullable="false"/></Action>
+
+      <Action Name="Create" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/><Parameter Name="title" Type="Edm.String" Nullable="false"/><Parameter Name="description" Type="Edm.String" Nullable="false"/><Parameter Name="plan_id" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Claim" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/><Parameter Name="agent_id" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="StartWork" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/></Action>
+      <Action Name="SubmitForReview" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/><Parameter Name="deliverable" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Approve" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/></Action>
+      <Action Name="RequestChanges" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/><Parameter Name="feedback" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Unclaim" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/></Action>
+      <Action Name="Cancel" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Task" Nullable="false"/><Parameter Name="reason" Type="Edm.String" Nullable="false"/></Action>
+
+      <Action Name="Authorize" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.ToolCall" Nullable="false"/></Action>
+      <Action Name="Deny" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.ToolCall" Nullable="false"/><Parameter Name="decision_id" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Execute" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.ToolCall" Nullable="false"/></Action>
+      <Action Name="Complete" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.ToolCall" Nullable="false"/><Parameter Name="result" Type="Edm.String" Nullable="false"/><Parameter Name="duration_ms" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Fail" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.ToolCall" Nullable="false"/><Parameter Name="error" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Retry" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.ToolCall" Nullable="false"/></Action>
+
+      <Action Name="Activate" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Schedule" Nullable="false"/><Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/><Parameter Name="agent_role" Type="Edm.String" Nullable="false"/><Parameter Name="goal_template" Type="Edm.String" Nullable="false"/><Parameter Name="cron_expr" Type="Edm.String" Nullable="false"/><Parameter Name="max_runs" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Fire" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Schedule" Nullable="false"/><Parameter Name="last_run" Type="Edm.String" Nullable="false"/><Parameter Name="role" Type="Edm.String" Nullable="false"/><Parameter Name="goal" Type="Edm.String" Nullable="false"/><Parameter Name="model" Type="Edm.String" Nullable="false"/><Parameter Name="agent_type_id" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Complete" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Schedule" Nullable="false"/></Action>
+      <Action Name="Pause" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Schedule" Nullable="false"/></Action>
+      <Action Name="Resume" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Schedule" Nullable="false"/></Action>
+
+      <Action Name="Propose" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Policy" Nullable="false"/><Parameter Name="name" Type="Edm.String" Nullable="false"/><Parameter Name="description" Type="Edm.String" Nullable="false"/><Parameter Name="cedar_statement" Type="Edm.String" Nullable="false"/><Parameter Name="proposed_by" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Approve" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Policy" Nullable="false"/></Action>
+      <Action Name="Reject" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Policy" Nullable="false"/><Parameter Name="reason" Type="Edm.String" Nullable="false"/></Action>
+      <Action Name="Activate" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Policy" Nullable="false"/></Action>
+      <Action Name="Revoke" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Policy" Nullable="false"/><Parameter Name="reason" Type="Edm.String" Nullable="false"/></Action>
 
       <EntityContainer Name="Service">
         <EntitySet Name="AgentTypes" EntityType="Temper.AgentType"/>

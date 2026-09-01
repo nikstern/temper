@@ -14,6 +14,7 @@ use super::xml::{attr_str, local_name, local_name_end, required_attr, skip_eleme
 pub(super) fn parse_schema(
     reader: &mut Reader<&[u8]>,
     start: &BytesStart,
+    frozen_v1: bool,
 ) -> Result<Schema, CsdlParseError> {
     let namespace = required_attr(start, "Namespace")?;
     let mut schema = Schema {
@@ -44,9 +45,14 @@ pub(super) fn parse_schema(
                     .push(parse_entity_container(reader, element)?),
                 _ => skip_element(reader)?,
             },
-            Ok(Event::Empty(ref element)) if local_name(element) == "Term" => {
-                schema.terms.push(parse_term(element)?);
-            }
+            Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
+                "Term" => schema.terms.push(parse_term(element)?),
+                "EnumType" if !frozen_v1 => schema.enum_types.push(EnumType {
+                    name: required_attr(element, "Name")?,
+                    members: Vec::new(),
+                }),
+                _ => {}
+            },
             Ok(Event::End(ref element)) if local_name_end(element) == "Schema" => break,
             Ok(Event::Eof) => break,
             Err(error) => return Err(CsdlParseError::Xml(error)),

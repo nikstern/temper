@@ -1,6 +1,7 @@
 [automaton]
 name = "Version"
 initial = "Created"
+lifecycle_property = "Status"
 states = ["Created", "Deployed", "Superseded"]
 
 [[action]]

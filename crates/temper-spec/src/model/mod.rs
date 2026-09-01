@@ -7,7 +7,7 @@ use crate::tlaplus;
 
 /// Identifies whether a spec source is IOA TOML (primary) or TLA+ (legacy).
 #[derive(Debug, Clone)]
-pub enum SpecSource {
+pub enum LegacySpecSource {
     /// I/O Automaton TOML source (primary format).
     Ioa(String),
     /// TLA+ source (legacy format).
@@ -17,7 +17,7 @@ pub enum SpecSource {
 /// The unified specification model that links CSDL + specification sources (IOA/TLA+).
 /// This is what codegen consumes to produce Rust actors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpecModel {
+pub struct LegacySpecModel {
     /// The CSDL document (data model).
     pub csdl: csdl::CsdlDocument,
     /// State machines keyed by entity type name (from IOA or TLA+ sources).
@@ -41,36 +41,36 @@ impl ValidationResult {
     }
 }
 
-/// Build a unified SpecModel from a CSDL document and specification sources.
+/// Build a unified LegacySpecModel from a CSDL document and specification sources.
 ///
 /// `tla_sources` maps entity type name → TLA+ source text (legacy API).
-/// For mixed IOA + TLA+ sources, use [`build_spec_model_mixed`].
-pub fn build_spec_model(
+/// For mixed IOA + TLA+ sources, use [`build_legacy_spec_model_mixed`].
+pub fn build_legacy_spec_model(
     csdl: csdl::CsdlDocument,
     tla_sources: HashMap<String, String>,
-) -> SpecModel {
-    let sources: HashMap<String, SpecSource> = tla_sources
+) -> LegacySpecModel {
+    let sources: HashMap<String, LegacySpecSource> = tla_sources
         .into_iter()
-        .map(|(k, v)| (k, SpecSource::Tla(v)))
+        .map(|(k, v)| (k, LegacySpecSource::Tla(v)))
         .collect();
-    build_spec_model_mixed(csdl, sources)
+    build_legacy_spec_model_mixed(csdl, sources)
 }
 
-/// Build a unified SpecModel from a CSDL document and mixed specification sources.
+/// Build a unified LegacySpecModel from a CSDL document and mixed specification sources.
 ///
-/// `sources` maps entity type name → [`SpecSource`] (either IOA or TLA+).
+/// `sources` maps entity type name → [`LegacySpecSource`] (either IOA or TLA+).
 /// IOA sources go through `parse_automaton()` → `to_state_machine()`.
 /// TLA+ sources go through `extract_state_machine()`.
 /// Both produce the same `StateMachine` for the codegen pipeline.
-pub fn build_spec_model_mixed(
+pub fn build_legacy_spec_model_mixed(
     csdl: csdl::CsdlDocument,
-    sources: HashMap<String, SpecSource>,
-) -> SpecModel {
+    sources: HashMap<String, LegacySpecSource>,
+) -> LegacySpecModel {
     let mut validation = ValidationResult::default();
     let state_machines = parse_state_machines(&sources, &mut validation);
     validate_csdl_links(&csdl, &state_machines, &mut validation);
 
-    SpecModel {
+    LegacySpecModel {
         csdl,
         state_machines,
         validation,
@@ -78,7 +78,7 @@ pub fn build_spec_model_mixed(
 }
 
 fn parse_state_machines(
-    sources: &HashMap<String, SpecSource>,
+    sources: &HashMap<String, LegacySpecSource>,
     validation: &mut ValidationResult,
 ) -> HashMap<String, tlaplus::StateMachine> {
     let mut state_machines = HashMap::new();
@@ -97,13 +97,15 @@ fn parse_state_machines(
 
 fn parse_source_state_machine(
     entity_name: &str,
-    source: &SpecSource,
+    source: &LegacySpecSource,
 ) -> Result<tlaplus::StateMachine, String> {
     match source {
-        SpecSource::Tla(tla_text) => tlaplus::extract_state_machine(tla_text).map_err(|error| {
-            format!("Failed to extract state machine for {entity_name} (TLA+): {error}")
-        }),
-        SpecSource::Ioa(ioa_text) => automaton::parse_automaton(ioa_text)
+        LegacySpecSource::Tla(tla_text) => {
+            tlaplus::extract_state_machine(tla_text).map_err(|error| {
+                format!("Failed to extract state machine for {entity_name} (TLA+): {error}")
+            })
+        }
+        LegacySpecSource::Ioa(ioa_text) => automaton::parse_automaton(ioa_text)
             .map(|automaton| automaton::to_state_machine(&automaton))
             .map_err(|error| format!("Failed to parse IOA automaton for {entity_name}: {error}")),
     }
@@ -209,7 +211,7 @@ mod tests {
     use crate::csdl::parse_csdl;
 
     #[test]
-    fn test_build_spec_model_from_reference() {
+    fn test_build_legacy_spec_model_from_reference() {
         let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
         let order_tla = include_str!("../../../../test-fixtures/specs/order.tla");
 
@@ -218,7 +220,7 @@ mod tests {
         let mut tla_sources = HashMap::new();
         tla_sources.insert("Order".to_string(), order_tla.to_string());
 
-        let spec = build_spec_model(csdl, tla_sources);
+        let spec = build_legacy_spec_model(csdl, tla_sources);
 
         // Should be valid (no errors)
         assert!(
@@ -237,16 +239,19 @@ mod tests {
     }
 
     #[test]
-    fn test_build_spec_model_from_ioa() {
+    fn test_build_legacy_spec_model_from_ioa() {
         let csdl_xml = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
         let order_ioa = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
         let csdl = parse_csdl(csdl_xml).expect("CSDL should parse");
 
         let mut sources = HashMap::new();
-        sources.insert("Order".to_string(), SpecSource::Ioa(order_ioa.to_string()));
+        sources.insert(
+            "Order".to_string(),
+            LegacySpecSource::Ioa(order_ioa.to_string()),
+        );
 
-        let spec = build_spec_model_mixed(csdl, sources);
+        let spec = build_legacy_spec_model_mixed(csdl, sources);
 
         // Should be valid (no errors)
         assert!(
@@ -273,13 +278,19 @@ mod tests {
 
         // Build with IOA only
         let mut ioa_sources = HashMap::new();
-        ioa_sources.insert("Order".to_string(), SpecSource::Ioa(order_ioa.to_string()));
-        let ioa_spec = build_spec_model_mixed(csdl.clone(), ioa_sources);
+        ioa_sources.insert(
+            "Order".to_string(),
+            LegacySpecSource::Ioa(order_ioa.to_string()),
+        );
+        let ioa_spec = build_legacy_spec_model_mixed(csdl.clone(), ioa_sources);
 
         // Build with TLA+ only
         let mut tla_sources = HashMap::new();
-        tla_sources.insert("Order".to_string(), SpecSource::Tla(order_tla.to_string()));
-        let tla_spec = build_spec_model_mixed(csdl, tla_sources);
+        tla_sources.insert(
+            "Order".to_string(),
+            LegacySpecSource::Tla(order_tla.to_string()),
+        );
+        let tla_spec = build_legacy_spec_model_mixed(csdl, tla_sources);
 
         // Both should produce valid specs
         assert!(ioa_spec.validation.is_valid());

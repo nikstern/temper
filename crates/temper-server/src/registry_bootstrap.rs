@@ -184,6 +184,9 @@ fn populate_registry<R: SpecRowLike>(
             .collect();
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
+        // Rows in the legacy `specs` table predate persisted canonicalization
+        // versions. Restore them through the frozen v1 linker; scoped bundle
+        // records carry an explicit version and use the versioned path.
         registry
             .try_register_tenant_with_reactions_and_constraints(
                 tenant.as_str(),

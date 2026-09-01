@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{DATA_ABI_VERSION_V1, ModuleSdkCompatibilityProof};
 
+mod hashes;
 mod nullability;
 mod operation;
 mod permissions;
@@ -257,6 +258,12 @@ pub struct ManifestEntityV1 {
     pub entity_set: String,
     /// Generated Rust type name.
     pub generated_name: String,
+    /// Closed lifecycle wire values in authoritative IOA declaration order.
+    ///
+    /// Empty for legacy ABI-v1 manifests and data-only entities so their
+    /// historical canonical JSON and binding digest remain unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifecycle_states: Vec<String>,
     /// Canonical property metadata in deterministic order.
     #[serde(default)]
     pub properties: Vec<ManifestPropertyV1>,
@@ -438,37 +445,7 @@ impl ModuleSdkManifest {
 
     /// Canonical semantic hash for every generated entity, property, and action.
     pub fn used_symbol_hashes(&self) -> Result<BTreeMap<String, String>, String> {
-        let mut hashes = BTreeMap::new();
-        for entity in &self.entities {
-            hashes.insert(
-                format!("entity:{}", entity.entity_type),
-                digest_json(&(
-                    &entity.entity_type,
-                    &entity.entity_set,
-                    &entity.generated_name,
-                ))?,
-            );
-            hashes.insert(
-                format!("entity_set:{}", entity.entity_set),
-                digest_json(&entity.entity_set)?,
-            );
-            for property in &entity.properties {
-                hashes.insert(
-                    format!(
-                        "property:{}:{}",
-                        entity.entity_type, property.canonical_name
-                    ),
-                    digest_json(property)?,
-                );
-            }
-            for action in &entity.actions {
-                hashes.insert(
-                    format!("action:{}:{}", entity.entity_type, action.canonical_name),
-                    digest_json(action)?,
-                );
-            }
-        }
-        Ok(hashes)
+        hashes::used_symbol_hashes(self)
     }
 
     /// Action symbols whose only schema change widens required input to nullable.

@@ -137,7 +137,7 @@ impl CascadeResult {
 
 /// Orchestrates the verification cascade.
 pub struct VerificationCascade {
-    ioa_source: String,
+    automaton: temper_spec::automaton::Automaton,
     max_counter: usize,
     /// Number of simulation seeds to test.
     sim_seeds: u64,
@@ -171,8 +171,28 @@ struct CompositeScopeConfig {
 impl VerificationCascade {
     /// Create from I/O Automaton TOML source.
     pub fn from_ioa(ioa_toml: &str) -> Self {
+        let automaton = temper_spec::parse_automaton(ioa_toml)
+            .expect("verification cascade requires a validated IOA source");
         Self {
-            ioa_source: ioa_toml.to_string(),
+            automaton,
+            max_counter: 2,
+            sim_seeds: 10,
+            sim_ticks: 200,
+            prop_test_cases: 1000,
+            prop_test_max_steps: 30,
+            model_state_budget: usize::MAX,
+            smt_resource_budget: None,
+            actor_sim_runner: None,
+            fail_fast: false,
+            path_extraction_config: None,
+            composite_scope: None,
+        }
+    }
+
+    /// Create from the canonical model's already parsed automaton.
+    pub fn from_automaton(automaton: &temper_spec::automaton::Automaton) -> Self {
+        Self {
+            automaton: automaton.clone(),
             max_counter: 2,
             sim_seeds: 10,
             sim_ticks: 200,
@@ -278,7 +298,7 @@ impl VerificationCascade {
         let mut warnings = collect_unverifiable_warnings(&model);
 
         // Level 0: SMT symbolic verification
-        let l0 = self.run_symbolic_verification();
+        let l0 = self.run_symbolic_verification(&model);
         let l0_passed = l0.passed;
         levels.push(l0);
         if self.fail_fast && !l0_passed {
@@ -315,7 +335,7 @@ impl VerificationCascade {
         };
 
         // Level 2: Deterministic simulation (model-level)
-        let l2 = self.run_simulation_level();
+        let l2 = self.run_simulation_level(&model);
         let l2_passed = l2.passed;
         levels.push(l2);
         if self.fail_fast && !l2_passed {
@@ -368,18 +388,12 @@ impl VerificationCascade {
     }
 
     fn build_temper_model(&self) -> TemperModel {
-        model::build_model_from_ioa(&self.ioa_source, self.max_counter)
-            .expect("cascade: IOA spec should have been validated before model building")
+        model::build_model_from_automaton(&self.automaton, self.max_counter)
     }
 
     /// Level 0: SMT symbolic verification.
-    fn run_symbolic_verification(&self) -> LevelResult {
-        let result = match self.smt_resource_budget {
-            Some(resource_units) => {
-                smt::verify_symbolic_with_budget(&self.ioa_source, self.max_counter, resource_units)
-            }
-            None => smt::verify_symbolic(&self.ioa_source, self.max_counter),
-        };
+    fn run_symbolic_verification(&self, model: &TemperModel) -> LevelResult {
+        let result = smt::verify_symbolic_model(model, self.smt_resource_budget);
         let passed = result.all_passed;
 
         let dead_guards: Vec<&str> = result
@@ -441,15 +455,12 @@ impl VerificationCascade {
     /// Level 1: Stateright exhaustive model checking.
     fn run_model_check(&self, model: &TemperModel) -> LevelResult {
         let verification = checker::check_model_with_state_budget(model, self.model_state_budget);
-        let collection_results = temper_spec::automaton::parse_automaton(&self.ioa_source)
-            .map(|automaton| {
-                automaton
-                    .collection_workflows
-                    .iter()
-                    .map(crate::collection::verify_collection_workflow)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .unwrap_or_else(|error| Err(error.to_string()));
+        let collection_results = self
+            .automaton
+            .collection_workflows
+            .iter()
+            .map(crate::collection::verify_collection_workflow)
+            .collect::<Result<Vec<_>, _>>();
         let passed = verification.all_properties_hold && collection_results.is_ok();
         let summary = if passed {
             let collection_states = collection_results
@@ -502,7 +513,7 @@ impl VerificationCascade {
     }
 
     /// Level 2: Deterministic simulation with fault injection.
-    fn run_simulation_level(&self) -> LevelResult {
+    fn run_simulation_level(&self, model: &TemperModel) -> LevelResult {
         let base_config = SimConfig {
             seed: 1,
             max_ticks: self.sim_ticks,
@@ -512,12 +523,8 @@ impl VerificationCascade {
             faults: FaultConfig::light(),
         };
 
-        let results = simulation::run_multi_seed_simulation_from_ioa(
-            &self.ioa_source,
-            &base_config,
-            self.sim_seeds,
-        )
-        .expect("cascade: IOA spec should have been validated before simulation");
+        let results =
+            simulation::run_multi_seed_simulation_on_model(model, &base_config, self.sim_seeds);
 
         let invariants_ok = results.iter().all(|r| r.all_invariants_held);
         let liveness_ok = results.iter().all(|r| r.liveness_violations.is_empty());
@@ -563,9 +570,9 @@ impl VerificationCascade {
     }
 
     /// Level 3: Property-based tests with shrinking for minimal counterexamples.
-    fn run_prop_tests_level(&self, _model: &TemperModel) -> LevelResult {
-        let result = proptest_gen::run_prop_tests_with_shrinking_from_ioa(
-            &self.ioa_source,
+    fn run_prop_tests_level(&self, model: &TemperModel) -> LevelResult {
+        let result = proptest_gen::run_prop_tests_with_shrinking_on_model(
+            model,
             self.prop_test_cases,
             self.prop_test_max_steps,
         );

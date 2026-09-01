@@ -17,6 +17,7 @@
 name = "SessionSchedule"
 states = ["Draft", "Active", "Paused", "Expired"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 # --- State variables ---
 

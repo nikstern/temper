@@ -2,6 +2,7 @@
 name = "Pressure"
 states = ["Inferred", "Framed", "Dismissed", "Archived"]
 initial = "Inferred"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Inferred", "Framed", "Dismissed"]
 
 [[action]]

@@ -6,6 +6,7 @@
 name = "Project"
 states = ["Planning", "Active", "Paused", "Completed", "Archived"]
 initial = "Planning"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

@@ -2,6 +2,7 @@
 name = "OrganismVersion"
 states = ["Recorded", "Parent", "Superseded", "RolledBack"]
 initial = "Recorded"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Recorded", "Parent", "Superseded"]
 
 [[state]]

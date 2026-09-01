@@ -8,6 +8,7 @@
 name = "AgentSoul"
 states = ["Draft", "Active", "Archived"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 [[state]]
 name = "name"

@@ -1,6 +1,7 @@
 [automaton]
 name = "GovernanceDecision"
 initial = "Pending"
+lifecycle_property = "Status"
 states = ["Pending", "Approved", "Denied", "Expired"]
 
 # --- State Variables ---

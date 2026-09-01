@@ -12,6 +12,7 @@
 name = "EnvironmentPackage"
 states = ["Active"]
 initial = "Active"
+lifecycle_property = "Status"
 
 # No actions. Create + delete are the only lifecycle operations and those
 # are handled by the generic OData entity-set routes.

@@ -6,12 +6,12 @@
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
         <Property Name="Name" Type="Edm.String" Nullable="true"/>
-        <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Active"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
       <EntityType Name="Worker">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Idle"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
       </EntityType>
       <Action Name="Run" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Scoped.Worker" Nullable="false"/>

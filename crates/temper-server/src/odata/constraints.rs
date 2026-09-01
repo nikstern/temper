@@ -690,8 +690,7 @@ pub async fn pre_upsert_field_invariant_checks(
         let registry = state.registry.read().unwrap(); // ci-ok: RwLock read — poisoned lock = prior panic, fail-fast correct
         match schema_pin {
             Some(pin) => registry
-                .get_scoped_config_at_digest(tenant, &pin.scope, &pin.bundle_digest)
-                .and_then(|config| config.entities.get(entity_type))
+                .get_scoped_spec_at_digest(tenant, &pin.scope, &pin.bundle_digest, entity_type)
                 .map(|spec| spec.automaton.field_invariants.clone())
                 .unwrap_or_default(),
             None => registry

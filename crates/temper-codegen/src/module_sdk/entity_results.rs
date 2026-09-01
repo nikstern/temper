@@ -75,6 +75,7 @@ pub(super) fn emit_entity_value_types(
     source: &mut String,
     generated: &str,
     properties: &[ManifestPropertyV1],
+    string_lifecycle_type: Option<&str>,
 ) {
     source.push_str(&format!(
         "#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]\n#[serde(transparent)]\npub struct {generated}Id(pub String);\n\n"
@@ -83,7 +84,7 @@ pub(super) fn emit_entity_value_types(
         "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\npub struct {generated} {{\n"
     ));
     for property in properties {
-        let rust_type = generated_rust_type(property);
+        let rust_type = generated_rust_type(property, string_lifecycle_type);
         let rust_type = if property.nullable {
             format!("Option<{rust_type}>")
         } else {

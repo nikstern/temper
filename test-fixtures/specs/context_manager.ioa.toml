@@ -5,6 +5,7 @@
 name = "ContextManager"
 states = ["Idle", "Assembling", "Failed"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 [[state]]
 name = "preparations_done"

@@ -67,7 +67,7 @@ use crate::authz::{DenialInput, record_authz_denial, require_authenticated_conte
 use crate::entity_actor::EntityEvent;
 use crate::state::ServerState;
 
-const BUNDLE_CONTRACT: &str = temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1;
+const BUNDLE_CONTRACT: &str = temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2;
 
 /// Shared governed service; adapters supply host-resolved tenant and principal.
 pub(crate) struct GovernedSchemaDeploymentService<'a> {
@@ -217,58 +217,62 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
         if request.canonicalization_version != BUNDLE_CONTRACT {
             return Err(ServiceError::new(
                 "invalid_bundle",
-                "unsupported canonicalization version",
+                "new schema publication requires scoped-spec-bundle/v2",
                 false,
             ));
         }
-        let compiled = ScopedSpecBundle::compile(ScopedSpecBundleInput {
-            scope_id: scope.id.clone(),
-            predecessor_digest: request.expected_predecessor.clone(),
-            csdl_xml: request.csdl,
-            ioa_sources: request
-                .ioa
-                .into_iter()
-                .map(|source| IoaSourceInput {
-                    entity_type: source.entity_type,
-                    source: source.source,
-                })
-                .collect(),
-            cedar_policies: request
-                .cedar_policies
-                .into_iter()
-                .map(|policy| PolicyArtifactInput {
-                    name: policy.name,
-                    source: policy.source,
-                })
-                .collect(),
-            wasm_modules: request
-                .wasm_modules
-                .iter()
-                .map(|module| {
-                    let data_binding_digest = module
-                        .data_binding
-                        .as_ref()
-                        .map(|binding| {
-                            binding
-                                .binding_digest()
-                                .map(|digest| format!("sha256:{digest}"))
-                        })
-                        .transpose()
-                        .map_err(|error| ServiceError::new("invalid_bundle", error, false))?;
-                    Ok(WasmArtifactInput {
-                        name: module.name.clone(),
-                        artifact_digest: module.artifact_digest.clone(),
-                        data_binding_digest,
+        let canonicalization_version = request.canonicalization_version.clone();
+        let compiled = ScopedSpecBundle::compile_with_version(
+            ScopedSpecBundleInput {
+                scope_id: scope.id.clone(),
+                predecessor_digest: request.expected_predecessor.clone(),
+                csdl_xml: request.csdl,
+                ioa_sources: request
+                    .ioa
+                    .into_iter()
+                    .map(|source| IoaSourceInput {
+                        entity_type: source.entity_type,
+                        source: source.source,
                     })
-                })
-                .collect::<Result<Vec<_>, ServiceError>>()?,
-            migration: request.migration.map(|migration| MigrationArtifactInput {
-                name: migration.name,
-                artifact_digest: migration.artifact_digest,
-                abi_version: migration.abi_version,
-            }),
-            budgets: to_spec_budgets(&request.budgets),
-        })
+                    .collect(),
+                cedar_policies: request
+                    .cedar_policies
+                    .into_iter()
+                    .map(|policy| PolicyArtifactInput {
+                        name: policy.name,
+                        source: policy.source,
+                    })
+                    .collect(),
+                wasm_modules: request
+                    .wasm_modules
+                    .iter()
+                    .map(|module| {
+                        let data_binding_digest = module
+                            .data_binding
+                            .as_ref()
+                            .map(|binding| {
+                                binding
+                                    .binding_digest()
+                                    .map(|digest| format!("sha256:{digest}"))
+                            })
+                            .transpose()
+                            .map_err(|error| ServiceError::new("invalid_bundle", error, false))?;
+                        Ok(WasmArtifactInput {
+                            name: module.name.clone(),
+                            artifact_digest: module.artifact_digest.clone(),
+                            data_binding_digest,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ServiceError>>()?,
+                migration: request.migration.map(|migration| MigrationArtifactInput {
+                    name: migration.name,
+                    artifact_digest: migration.artifact_digest,
+                    abi_version: migration.abi_version,
+                }),
+                budgets: to_spec_budgets(&request.budgets),
+            },
+            &canonicalization_version,
+        )
         .map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))?;
         if compiled.digest() != request.expected_digest {
             return Err(ServiceError::new(
@@ -282,6 +286,7 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
             scope: scope.clone(),
             digest: compiled.digest().to_string(),
             predecessor_digest: compiled.predecessor_digest().map(str::to_string),
+            canonicalization_version: compiled.canonicalization_version().to_string(),
             canonical_csdl: compiled.canonical_csdl().to_string(),
             canonical_ioa: compiled
                 .ioa_specs()

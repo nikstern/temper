@@ -29,6 +29,7 @@ fn command(key: &str, request_digest: &str, digest: &str) -> SubmitSchemaBundle 
             scope: scope(),
             digest: digest.into(),
             predecessor_digest: None,
+            canonicalization_version: "scoped-spec-bundle/v1".into(),
             canonical_csdl: "<canonical/>".into(),
             canonical_ioa: BTreeMap::from([("Example.Task".into(), "[automaton]".into())]),
             cedar_policies: BTreeMap::new(),

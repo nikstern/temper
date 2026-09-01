@@ -3,11 +3,12 @@
 use sha2::{Digest, Sha256};
 
 use super::{
-    CanonicalIoaSpec, MigrationArtifactInput, PolicyArtifactInput, SCOPED_SPEC_BUNDLE_CONTRACT_V1,
-    ScopedBundleBudgets, WasmArtifactInput,
+    CanonicalIoaSpec, MigrationArtifactInput, PolicyArtifactInput, ScopedBundleBudgets,
+    WasmArtifactInput,
 };
 
 pub(super) fn module_data_closure_digest(
+    contract: &str,
     canonical_csdl: &str,
     ioa_specs: &[CanonicalIoaSpec],
 ) -> String {
@@ -15,7 +16,11 @@ pub(super) fn module_data_closure_digest(
     digest_frame(
         &mut hasher,
         b"contract",
-        b"temper.scoped-module-data-closure/v1",
+        match contract {
+            super::SCOPED_SPEC_BUNDLE_CONTRACT_V1 => b"temper.scoped-module-data-closure/v1",
+            super::SCOPED_SPEC_BUNDLE_CONTRACT_V2 => b"temper.scoped-module-data-closure/v2",
+            _ => unreachable!("validated bundle contract"),
+        },
     );
     digest_frame(&mut hasher, b"csdl", canonical_csdl.as_bytes());
     for spec in ioa_specs {
@@ -30,6 +35,7 @@ pub(super) fn module_data_closure_digest(
     reason = "the digest boundary enumerates every authoritative v1 section explicitly"
 )]
 pub(super) fn bundle_digest(
+    contract: &str,
     scope_id: &str,
     predecessor: Option<&str>,
     canonical_csdl: &str,
@@ -40,11 +46,7 @@ pub(super) fn bundle_digest(
     budgets: &ScopedBundleBudgets,
 ) -> String {
     let mut hasher = Sha256::new();
-    digest_frame(
-        &mut hasher,
-        b"contract",
-        SCOPED_SPEC_BUNDLE_CONTRACT_V1.as_bytes(),
-    );
+    digest_frame(&mut hasher, b"contract", contract.as_bytes());
     digest_frame(&mut hasher, b"scope_kind", b"task");
     digest_frame(&mut hasher, b"scope_id", scope_id.as_bytes());
     digest_frame(

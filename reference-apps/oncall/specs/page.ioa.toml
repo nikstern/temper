@@ -8,6 +8,7 @@
 name = "Page"
 states = ["Triggered", "Investigating", "Escalated", "Remediated", "Resolved"]
 initial = "Triggered"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

@@ -8,6 +8,7 @@
 name = "Remediation"
 states = ["Proposed", "Approved", "Executing", "Succeeded", "Failed", "Rejected"]
 initial = "Proposed"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

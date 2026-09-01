@@ -1,5 +1,23 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy)]
+enum PersistedBundleContract {
+    V1,
+    V2,
+}
+
+fn persisted_bundle_contract(version: &str) -> Result<PersistedBundleContract, ServiceError> {
+    match version {
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1 => Ok(PersistedBundleContract::V1),
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2 => Ok(PersistedBundleContract::V2),
+        _ => Err(ServiceError::new(
+            "invalid_bundle",
+            format!("unsupported canonicalization version '{version}'"),
+            false,
+        )),
+    }
+}
+
 impl GovernedSchemaDeploymentService<'_> {
     pub(super) fn stage_registry_bundle(
         &self,
@@ -7,17 +25,23 @@ impl GovernedSchemaDeploymentService<'_> {
     ) -> Result<(), ServiceError> {
         let csdl = temper_spec::parse_csdl(&record.bundle.canonical_csdl)
             .map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))?;
+        let contract = persisted_bundle_contract(&record.bundle.canonicalization_version)?;
+        let source_keys_are_qualified = matches!(contract, PersistedBundleContract::V2);
         let owned_sources = record
             .bundle
             .canonical_ioa
             .iter()
             .map(|(qualified, source)| {
                 (
-                    qualified
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or(qualified)
-                        .to_string(),
+                    if source_keys_are_qualified {
+                        qualified.clone()
+                    } else {
+                        qualified
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(qualified)
+                            .to_string()
+                    },
                     source.clone(),
                 )
             })
@@ -87,17 +111,15 @@ impl GovernedSchemaDeploymentService<'_> {
                 false,
             ));
         }
-        self.state
-            .registry
-            .write()
-            .map_err(|_| {
-                ServiceError::new(
-                    "backend_unavailable",
-                    "spec registry lock is unavailable",
-                    true,
-                )
-            })?
-            .stage_scoped_bundle_with_modules(
+        let mut registry = self.state.registry.write().map_err(|_| {
+            ServiceError::new(
+                "backend_unavailable",
+                "spec registry lock is unavailable",
+                true,
+            )
+        })?;
+        let result = match contract {
+            PersistedBundleContract::V2 => registry.stage_scoped_bundle_v2_with_modules(
                 TenantId::new(&record.bundle.tenant),
                 record.bundle.scope.clone(),
                 record.bundle.digest.clone(),
@@ -105,8 +127,18 @@ impl GovernedSchemaDeploymentService<'_> {
                 record.bundle.canonical_csdl.clone(),
                 &borrowed_sources,
                 modules,
-            )
-            .map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))
+            ),
+            PersistedBundleContract::V1 => registry.stage_scoped_bundle_persisted_v1_with_modules(
+                TenantId::new(&record.bundle.tenant),
+                record.bundle.scope.clone(),
+                record.bundle.digest.clone(),
+                csdl,
+                record.bundle.canonical_csdl.clone(),
+                &borrowed_sources,
+                modules,
+            ),
+        };
+        result.map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))
     }
 
     pub(crate) async fn recover_registry_pointer(
@@ -208,5 +240,22 @@ impl GovernedSchemaDeploymentService<'_> {
                 )
             })?;
         self.stage_registry_bundle(&record)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_staging_rejects_unknown_canonicalization_version() {
+        let error = persisted_bundle_contract("scoped-spec-bundle/v999")
+            .expect_err("unknown persisted contracts must not be reinterpreted as v1");
+        assert_eq!(error.code(), "invalid_bundle");
+        assert!(
+            error
+                .message()
+                .contains("unsupported canonicalization version")
+        );
     }
 }

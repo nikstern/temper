@@ -1,6 +1,7 @@
 [automaton]
 name = "Observation"
 initial = "Open"
+lifecycle_property = "Status"
 states = ["Open", "UnderReview", "Resolved", "Superseded"]
 
 [[action]]

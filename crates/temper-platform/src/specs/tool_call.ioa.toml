@@ -9,6 +9,7 @@
 name = "ToolCall"
 states = ["Pending", "Authorized", "Denied", "Executing", "Completed", "Failed"]
 initial = "Pending"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

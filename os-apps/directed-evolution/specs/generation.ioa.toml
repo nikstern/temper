@@ -2,6 +2,7 @@
 name = "Generation"
 states = ["Planned", "Generating", "Evaluating", "Selecting", "Completed", "Failed"]
 initial = "Planned"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Planned", "Generating", "Evaluating", "Selecting"]
 
 [[state]]

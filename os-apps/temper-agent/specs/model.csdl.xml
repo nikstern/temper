@@ -6,7 +6,7 @@
       <EntityType Name="TemperAgent">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Model" Type="Edm.String"/>
         <Property Name="Provider" Type="Edm.String"/>
         <Property Name="ConversationFileId" Type="Edm.String"/>
@@ -21,7 +21,6 @@
         <Property Name="HasResult" Type="Edm.Boolean"/>
         <Property Name="ErrorMessage" Type="Edm.String"/>
         <Property Name="SandboxUrl" Type="Edm.String"/>
-        <Property Name="TemperApiUrl" Type="Edm.String"/>
         <Property Name="SandboxId" Type="Edm.String"/>
         <Property Name="TemperApiUrl" Type="Edm.String"/>
         <Property Name="FileManifestId" Type="Edm.String"/>
@@ -52,7 +51,7 @@
       <EntityType Name="AgentSoul">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String"/>
         <Property Name="Description" Type="Edm.String"/>
         <Property Name="ContentFileId" Type="Edm.String"/>
@@ -63,7 +62,7 @@
       <EntityType Name="AgentSkill">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String"/>
         <Property Name="Description" Type="Edm.String"/>
         <Property Name="ContentFileId" Type="Edm.String"/>
@@ -74,7 +73,7 @@
       <EntityType Name="AgentMemory">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Key" Type="Edm.String"/>
         <Property Name="Content" Type="Edm.String"/>
         <Property Name="MemoryType" Type="Edm.String"/>
@@ -85,7 +84,7 @@
       <EntityType Name="ToolHook">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String"/>
         <Property Name="HookType" Type="Edm.String"/>
         <Property Name="ToolPattern" Type="Edm.String"/>
@@ -97,7 +96,7 @@
       <EntityType Name="HeartbeatMonitor">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ScanIntervalSeconds" Type="Edm.String"/>
         <Property Name="LastScanAt" Type="Edm.String"/>
         <Property Name="StaleAgentsFound" Type="Edm.Int64"/>
@@ -106,7 +105,7 @@
       <EntityType Name="CronJob">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String"/>
         <Property Name="Schedule" Type="Edm.String"/>
         <Property Name="SoulId" Type="Edm.String"/>
@@ -128,7 +127,7 @@
       <EntityType Name="CronScheduler">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="HeartbeatIntervalSeconds" Type="Edm.String"/>
         <Property Name="LastCheckAt" Type="Edm.String"/>
         <Property Name="JobsTriggered" Type="Edm.Int64"/>

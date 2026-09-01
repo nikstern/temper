@@ -107,6 +107,7 @@ fn semantic_hashes_change_when_a_used_property_changes() {
         entity_type: "Temper.Task".into(),
         entity_set: "Tasks".into(),
         generated_name: "Task".into(),
+        lifecycle_states: Vec::new(),
         properties,
         actions: Vec::new(),
     };
@@ -159,6 +160,35 @@ fn semantic_hashes_change_when_a_used_property_changes() {
 }
 
 #[test]
+fn empty_lifecycle_states_preserve_the_frozen_v1_entity_hash() {
+    let manifest = ModuleSdkManifest::new(
+        "worker",
+        ModuleSdkMetadataDigests {
+            closure: "closure".into(),
+            dependency_lock: "closure".into(),
+            schema: "schema".into(),
+        },
+        "artifact",
+        ModuleDataGrant::default(),
+        vec![ManifestEntityV1 {
+            entity_type: "Temper.Task".into(),
+            entity_set: "Tasks".into(),
+            generated_name: "Task".into(),
+            lifecycle_states: Vec::new(),
+            properties: Vec::new(),
+            actions: Vec::new(),
+        }],
+        BTreeSet::new(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        manifest.used_symbol_hashes().unwrap()["entity:Temper.Task"],
+        "a216c7aa5562d11723b59b041ec5c5961777480b9db158dd6bd5a1ff432e4cb2"
+    );
+}
+
+#[test]
 fn property_metadata_without_source_fails_closed() {
     let property = serde_json::from_value::<ManifestPropertyV1>(serde_json::json!({
         "canonical_name": "Id",
@@ -184,6 +214,7 @@ fn manifest_with_action_parameter(nullable: bool) -> ModuleSdkManifest {
         entity_type: "Temper.Task".into(),
         entity_set: "Tasks".into(),
         generated_name: "Task".into(),
+        lifecycle_states: Vec::new(),
         properties: Vec::new(),
         actions: vec![ManifestActionV1 {
             canonical_name: "Close".into(),

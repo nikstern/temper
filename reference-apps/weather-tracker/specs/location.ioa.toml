@@ -2,6 +2,7 @@
 name = "Location"
 states = ["Active", "Paused", "Removed"]
 initial = "Active"
+lifecycle_property = "state"
 
 [[action]]
 name = "PauseTracking"

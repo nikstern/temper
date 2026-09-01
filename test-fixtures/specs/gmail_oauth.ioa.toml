@@ -2,6 +2,7 @@
 name = "GmailAuth"
 states = ["Disconnected", "AwaitingAuth", "Exchanging", "Authenticated", "Refreshing", "Expired"]
 initial = "Disconnected"
+lifecycle_property = "Status"
 
 [[action]]
 name = "StartOAuth"

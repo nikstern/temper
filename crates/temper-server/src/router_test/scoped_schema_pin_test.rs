@@ -8,6 +8,7 @@ const SCOPED_CONTINUITY_IOA: &str = r#"
 name = "Order"
 states = ["Draft", "Ready"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 [[action]]
 name = "Configure"
@@ -29,6 +30,7 @@ async fn task_scoped_action_validation_uses_the_exact_pinned_csdl() {
 name = "Order"
 states = ["Draft", "Ready"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 [[action]]
 name = "AddItem"
@@ -49,9 +51,6 @@ params = [{ name = "Flag", type = "bool" }]
         <Parameter Name="ProductId" Type="Edm.Guid" Nullable="false"/>
         <Parameter Name="Quantity" Type="Edm.Int32" Nullable="false"/>
         <ReturnType Type="Temper.Example.Order"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Draft</String></Collection>
-        </Annotation>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Add a product to a draft order. Verify the order is in Draft status first. Use the Product entity to look up valid ProductIds."/>
       </Action>"#;
@@ -280,8 +279,7 @@ async fn identical_digest_in_distinct_scopes_has_distinct_actor_and_journal_auth
         &scope_b,
     )
     .await;
-    let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
-        .replace("Temper.Example", "Temper.ScopedExample");
+    let scoped_csdl = scoped_order_csdl();
     {
         let mut registry = state.registry.write().expect("registry lock");
         registry
@@ -409,8 +407,7 @@ async fn volatile_actor_does_not_grant_durable_pin_authority() {
         )
         .await
         .expect("spawn volatile scoped actor");
-    let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
-        .replace("Temper.Example", "Temper.ScopedExample");
+    let scoped_csdl = scoped_order_csdl();
     let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
     {
         let mut registry = state.registry.write().expect("registry lock");
@@ -583,6 +580,7 @@ async fn task_scoped_bound_action_honors_exact_entity_pin_after_pointer_change()
 name = "Order"
 states = ["Draft", "Ready"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 [[action]]
 name = "Configure"
@@ -600,8 +598,7 @@ to = "Ready"
     };
     let pinned_digest = format!("sha256:{}", "a".repeat(64));
     let replacement_digest = format!("sha256:{}", "b".repeat(64));
-    let scoped_csdl = include_str!("../../../../test-fixtures/specs/model.csdl.xml")
-        .replace("Temper.Example", "Temper.ScopedExample");
+    let scoped_csdl = scoped_order_csdl();
     let parsed = parse_csdl(&scoped_csdl).expect("scoped CSDL fixture");
     let app = authenticated_router(state.clone());
     let scoped = |request: axum::http::request::Builder| {

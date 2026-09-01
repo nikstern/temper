@@ -25,6 +25,7 @@ const FILE_IOA: &str = r#"[automaton]
 name = "File"
 states = ["Created", "Ready"]
 initial = "Created"
+lifecycle_property = "Status"
 
 [[action]]
 name = "StreamUpdated"
@@ -80,7 +81,7 @@ async fn install_scope(state: &crate::state::ServerState, scope_id: &str) -> Sch
                 },
                 expected_predecessor: None,
                 expected_digest: digest.clone(),
-                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1
+                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2
                     .into(),
                 csdl: CSDL.into(),
                 ioa: vec![SchemaIoaSourceV1 {
@@ -206,7 +207,7 @@ async fn install_file_scope(state: &crate::state::ServerState) -> SchemaExecutio
                 },
                 expected_predecessor: None,
                 expected_digest: digest,
-                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1
+                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2
                     .into(),
                 csdl: FILE_CSDL.into(),
                 ioa: vec![SchemaIoaSourceV1 {
@@ -835,12 +836,15 @@ async fn scoped_native_file_write_commits_only_to_the_pinned_journal() {
         }],
         ..ModuleDataGrant::default()
     };
+    let csdl = temper_spec::parse_csdl(FILE_CSDL).expect("File CSDL parses");
+    let sources = [IoaSourceInput {
+        entity_type: "Temper.ScopedFile.File".into(),
+        source: FILE_IOA.into(),
+    }];
+    let model = temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &sources)
+        .expect("File canonical model links");
     let generated = temper_codegen::generate_module_sdk(
-        &temper_spec::parse_csdl(FILE_CSDL).expect("File CSDL parses"),
-        &[IoaSourceInput {
-            entity_type: "Temper.ScopedFile.File".into(),
-            source: FILE_IOA.into(),
-        }],
+        &model,
         "file-worker",
         "file-closure",
         "file-closure",

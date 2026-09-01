@@ -18,6 +18,7 @@ pub(super) struct EntityClientSpec<'a> {
     pub(super) grant: &'a ModuleDataGrant,
     pub(super) entity_grant: &'a EntityDataGrant,
     pub(super) generated_entity_names: &'a BTreeMap<String, String>,
+    pub(super) string_lifecycle_type: Option<&'a str>,
 }
 
 pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>) {
@@ -29,6 +30,7 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
         grant,
         entity_grant,
         generated_entity_names,
+        string_lifecycle_type,
     } = spec;
     let entity_get = grant.permits(DataOperationKind::EntityGet, canonical, None);
     let entity_query = grant.permits(DataOperationKind::EntityQuery, canonical, None);
@@ -40,7 +42,7 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
             "#[derive(Debug, Clone, serde::Serialize)]\npub struct {generated}Create {{\n"
         ));
         for property in properties {
-            let rust_type = generated_rust_type(property);
+            let rust_type = generated_rust_type(property, string_lifecycle_type);
             let rust_type = if property.nullable {
                 format!("Option<{rust_type}>")
             } else {
@@ -58,7 +60,7 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
             "#[derive(Debug, Clone, Default, serde::Serialize)]\npub struct {generated}Patch {{\n"
         ));
         for property in properties {
-            let rust_type = generated_rust_type(property);
+            let rust_type = generated_rust_type(property, string_lifecycle_type);
             let rust_type = if property.nullable {
                 format!("Option<Option<{rust_type}>>")
             } else {
@@ -93,7 +95,7 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
             "#[derive(Debug, Clone, serde::Serialize)]\npub struct {action_type} {{\n"
         ));
         for parameter in &action.parameters {
-            let rust_type = generated_rust_type(parameter);
+            let rust_type = generated_rust_type(parameter, None);
             let rust_type = if parameter.nullable {
                 format!("Option<{rust_type}>")
             } else {
@@ -107,7 +109,13 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
         source.push_str("}\n\n");
     }
     if entity_query {
-        emit_query_types(source, generated, properties, entity_grant);
+        emit_query_types(
+            source,
+            generated,
+            properties,
+            entity_grant,
+            string_lifecycle_type,
+        );
     }
     source.push_str(&format!(
         "pub struct {generated}Client {{ data: DataClient }}\nimpl {generated}Client {{\n    pub const ENTITY_TYPE: &'static str = \"{canonical}\";\n    pub fn new() -> Self {{ Self {{ data: DataClient::default() }} }}\n"

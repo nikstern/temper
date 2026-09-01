@@ -147,15 +147,44 @@ pub(super) fn validation_entity(
             source: source.clone(),
         })
         .collect::<Vec<_>>();
-    let generated = temper_codegen::generate_module_sdk(
-        &csdl,
-        &ioa,
-        "schema-bootstrap-validator",
-        &operation.pin.bundle_digest,
-        &operation.pin.bundle_digest,
-        &operation.pin.bundle_digest,
-        grant,
-    )
+    let generated = match record.bundle.canonicalization_version.as_str() {
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2 => {
+            let model =
+                temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &ioa).map_err(|error| {
+                    validation_error(
+                        temper_wasm_sdk::data::ModuleDataErrorKind::SchemaMismatch,
+                        "BootstrapClosureMismatch",
+                        error.to_string(),
+                    )
+                })?;
+            temper_codegen::generate_module_sdk(
+                &model,
+                "schema-bootstrap-validator",
+                &operation.pin.bundle_digest,
+                &operation.pin.bundle_digest,
+                &operation.pin.bundle_digest,
+                grant,
+            )
+        }
+        temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V1 => {
+            temper_codegen::generate_module_sdk_v1(
+                &csdl,
+                &ioa,
+                "schema-bootstrap-validator",
+                &operation.pin.bundle_digest,
+                &operation.pin.bundle_digest,
+                &operation.pin.bundle_digest,
+                grant,
+            )
+        }
+        version => {
+            return Err(validation_error(
+                temper_wasm_sdk::data::ModuleDataErrorKind::SchemaMismatch,
+                "UnsupportedCanonicalizationVersion",
+                format!("unsupported canonicalization version '{version}'"),
+            ));
+        }
+    }
     .map_err(|error| {
         validation_error(
             temper_wasm_sdk::data::ModuleDataErrorKind::SchemaMismatch,

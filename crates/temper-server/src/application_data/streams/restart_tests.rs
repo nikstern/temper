@@ -91,18 +91,20 @@ fn invocation(state: ServerState, binding: ModuleSdkManifest) -> Arc<Application
 #[tokio::test]
 async fn typed_current_and_version_reads_survive_restart_and_reject_cross_file() {
     let csdl = activated_csdl();
-    let generated = temper_codegen::generate_module_sdk(
-        &parse_csdl(&csdl).unwrap(),
-        &[
-            IoaSourceInput {
-                entity_type: "Temper.FS.File".into(),
-                source: FILE_IOA.into(),
-            },
-            IoaSourceInput {
-                entity_type: "Temper.FS.FileVersion".into(),
-                source: FILE_VERSION_IOA.into(),
-            },
-        ],
+    let parsed_csdl = parse_csdl(&csdl).unwrap();
+    let sources = [
+        IoaSourceInput {
+            entity_type: "Temper.FS.File".into(),
+            source: FILE_IOA.into(),
+        },
+        IoaSourceInput {
+            entity_type: "Temper.FS.FileVersion".into(),
+            source: FILE_VERSION_IOA.into(),
+        },
+    ];
+    let generated = temper_codegen::generate_module_sdk_v1(
+        &parsed_csdl,
+        &sources,
         "stream-restart-test",
         "closure",
         "closure",

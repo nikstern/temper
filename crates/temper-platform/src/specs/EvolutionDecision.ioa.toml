@@ -1,6 +1,7 @@
 [automaton]
 name = "EvolutionDecision"
 initial = "Open"
+lifecycle_property = "Status"
 states = ["Open", "Approved", "Rejected", "Deferred"]
 
 [[action]]

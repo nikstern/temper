@@ -8,6 +8,7 @@
 name = "Doc"
 states = ["New", "Ready"]
 initial = "New"
+lifecycle_property = "Status"
 
 [[state]]
 name = "WorkspaceId"

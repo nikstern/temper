@@ -52,35 +52,13 @@
 
       <!-- ============ Enums ============ -->
 
-      <EnumType Name="PageStatus">
-        <Member Name="Triggered" Value="0"/>
-        <Member Name="Investigating" Value="1"/>
-        <Member Name="Escalated" Value="2"/>
-        <Member Name="Remediated" Value="3"/>
-        <Member Name="Resolved" Value="4"/>
-      </EnumType>
+      <EnumType Name="PageStatus"/>
 
-      <EnumType Name="EscalationPolicyStatus">
-        <Member Name="Idle" Value="0"/>
-        <Member Name="Active" Value="1"/>
-        <Member Name="Exhausted" Value="2"/>
-      </EnumType>
+      <EnumType Name="EscalationPolicyStatus"/>
 
-      <EnumType Name="RemediationStatus">
-        <Member Name="Proposed" Value="0"/>
-        <Member Name="Approved" Value="1"/>
-        <Member Name="Executing" Value="2"/>
-        <Member Name="Succeeded" Value="3"/>
-        <Member Name="Failed" Value="4"/>
-        <Member Name="Rejected" Value="5"/>
-      </EnumType>
+      <EnumType Name="RemediationStatus"/>
 
-      <EnumType Name="PostmortemStatus">
-        <Member Name="Draft" Value="0"/>
-        <Member Name="InReview" Value="1"/>
-        <Member Name="Approved" Value="2"/>
-        <Member Name="Published" Value="3"/>
-      </EnumType>
+      <EnumType Name="PostmortemStatus"/>
 
       <!-- ============ Entity Types ============ -->
 
@@ -99,17 +77,6 @@
         <Property Name="ResolvedAt" Type="Edm.DateTimeOffset"/>
         <NavigationProperty Name="Remediations" Type="Collection(Temper.OnCall.Remediation)"/>
         <NavigationProperty Name="Postmortem" Type="Temper.OnCall.Postmortem"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Triggered</String>
-            <String>Investigating</String>
-            <String>Escalated</String>
-            <String>Remediated</String>
-            <String>Resolved</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Triggered"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
       </EntityType>
 
@@ -124,15 +91,6 @@
         <Property Name="CurrentStep" Type="Edm.Int32" DefaultValue="0"/>
         <Property Name="MaxSteps" Type="Edm.Int32" Nullable="false"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Idle</String>
-            <String>Active</String>
-            <String>Exhausted</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Idle"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
       </EntityType>
 
@@ -152,18 +110,6 @@
         <NavigationProperty Name="Page" Type="Temper.OnCall.Page" Nullable="false">
           <ReferentialConstraint Property="PageId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Proposed</String>
-            <String>Approved</String>
-            <String>Executing</String>
-            <String>Succeeded</String>
-            <String>Failed</String>
-            <String>Rejected</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Proposed"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
       </EntityType>
 
@@ -183,16 +129,6 @@
         <NavigationProperty Name="Page" Type="Temper.OnCall.Page" Nullable="false">
           <ReferentialConstraint Property="PageId" ReferencedProperty="Id"/>
         </NavigationProperty>
-
-        <Annotation Term="Temper.Vocab.StateMachine.States">
-          <Collection>
-            <String>Draft</String>
-            <String>InReview</String>
-            <String>Approved</String>
-            <String>Published</String>
-          </Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
         <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
       </EntityType>
 
@@ -203,9 +139,6 @@
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Triggered</String></Collection>
-        </Annotation>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Assign an on-call agent to handle this page. Must be done before investigation."/>
       </Action>
@@ -213,10 +146,6 @@
       <Action Name="StartInvestigation" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Triggered</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Investigating"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Begin investigating the alert. Requires an agent to be assigned first."/>
       </Action>
@@ -224,10 +153,6 @@
       <Action Name="Escalate" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Investigating</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Escalated"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Escalate the page to a higher tier agent. Increments escalation counter."/>
       </Action>
@@ -236,10 +161,6 @@
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <Parameter Name="AgentId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Escalated</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Investigating"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Reassign to a more capable agent after escalation."/>
       </Action>
@@ -247,28 +168,16 @@
       <Action Name="StartRemediation" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Investigating</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Remediated"/>
       </Action>
 
       <Action Name="Resolve" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Remediated</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Resolved"/>
       </Action>
 
       <Action Name="AutoResolve" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Triggered</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Resolved"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Source alert cleared — page auto-resolves without investigation."/>
       </Action>
@@ -276,28 +185,17 @@
       <Action Name="Timeout" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Page" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Page"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Investigating</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Escalated"/>
       </Action>
 
       <!-- EscalationPolicy Actions -->
       <Action Name="Activate" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Idle</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Active"/>
       </Action>
 
       <Action Name="StepUp" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Move to the next escalation tier. Requires escalation to not be snoozed."/>
       </Action>
@@ -305,35 +203,21 @@
       <Action Name="Snooze" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
       </Action>
 
       <Action Name="Unsnooze" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
       </Action>
 
       <Action Name="Exhaust" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Active</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Exhausted"/>
       </Action>
 
       <Action Name="Reset" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.EscalationPolicy" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.EscalationPolicy"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Exhausted</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Idle"/>
       </Action>
 
       <!-- Remediation Actions -->
@@ -341,29 +225,17 @@
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <Parameter Name="ApproverId" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Proposed</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
       </Action>
 
       <Action Name="Reject" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <Parameter Name="Reason" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Proposed</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Rejected"/>
       </Action>
 
       <Action Name="AutoApprove" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Proposed</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Auto-approve safe remediation actions like pod restarts or scaling."/>
       </Action>
@@ -371,38 +243,22 @@
       <Action Name="Execute" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Approved</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Executing"/>
       </Action>
 
       <Action Name="Succeed" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Executing</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Succeeded"/>
       </Action>
 
       <Action Name="Fail" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <Parameter Name="ErrorMessage" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Executing</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Failed"/>
       </Action>
 
       <Action Name="Retry" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Remediation" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Remediation"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Failed</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
       </Action>
 
       <!-- Postmortem Actions -->
@@ -410,9 +266,6 @@
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <Parameter Name="RootCauseDescription" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Draft</String></Collection>
-        </Annotation>
         <Annotation Term="Temper.Vocab.Agent.Hint"
                     String="Add root cause analysis. Required before the postmortem can be submitted for review."/>
       </Action>
@@ -420,38 +273,22 @@
       <Action Name="SubmitForReview" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Draft</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InReview"/>
       </Action>
 
       <Action Name="RequestRevision" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <Parameter Name="Feedback" Type="Edm.String" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>InReview</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Draft"/>
       </Action>
 
       <Action Name="ApprovePostmortem" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>InReview</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
       </Action>
 
       <Action Name="Publish" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.OnCall.Postmortem" Nullable="false"/>
         <ReturnType Type="Temper.OnCall.Postmortem"/>
-        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
-          <Collection><String>Approved</String></Collection>
-        </Annotation>
-        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Published"/>
       </Action>
 
       <!-- ============ Entity Container ============ -->

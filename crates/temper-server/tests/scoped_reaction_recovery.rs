@@ -101,6 +101,7 @@ async fn submit_verified_durable_pin(
                 scope: pin.scope.clone(),
                 digest: pin.bundle_digest.clone(),
                 predecessor_digest: predecessor_digest.clone(),
+                canonicalization_version: "scoped-spec-bundle/v1".into(),
                 canonical_csdl: CSDL_XML.into(),
                 canonical_ioa: std::collections::BTreeMap::from([
                     ("Order".into(), order_ioa.into()),

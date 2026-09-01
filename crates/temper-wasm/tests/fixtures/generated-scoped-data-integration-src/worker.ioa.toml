@@ -2,6 +2,7 @@
 name = "Worker"
 states = ["Idle", "Pending", "Done", "Failed"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 [[action]]
 name = "Run"

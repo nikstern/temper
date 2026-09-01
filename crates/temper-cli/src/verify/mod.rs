@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use temper_spec::automaton::{
     LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle, lint_automaton,
 };
+use temper_spec::build_legacy_spec_model;
 use temper_spec::csdl::parse_csdl;
-use temper_spec::model::build_spec_model;
 
 mod reference_contract;
 
@@ -162,7 +162,7 @@ pub fn run(specs_dir: &str) -> Result<()> {
     }
 
     // Build spec model (which includes cross-validation)
-    let spec = build_spec_model(csdl, tla_sources);
+    let spec = build_legacy_spec_model(csdl, tla_sources);
 
     // Report results
     println!("\nVerification Report");

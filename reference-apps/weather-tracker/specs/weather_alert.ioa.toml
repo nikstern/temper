@@ -2,6 +2,7 @@
 name = "WeatherAlert"
 states = ["Pending", "Acknowledged", "Resolved", "Expired"]
 initial = "Pending"
+lifecycle_property = "state"
 
 [[action]]
 name = "AcknowledgeAlert"

@@ -94,12 +94,14 @@ async fn sparse_server_responses_decode_through_the_generated_client() {
     )
     .await;
 
-    let generated = temper_codegen::generate_module_sdk(
-        &temper_spec::csdl::parse_csdl(CSDL).expect("fixture CSDL parses"),
-        &[temper_spec::bundle::IoaSourceInput {
-            entity_type: "Temper.Example.Customer".into(),
-            source: IOA.into(),
-        }],
+    let csdl = temper_spec::csdl::parse_csdl(CSDL).expect("fixture CSDL parses");
+    let sources = [temper_spec::bundle::IoaSourceInput {
+        entity_type: "Temper.Example.Customer".into(),
+        source: IOA.into(),
+    }];
+    let generated = temper_codegen::generate_module_sdk_v1(
+        &csdl,
+        &sources,
         "worker",
         "closure",
         "closure",

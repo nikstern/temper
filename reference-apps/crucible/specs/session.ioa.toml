@@ -54,6 +54,7 @@
 name = "Session"
 states = ["Rescheduling", "Running", "Idle", "Terminated", "Archived"]
 initial = "Rescheduling"
+lifecycle_property = "Status"
 
 # --- Actions ---
 # No effects — the sidecar polls and drives the agent loop externally.

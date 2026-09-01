@@ -103,14 +103,16 @@ fn repair_app_runtime_metadata_from_bundle(
     {
         let mut registry = state.registry.write().expect("Spec registry lock poisoned");
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_v2_with_reactions_and_constraints(
                 tenant_id,
                 csdl,
                 csdl_xml.to_string(),
                 &specs,
-                Vec::new(),
-                bundle.cross_invariants_toml.clone(),
-                true,
+                temper_server::registry::TenantRegistrationOptions {
+                    reactions: Vec::new(),
+                    cross_invariants_source: bundle.cross_invariants_toml.clone(),
+                    merge: true,
+                },
             )
             .map_err(|error| {
                 format!("Failed to restore runtime metadata for os-app '{app_name}': {error}")

@@ -14,12 +14,13 @@ use super::tests::call;
 use super::{ApplicationDataInvocation, ModuleInvocationAuthority};
 use crate::state::ServerState;
 
-const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Provenance" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="SolverSession"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Unconfigured"/><Property Name="RegionState" Type="Edm.String" Nullable="false" DefaultValue="CA"/></EntityType><Action Name="Activate" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Provenance.SolverSession"/><ReturnType Type="Temper.Provenance.SolverSession" Nullable="false"/></Action><EntityContainer Name="Container"><EntitySet Name="SolverSessions" EntityType="Temper.Provenance.SolverSession"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
+const CSDL: &str = r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper.Provenance" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="SolverSession"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.Guid" Nullable="false"/><Property Name="State" Type="Edm.String" Nullable="false" DefaultValue="Unconfigured"/><Property Name="RegionState" Type="Edm.String" Nullable="false" DefaultValue="CA"/></EntityType><Action Name="Activate" IsBound="true"><Parameter Name="bindingParameter" Type="Temper.Provenance.SolverSession" Nullable="false"/><ReturnType Type="Temper.Provenance.SolverSession" Nullable="false"/></Action><EntityContainer Name="Container"><EntitySet Name="SolverSessions" EntityType="Temper.Provenance.SolverSession"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#;
 
 const IOA: &str = r#"[automaton]
 name = "SolverSession"
 states = ["Unconfigured", "Active"]
 initial = "Unconfigured"
+lifecycle_property = "State"
 
 [[action]]
 name = "Activate"
@@ -45,17 +46,14 @@ async fn state_lifecycle_projects_transition_through_generated_action_and_keyed_
         ..ModuleDataGrant::default()
     };
     let csdl = temper_spec::csdl::parse_csdl(CSDL).expect("fixture CSDL parses");
+    let sources = [IoaSourceInput {
+        entity_type: "Temper.Provenance.SolverSession".into(),
+        source: IOA.into(),
+    }];
+    let model = temper_spec::CanonicalSpecModel::link_v2_sources(&csdl, &sources)
+        .expect("fixture canonical model links");
     let generated = temper_codegen::generate_module_sdk(
-        &csdl,
-        &[IoaSourceInput {
-            entity_type: "Temper.Provenance.SolverSession".into(),
-            source: IOA.into(),
-        }],
-        "solver",
-        "closure",
-        "closure",
-        "artifact",
-        grant,
+        &model, "solver", "closure", "closure", "artifact", grant,
     )
     .expect("fixture SDK generates");
     let state = ServerState::with_specs(
@@ -150,10 +148,10 @@ fn state_lifecycle_decodes_from_action_and_keyed_read() {{
     let mut client = SolverSessionClient::new();
     let activated = client.activate("{id}", None, SolverSessionActivateInput {{}}).unwrap();
     let value = activated.result.unwrap();
-    assert_eq!(value.state, "Active");
+    assert_eq!(value.state, SolverSessionLifecycleState::Active);
     assert_eq!(value.region_state, "CA");
     let read = client.get("{id}").unwrap();
-    assert_eq!(read.value.state, "Active");
+    assert_eq!(read.value.state, SolverSessionLifecycleState::Active);
     assert_eq!(read.value.region_state, "CA");
 }}
 "#

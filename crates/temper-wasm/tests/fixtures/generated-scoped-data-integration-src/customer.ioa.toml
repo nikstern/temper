@@ -2,3 +2,4 @@
 name = "Customer"
 states = ["Active"]
 initial = "Active"
+lifecycle_property = "Status"

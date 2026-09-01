@@ -666,11 +666,19 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
         );
     }
 
-    for (entity_name, ioa_source) in ioa_sources {
+    for (entity_name, _ioa_source) in ioa_sources {
         let registry = registry.clone();
         let server = server.clone();
         let tenant = tenant_str.clone();
         let entity = entity_name.clone();
+        let automaton = registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_spec(&TenantId::from(tenant.as_str()), &entity_name)
+            .map(|spec| spec.automaton.clone())
+            .expect("strict registry loading must retain the canonical automaton");
+        let canonical_ioa_source = toml::to_string(&automaton)
+            .expect("canonical automaton must serialize for subprocess verification");
 
         tokio::spawn(async move {
             // Persist running status first, then update in-memory registry.
@@ -720,21 +728,23 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
             let entity_clone = entity.clone();
 
             // Run the cascade: in subprocess (isolated) or in-process (default).
-            let result: Result<temper_verify::CascadeResult, String> = if let Some(bin) =
-                server.verify_subprocess_bin.as_deref()
-            {
-                temper_server::observe::subprocess_verify::verify_in_subprocess(bin, &ioa_source)
+            let result: Result<temper_verify::CascadeResult, String> =
+                if let Some(bin) = server.verify_subprocess_bin.as_deref() {
+                    temper_server::observe::subprocess_verify::verify_in_subprocess(
+                        bin,
+                        &canonical_ioa_source,
+                    )
                     .await
-            } else {
-                tokio::task::spawn_blocking(move || {
-                    VerificationCascade::from_ioa(&ioa_source)
-                        .with_sim_seeds(5)
-                        .with_prop_test_cases(100)
-                        .run()
-                })
-                .await
-                .map_err(|e| e.to_string())
-            };
+                } else {
+                    tokio::task::spawn_blocking(move || {
+                        VerificationCascade::from_automaton(&automaton)
+                            .with_sim_seeds(5)
+                            .with_prop_test_cases(100)
+                            .run()
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                };
 
             match result {
                 Ok(cascade_result) => {

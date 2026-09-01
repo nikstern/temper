@@ -8,6 +8,7 @@
 name = "Approval"
 states = ["Drafted", "PendingApproval", "Approved", "Rejected", "Withdrawn"]
 initial = "Drafted"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

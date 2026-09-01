@@ -7,6 +7,7 @@
 name = "DeployWorkflow"
 states = ["Pending", "Provisioning", "Deploying", "Verifying", "Live", "RolledBack"]
 initial = "Pending"
+lifecycle_property = "Status"
 
 # --- Actions: Deploy Lifecycle ---
 

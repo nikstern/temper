@@ -6,12 +6,17 @@ use crate::automaton::{
     Automaton, BundleLintFinding, LintSeverity, lint_automata_bundle, lint_automata_csdl_bundle,
     lint_automaton, lint_csdl_reference_contracts, parse_automaton,
 };
+use crate::canonical::CanonicalSpecModel;
 use crate::csdl::parse_csdl;
 
-mod csdl;
+mod closure;
+pub(crate) mod csdl;
 mod digest;
 mod types;
 
+pub use closure::{
+    scoped_module_data_closure_digest, scoped_module_data_closure_digest_with_version,
+};
 use csdl::canonical_csdl;
 use digest::{bundle_digest, module_data_closure_digest};
 pub use types::{
@@ -22,6 +27,8 @@ pub use types::{
 
 /// Canonicalization and digest contract implemented by this compiler.
 pub const SCOPED_SPEC_BUNDLE_CONTRACT_V1: &str = "scoped-spec-bundle/v1";
+/// Default IOA-authoritative canonicalization and digest contract.
+pub const SCOPED_SPEC_BUNDLE_CONTRACT_V2: &str = "scoped-spec-bundle/v2";
 
 const MAX_SCOPE_ID_BYTES: usize = 256;
 const MAX_ENTITY_TYPE_BYTES: usize = 512;
@@ -32,8 +39,30 @@ const MAX_NAMED_ARTIFACTS: usize = 1_024;
 const MAX_ARTIFACT_NAME_BYTES: usize = 256;
 const MAX_POLICY_SOURCE_BYTES: usize = 1_048_576;
 impl ScopedSpecBundle {
-    /// Parse, validate, canonicalize, and digest one immutable scoped bundle.
+    /// Parse, validate, canonicalize, and digest one immutable scoped bundle using v2.
     pub fn compile(input: ScopedSpecBundleInput) -> Result<Self, BundleError> {
+        Self::compile_with_version(input, SCOPED_SPEC_BUNDLE_CONTRACT_V2)
+    }
+
+    /// Compile with the frozen legacy v1 canonicalizer.
+    pub fn compile_v1(input: ScopedSpecBundleInput) -> Result<Self, BundleError> {
+        Self::compile_with_version(input, SCOPED_SPEC_BUNDLE_CONTRACT_V1)
+    }
+
+    /// Compile under an explicitly requested durable canonicalization contract.
+    pub fn compile_with_version(
+        input: ScopedSpecBundleInput,
+        canonicalization_version: &str,
+    ) -> Result<Self, BundleError> {
+        if !matches!(
+            canonicalization_version,
+            SCOPED_SPEC_BUNDLE_CONTRACT_V1 | SCOPED_SPEC_BUNDLE_CONTRACT_V2
+        ) {
+            return Err(BundleError::new(
+                BundleErrorCode::InvalidBundle,
+                format!("unsupported canonicalization version '{canonicalization_version}'"),
+            ));
+        }
         validate_scope(&input.scope_id)?;
         validate_predecessor(input.predecessor_digest.as_deref())?;
         if input.csdl_xml.len() > MAX_CSDL_BYTES {
@@ -58,14 +87,22 @@ impl ScopedSpecBundle {
             ));
         }
 
-        let canonical_csdl = canonical_csdl(&input.csdl_xml)?;
         let ioa_specs = canonical_ioa_specs(input.ioa_sources)?;
-        validate_bundle_contracts(&canonical_csdl, &ioa_specs)?;
+        let (canonical_csdl, canonical_model) =
+            if canonicalization_version == SCOPED_SPEC_BUNDLE_CONTRACT_V1 {
+                (canonical_csdl(&input.csdl_xml)?, None)
+            } else {
+                let automata = parsed_qualified_automata(&ioa_specs)?;
+                let model = CanonicalSpecModel::link_v2(&input.csdl_xml, &automata)?;
+                (model.emitted_csdl_xml().to_string(), Some(model))
+            };
+        validate_bundle_contracts(&canonical_csdl, &ioa_specs, canonicalization_version)?;
         let cedar_policies = canonical_policies(input.cedar_policies)?;
         let wasm_modules = canonical_wasm_modules(input.wasm_modules)?;
         let migration = validate_migration(input.migration)?;
         validate_budgets(&input.budgets)?;
         let digest = bundle_digest(
+            canonicalization_version,
             &input.scope_id,
             input.predecessor_digest.as_deref(),
             &canonical_csdl,
@@ -77,6 +114,7 @@ impl ScopedSpecBundle {
         );
 
         Ok(Self {
+            canonicalization_version: canonicalization_version.to_string(),
             scope_id: input.scope_id,
             predecessor_digest: input.predecessor_digest,
             canonical_csdl,
@@ -86,33 +124,36 @@ impl ScopedSpecBundle {
             migration,
             budgets: input.budgets,
             digest,
+            canonical_model,
         })
     }
 }
 
-/// Compute the immutable generated-client closure for scoped CSDL and IOA inputs.
-///
-/// Module artifacts and the enclosing scoped bundle are deliberately excluded
-/// so guest compilation cannot create a digest cycle.
-pub fn scoped_module_data_closure_digest(
-    csdl_xml: &str,
-    ioa_sources: Vec<IoaSourceInput>,
-) -> Result<String, BundleError> {
-    if csdl_xml.len() > MAX_CSDL_BYTES {
-        return Err(BundleError::new(
-            BundleErrorCode::BudgetExceeded,
-            format!("CSDL exceeds v1 byte budget {MAX_CSDL_BYTES}"),
-        ));
-    }
-    let canonical_csdl = canonical_csdl(csdl_xml)?;
-    let ioa_specs = canonical_ioa_specs(ioa_sources)?;
-    validate_bundle_contracts(&canonical_csdl, &ioa_specs)?;
-    Ok(module_data_closure_digest(&canonical_csdl, &ioa_specs))
+fn parsed_qualified_automata(
+    ioa_specs: &[CanonicalIoaSpec],
+) -> Result<BTreeMap<String, Automaton>, BundleError> {
+    ioa_specs
+        .iter()
+        .map(|spec| {
+            parse_automaton(&spec.canonical_source)
+                .map(|automaton| (spec.entity_type.clone(), automaton))
+                .map_err(|error| {
+                    BundleError::new(
+                        BundleErrorCode::InvalidIoa,
+                        format!(
+                            "failed to reparse canonical IOA '{}': {error}",
+                            spec.entity_type
+                        ),
+                    )
+                })
+        })
+        .collect()
 }
 
 fn validate_bundle_contracts(
     canonical_csdl: &str,
     ioa_specs: &[CanonicalIoaSpec],
+    canonicalization_version: &str,
 ) -> Result<(), BundleError> {
     let csdl = parse_csdl(canonical_csdl).map_err(|error| {
         BundleError::new(
@@ -150,13 +191,19 @@ fn validate_bundle_contracts(
                 ),
             )
         })?;
-        let short_name = automaton.automaton.name.clone();
-        if automata.insert(short_name.clone(), automaton).is_some() {
-            return Err(BundleError::new(
-                BundleErrorCode::InvalidBundle,
-                format!("IOA short name '{short_name}' is ambiguous across CSDL namespaces"),
-            ));
-        }
+        let key = if canonicalization_version == SCOPED_SPEC_BUNDLE_CONTRACT_V1 {
+            let short_name = automaton.automaton.name.clone();
+            if automata.contains_key(&short_name) {
+                return Err(BundleError::new(
+                    BundleErrorCode::InvalidBundle,
+                    format!("IOA short name '{short_name}' is ambiguous across CSDL namespaces"),
+                ));
+            }
+            short_name
+        } else {
+            spec.entity_type.clone()
+        };
+        automata.insert(key, automaton);
     }
 
     let stream_capabilities = crate::csdl::verify_stream_capabilities_v1(&csdl)

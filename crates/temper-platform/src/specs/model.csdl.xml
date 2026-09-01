@@ -7,7 +7,7 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String" />
         <Property Name="Description" Type="Edm.String" />
         <Property Name="SpecCount" Type="Edm.Int32" />
@@ -28,7 +28,7 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String" />
         <Property Name="ProjectId" Type="Edm.String" />
       </EntityType>
@@ -53,7 +53,7 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Name" Type="Edm.String" />
         <Property Name="Description" Type="Edm.String" />
         <Property Name="Tags" Type="Edm.String" />
@@ -74,7 +74,7 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ProjectId" Type="Edm.String" />
         <Property Name="UserId" Type="Edm.String" />
         <Property Name="Role" Type="Edm.String" />
@@ -94,7 +94,7 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ProjectId" Type="Edm.String" />
         <Property Name="VersionNumber" Type="Edm.Int32" />
       </EntityType>
@@ -110,138 +110,81 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Source" Type="Edm.String" />
         <Property Name="Classification" Type="Edm.String" />
         <Property Name="EvidenceQuery" Type="Edm.String" />
         <Property Name="Context" Type="Edm.String" />
         <Property Name="Tenant" Type="Edm.String" />
       </EntityType>
-      <Action Name="ReviewObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Observation"  Nullable="false"/>
-      </Action>
-      <Action Name="ResolveObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Observation"  Nullable="false"/>
-      </Action>
-      <Action Name="SupersedeObservation" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Observation"  Nullable="false"/>
-      </Action>
 
       <EntityType Name="Problem">
         <Key>
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ObservationId" Type="Edm.String" />
         <Property Name="ProblemStatement" Type="Edm.String" />
         <Property Name="Severity" Type="Edm.String" />
         <Property Name="Invariants" Type="Edm.String" />
       </EntityType>
-      <Action Name="MarkProblemReviewed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Problem"  Nullable="false"/>
-      </Action>
-      <Action Name="ResolveProblem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Problem"  Nullable="false"/>
-      </Action>
-      <Action Name="SupersedeProblem" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Problem"  Nullable="false"/>
-      </Action>
 
       <EntityType Name="Analysis">
         <Key>
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ProblemId" Type="Edm.String" />
         <Property Name="RootCause" Type="Edm.String" />
         <Property Name="Options" Type="Edm.String" />
         <Property Name="Recommendation" Type="Edm.String" />
       </EntityType>
-      <Action Name="MarkAnalysisReviewed" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Analysis"  Nullable="false"/>
-      </Action>
-      <Action Name="AcceptAnalysis" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Analysis"  Nullable="false"/>
-      </Action>
-      <Action Name="RejectAnalysis" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Analysis"  Nullable="false"/>
-      </Action>
 
       <EntityType Name="EvolutionDecision">
         <Key>
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="AnalysisId" Type="Edm.String" />
         <Property Name="DecidedBy" Type="Edm.String" />
         <Property Name="Rationale" Type="Edm.String" />
         <Property Name="VerificationSummary" Type="Edm.String" />
       </EntityType>
-      <Action Name="ApproveEvolutionDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision"  Nullable="false"/>
-      </Action>
-      <Action Name="RejectEvolutionDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision"  Nullable="false"/>
-      </Action>
-      <Action Name="DeferEvolutionDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.EvolutionDecision"  Nullable="false"/>
-      </Action>
 
       <EntityType Name="Insight">
         <Key>
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="ObservationId" Type="Edm.String" />
         <Property Name="Category" Type="Edm.String" />
         <Property Name="Signal" Type="Edm.String" />
         <Property Name="Recommendation" Type="Edm.String" />
         <Property Name="PriorityScore" Type="Edm.String" />
       </EntityType>
-      <Action Name="AcknowledgeInsight" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Insight"  Nullable="false"/>
-      </Action>
-      <Action Name="MarkInsightActioned" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Insight"  Nullable="false"/>
-      </Action>
-      <Action Name="DismissInsight" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.Insight"  Nullable="false"/>
-      </Action>
 
       <EntityType Name="FeatureRequest">
         <Key>
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Category" Type="Edm.String" />
         <Property Name="Description" Type="Edm.String" />
         <Property Name="Frequency" Type="Edm.String" />
         <Property Name="DeveloperNotes" Type="Edm.String" />
       </EntityType>
-      <Action Name="AcknowledgeFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
-      </Action>
-      <Action Name="PlanFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
-      </Action>
-      <Action Name="WontFixFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
-      </Action>
-      <Action Name="ResolveFeatureRequest" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.FeatureRequest"  Nullable="false"/>
-      </Action>
 
       <EntityType Name="GovernanceDecision">
         <Key>
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Tenant" Type="Edm.String" />
         <Property Name="AgentId" Type="Edm.String" />
         <Property Name="ActionName" Type="Edm.String" />
@@ -259,15 +202,6 @@
         <Property Name="CallbackOnApprove" Type="Edm.String" Nullable="true"/>
         <Property Name="CallbackOnDeny" Type="Edm.String" Nullable="true"/>
       </EntityType>
-      <Action Name="ApproveGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"  Nullable="false"/>
-      </Action>
-      <Action Name="DenyGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"  Nullable="false"/>
-      </Action>
-      <Action Name="ExpireGovernanceDecision" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision"  Nullable="false"/>
-      </Action>
       <Action Name="RegisterCallback" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.System.GovernanceDecision" Nullable="false"/>
         <Parameter Name="CallbackTenant" Type="Edm.String" Nullable="false"/>
@@ -282,7 +216,7 @@
           <PropertyRef Name="Id" />
         </Key>
         <Property Name="Id" Type="Edm.String" Nullable="false" />
-        <Property Name="Status" Type="Edm.String" />
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="PathPrefix" Type="Edm.String" />
         <Property Name="Methods" Type="Edm.String" />
         <Property Name="IntegrationModule" Type="Edm.String" />
@@ -296,15 +230,6 @@
         <Property Name="ActionBridgeAction" Type="Edm.String" />
         <Property Name="ActionBridgeResponse" Type="Edm.String" />
       </EntityType>
-      <Action Name="PauseHttpEndpoint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
-      </Action>
-      <Action Name="ResumeHttpEndpoint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
-      </Action>
-      <Action Name="DeleteHttpEndpoint" IsBound="true">
-        <Parameter Name="bindingParameter" Type="Temper.System.HttpEndpoint"  Nullable="false"/>
-      </Action>
 
 
 

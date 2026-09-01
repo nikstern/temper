@@ -1,3 +1,4 @@
+enum TaskLifecycleState
 struct TaskId
 struct Task
 struct TaskStartWorkInput

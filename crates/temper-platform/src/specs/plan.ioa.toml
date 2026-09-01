@@ -9,6 +9,7 @@
 name = "Plan"
 states = ["Draft", "Active", "Paused", "Completed", "Failed"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

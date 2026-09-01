@@ -5,6 +5,7 @@
 name = "ToolRouter"
 states = ["Idle", "Executing", "WaitingApproval"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 [[state]]
 name = "batches_executed"

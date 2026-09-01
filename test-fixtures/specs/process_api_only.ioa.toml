@@ -5,6 +5,7 @@
 name = "Process"
 states = ["Created", "Running", "Suspended", "Terminated", "Failed"]
 initial = "Created"
+lifecycle_property = "Status"
 
 [[action]]
 name = "Initialize"

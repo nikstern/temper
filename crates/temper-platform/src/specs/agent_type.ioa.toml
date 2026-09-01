@@ -8,6 +8,7 @@
 name = "AgentType"
 states = ["Draft", "Active", "Deprecated"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

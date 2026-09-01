@@ -7,6 +7,7 @@
 name = "CronScheduler"
 states = ["Idle", "Checking"]
 initial = "Idle"
+lifecycle_property = "Status"
 
 [[state]]
 name = "heartbeat_interval_seconds"

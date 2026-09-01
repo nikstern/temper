@@ -112,8 +112,9 @@ pub struct CanonicalIoaSpec {
 }
 
 /// Immutable deterministic foundation for a task-scoped schema deployment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ScopedSpecBundle {
+    pub(super) canonicalization_version: String,
     pub(super) scope_id: String,
     pub(super) predecessor_digest: Option<String>,
     pub(super) canonical_csdl: String,
@@ -123,9 +124,31 @@ pub struct ScopedSpecBundle {
     pub(super) migration: Option<MigrationArtifactInput>,
     pub(super) budgets: ScopedBundleBudgets,
     pub(super) digest: String,
+    pub(super) canonical_model: Option<crate::canonical::CanonicalSpecModel>,
 }
 
+impl PartialEq for ScopedSpecBundle {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonicalization_version == other.canonicalization_version
+            && self.scope_id == other.scope_id
+            && self.predecessor_digest == other.predecessor_digest
+            && self.canonical_csdl == other.canonical_csdl
+            && self.ioa_specs == other.ioa_specs
+            && self.cedar_policies == other.cedar_policies
+            && self.wasm_modules == other.wasm_modules
+            && self.migration == other.migration
+            && self.budgets == other.budgets
+            && self.digest == other.digest
+    }
+}
+
+impl Eq for ScopedSpecBundle {}
+
 impl ScopedSpecBundle {
+    /// Canonicalization and digest contract used for this bundle.
+    pub fn canonicalization_version(&self) -> &str {
+        &self.canonicalization_version
+    }
     /// Opaque tenant-local task scope identifier.
     pub fn scope_id(&self) -> &str {
         &self.scope_id
@@ -161,6 +184,10 @@ impl ScopedSpecBundle {
     /// Lowercase, domain-separated SHA-256 identity.
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+    /// Fully linked v2 model, absent only for explicitly compiled legacy v1 bundles.
+    pub fn canonical_model(&self) -> Option<&crate::canonical::CanonicalSpecModel> {
+        self.canonical_model.as_ref()
     }
 }
 
@@ -212,7 +239,7 @@ impl BundleError {
         self.code
     }
 
-    pub(super) fn new(code: BundleErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: BundleErrorCode, message: impl Into<String>) -> Self {
         let mut message = message.into();
         if message.len() > MAX_ERROR_MESSAGE_BYTES {
             let mut end = MAX_ERROR_MESSAGE_BYTES;

@@ -8,6 +8,7 @@
 name = "LeadPlan"
 states = ["Created", "Planning", "Testing", "Reviewing", "Deploying", "Completed", "Failed"]
 initial = "Created"
+lifecycle_property = "Status"
 
 # --- Actions: Pipeline Lifecycle ---
 

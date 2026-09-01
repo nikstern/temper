@@ -7,6 +7,7 @@
 name = "ReviewWorkflow"
 states = ["Pending", "InReview", "Approved", "ChangesRequested", "Rejected"]
 initial = "Pending"
+lifecycle_property = "Status"
 
 # --- Actions: Review Lifecycle ---
 

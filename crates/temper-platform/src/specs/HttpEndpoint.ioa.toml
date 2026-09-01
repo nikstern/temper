@@ -18,6 +18,7 @@
 [automaton]
 name = "HttpEndpoint"
 initial = "Active"
+lifecycle_property = "Status"
 states = ["Active", "Paused", "Deleted"]
 
 # --- Actions ---

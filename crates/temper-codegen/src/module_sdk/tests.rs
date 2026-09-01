@@ -101,6 +101,7 @@ const ARC_TASK_IOA: &str = r#"
 name = "ArcTask"
 states = ["Open"]
 initial = "Open"
+lifecycle_property = "Status"
 
 [[state]]
 name = "lifecycle"
@@ -113,6 +114,7 @@ const ARC_CANDIDATE_IOA: &str = r#"
 name = "ArcInferenceCandidate"
 states = ["Open"]
 initial = "Open"
+lifecycle_property = "Status"
 
 [[state]]
 name = "lifecycle"
@@ -125,6 +127,7 @@ const TASK_IOA: &str = r#"
 name = "Task"
 states = ["Open", "Done"]
 initial = "Open"
+lifecycle_property = "Status"
 "#;
 
 const FILE_IOA: &str = r#"
@@ -132,6 +135,7 @@ const FILE_IOA: &str = r#"
 name = "File"
 states = ["Open", "Done"]
 initial = "Open"
+lifecycle_property = "Status"
 "#;
 
 fn ioa_sources() -> Vec<IoaSourceInput> {
@@ -155,9 +159,21 @@ pub(super) fn generate_module_sdk(
     artifact_digest: &str,
     grant: ModuleDataGrant,
 ) -> Result<GeneratedModuleSdk, ModuleSdkCodegenError> {
+    let mut automata = std::collections::BTreeMap::new();
+    for source in ioa_sources() {
+        automata.insert(
+            source.entity_type,
+            temper_spec::parse_automaton(&source.source).expect("test IOA parses"),
+        );
+    }
+    let lifecycle_properties = automata
+        .keys()
+        .map(|entity_type| (entity_type.clone(), "Status".to_string()))
+        .collect();
+    let model =
+        temper_spec::CanonicalSpecModel::from_legacy_v1(csdl, automata, lifecycle_properties);
     super::generate_module_sdk(
-        csdl,
-        &ioa_sources(),
+        &model,
         module_name,
         closure_digest,
         dependency_lock_digest,
@@ -217,7 +233,7 @@ fn arc_task_grant() -> ModuleDataGrant {
 }
 
 fn canonical_arc_csdl(source: &str) -> CsdlDocument {
-    let bundle = ScopedSpecBundle::compile(ScopedSpecBundleInput {
+    let bundle = ScopedSpecBundle::compile_v1(ScopedSpecBundleInput {
         scope_id: "arc-overload-regression".into(),
         predecessor_digest: None,
         csdl_xml: source.into(),
@@ -399,7 +415,8 @@ fn generation_is_deterministic_and_scoped() {
     assert!(!first.source.contains("pub fn query("));
     assert!(!first.source.contains("pub fn create("));
     assert!(!first.source.contains("pub fn patch("));
-    assert!(first.source.contains("pub status: String"));
+    assert!(first.source.contains("pub enum TaskLifecycleState"));
+    assert!(first.source.contains("pub status: TaskLifecycleState"));
     assert!(first.source.contains("pub fn start_work"));
     assert!(first.source.contains("pub fn maybe_start"));
     assert_eq!(first.source.matches("Result<TypedAction<Task>").count(), 2);
@@ -419,6 +436,74 @@ fn generation_is_deterministic_and_scoped() {
     assert!(first.source.contains("TEMPER_MODULE_SCHEMA_DIGEST"));
     assert!(first.source.contains("TEMPER_MODULE_USED_SYMBOLS_DIGEST"));
     first.manifest.verify_binding().unwrap();
+}
+
+#[test]
+fn lifecycle_wire_values_are_escaped_and_invalid_variants_fail_closed() {
+    let csdl = parse_csdl(
+        r#"<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Example" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Task"><Key><PropertyRef Name="Id"/></Key><Property Name="Id" Type="Edm.String" Nullable="false"/><Property Name="Status" Type="Edm.String" Nullable="false"/></EntityType><EntityContainer Name="Container"><EntitySet Name="Tasks" EntityType="Example.Task"/></EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"#,
+    )
+    .unwrap();
+    let grant = ModuleDataGrant {
+        operations: [DataOperationKind::EntityGet].into_iter().collect(),
+        entities: vec![EntityDataGrant {
+            entity_type: "Example.Task".into(),
+            ..EntityDataGrant::default()
+        }],
+        ..ModuleDataGrant::default()
+    };
+    let linked = CanonicalSpecModel::link_v2_sources(
+        &csdl,
+        &[IoaSourceInput {
+            entity_type: "Example.Task".into(),
+            source: r#"[automaton]
+name = "Task"
+states = ['open"quote', 'closed\path']
+initial = 'open"quote'
+lifecycle_property = "Status"
+"#
+            .into(),
+        }],
+    )
+    .unwrap();
+    let generated = super::generate_module_sdk(
+        &linked,
+        "worker",
+        "closure",
+        "lock",
+        "artifact",
+        grant.clone(),
+    )
+    .unwrap();
+    assert!(
+        generated
+            .source
+            .contains(r##"#[serde(rename = "open\"quote")]"##)
+    );
+    assert!(
+        generated
+            .source
+            .contains(r##"#[serde(rename = "closed\\path")]"##)
+    );
+
+    let invalid = CanonicalSpecModel::link_v2_sources(
+        &csdl,
+        &[IoaSourceInput {
+            entity_type: "Example.Task".into(),
+            source: r#"[automaton]
+name = "Task"
+states = ["1-open"]
+initial = "1-open"
+lifecycle_property = "Status"
+"#
+            .into(),
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        super::generate_module_sdk(&invalid, "worker", "closure", "lock", "artifact", grant,),
+        Err(ModuleSdkCodegenError::IdentifierCollision(_))
+    ));
 }
 
 #[test]

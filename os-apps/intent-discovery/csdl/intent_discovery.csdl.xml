@@ -5,7 +5,7 @@
       <EntityType Name="IntentDiscovery">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
         <Property Name="Reason" Type="Edm.String"/>
         <Property Name="Source" Type="Edm.String"/>
         <Property Name="TriggerContextJson" Type="Edm.String"/>

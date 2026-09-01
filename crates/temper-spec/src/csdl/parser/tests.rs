@@ -144,11 +144,8 @@ fn assert_example_order(schema: &Schema) {
     assert_eq!(order.key_properties, vec!["Id"]);
     assert!(order.properties.len() > 10);
 
-    let states = order.state_machine_states().expect("should have states");
-    assert_eq!(states.len(), 10);
-    assert!(states.contains(&"Draft".to_string()));
-    assert!(states.contains(&"Shipped".to_string()));
-    assert_eq!(order.initial_state(), Some("Draft".to_string()));
+    assert!(order.state_machine_states().is_none());
+    assert!(order.initial_state().is_none());
     assert_eq!(order.tla_spec_path(), Some("order.tla".to_string()));
 
     let customer_nav = order
@@ -170,12 +167,11 @@ fn assert_example_order(schema: &Schema) {
 fn assert_example_operations(schema: &Schema) {
     let submit = schema.action("SubmitOrder").unwrap();
     assert!(submit.is_bound);
-    assert_eq!(submit.valid_from_states(), Some(vec!["Draft".to_string()]));
-    assert_eq!(submit.target_state(), Some("Submitted".to_string()));
+    assert!(submit.valid_from_states().is_none());
+    assert!(submit.target_state().is_none());
 
     let cancel = schema.action("CancelOrder").unwrap();
-    let cancel_from = cancel.valid_from_states().unwrap();
-    assert_eq!(cancel_from.len(), 3);
+    assert!(cancel.valid_from_states().is_none());
 
     assert!(schema.function("GetOrderTotal").unwrap().is_bound);
     assert!(!schema.function("SearchProducts").unwrap().is_bound);

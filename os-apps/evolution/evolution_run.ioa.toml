@@ -15,6 +15,7 @@
 name = "EvolutionRun"
 states = ["Created", "Selecting", "Evaluating", "Reflecting", "Proposing", "Verifying", "Scoring", "Updating", "AwaitingApproval", "Deploying", "Completed", "Failed"]
 initial = "Created"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

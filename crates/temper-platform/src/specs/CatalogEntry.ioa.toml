@@ -1,6 +1,7 @@
 [automaton]
 name = "CatalogEntry"
 initial = "Draft"
+lifecycle_property = "Status"
 states = ["Draft", "Published", "Deprecated"]
 
 [[action]]

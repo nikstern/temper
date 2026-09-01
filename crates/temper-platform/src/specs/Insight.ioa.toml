@@ -1,6 +1,7 @@
 [automaton]
 name = "Insight"
 initial = "Open"
+lifecycle_property = "Status"
 states = ["Open", "Acknowledged", "Actioned", "Dismissed"]
 
 [[action]]

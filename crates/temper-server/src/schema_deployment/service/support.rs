@@ -5,6 +5,11 @@ use super::*;
 mod data_binding;
 #[cfg(feature = "observe")]
 use data_binding::verify_scoped_module_data_bindings;
+#[cfg(feature = "observe")]
+#[path = "support/verification.rs"]
+mod verification;
+#[cfg(feature = "observe")]
+use verification::canonical_automata;
 
 #[cfg(feature = "observe")]
 pub(super) async fn verify_bundle(
@@ -58,15 +63,8 @@ pub(super) async fn verify_bundle(
             return Ok(false);
         }
     }
-    let sources = record
-        .bundle
-        .canonical_ioa
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    for source in &sources {
-        let automaton = temper_spec::automaton::parse_automaton(source)
-            .map_err(|error| ServiceError::new("verification_failed", error.to_string(), false))?;
+    let automata = canonical_automata(record)?;
+    for automaton in &automata {
         let integrations_bound = automaton.integrations.iter().all(|integration| {
             integration.integration_type != "wasm"
                 || integration
@@ -88,7 +86,7 @@ pub(super) async fn verify_bundle(
             return Ok(false);
         }
     }
-    let source_count = u64::try_from(sources.len()).unwrap_or(u64::MAX).max(1);
+    let source_count = u64::try_from(automata.len()).unwrap_or(u64::MAX).max(1);
     let steps_per_source = budgets.verification_steps / source_count;
     // The immutable maximum is divided across Z3 resource units, model
     // states, simulation ticks, and property-test transition steps. No level
@@ -105,8 +103,8 @@ pub(super) async fn verify_bundle(
     let prop_steps = usize::try_from(steps_per_source - smt_steps - sim_ticks - model_steps)
         .map_err(|error| ServiceError::new("verification_failed", error.to_string(), false))?
         .max(1);
-    Ok(sources.into_iter().all(|source| {
-        temper_verify::VerificationCascade::from_ioa(&source)
+    Ok(automata.into_iter().all(|automaton| {
+        temper_verify::VerificationCascade::from_automaton(&automaton)
             .with_smt_resource_budget(u32::try_from(smt_steps).unwrap_or(u32::MAX))
             .with_model_state_budget(model_states)
             .with_sim_seeds(1)

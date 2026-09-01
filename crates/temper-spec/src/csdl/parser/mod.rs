@@ -33,6 +33,38 @@ pub enum CsdlParseError {
 
 /// Parse a CSDL XML document from a string.
 pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
+    parse_csdl_with_compatibility(xml, false)
+}
+
+/// Parse CSDL with the frozen v1 bundle parser semantics.
+pub(crate) fn parse_csdl_frozen_v1(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
+    let mut document = parse_csdl_with_compatibility(xml, true)?;
+    for schema in &mut document.schemas {
+        for entity in &mut schema.entity_types {
+            freeze_empty_collections(&mut entity.annotations);
+        }
+        for action in &mut schema.actions {
+            freeze_empty_collections(&mut action.annotations);
+        }
+        for function in &mut schema.functions {
+            freeze_empty_collections(&mut function.annotations);
+        }
+    }
+    Ok(document)
+}
+
+fn freeze_empty_collections(annotations: &mut [Annotation]) {
+    for annotation in annotations {
+        if matches!(&annotation.value, AnnotationValue::Collection(items) if items.is_empty()) {
+            annotation.value = AnnotationValue::String(String::new());
+        }
+    }
+}
+
+fn parse_csdl_with_compatibility(
+    xml: &str,
+    frozen_v1: bool,
+) -> Result<CsdlDocument, CsdlParseError> {
     let mut reader = Reader::from_str(xml);
     let mut doc = CsdlDocument {
         version: String::new(),
@@ -44,7 +76,7 @@ pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => match local_name(e).as_str() {
                 "Edmx" => doc.version = attr_str(e, "Version")?.unwrap_or_default(),
-                "Schema" => doc.schemas.push(parse_schema(&mut reader, e)?),
+                "Schema" => doc.schemas.push(parse_schema(&mut reader, e, frozen_v1)?),
                 _ => {}
             },
             Ok(Event::Empty(ref e)) => {

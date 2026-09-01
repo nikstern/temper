@@ -8,6 +8,7 @@
 name = "Order"
 states = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "ReturnRequested", "Returned", "Refunded"]
 initial = "Draft"
+lifecycle_property = "Status"
 
 # --- State Variables ---
 

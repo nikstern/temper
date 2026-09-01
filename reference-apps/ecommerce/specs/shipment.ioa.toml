@@ -8,6 +8,7 @@
 name = "Shipment"
 states = ["Created", "PickedUp", "InTransit", "OutForDelivery", "Delivered", "Failed", "Returned"]
 initial = "Created"
+lifecycle_property = "Status"
 
 # --- Actions: Shipment Lifecycle ---
 

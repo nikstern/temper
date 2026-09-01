@@ -2,6 +2,7 @@
 name = "StageResult"
 states = ["Pending", "Running", "Passed", "Failed", "Eliminated"]
 initial = "Pending"
+lifecycle_property = "Status"
 allow_indefinite_states = ["Pending", "Running", "Failed"]
 
 [[state]]
