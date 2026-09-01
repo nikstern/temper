@@ -187,16 +187,18 @@ pub(super) fn compact_committed_results(response: &mut DataResponseV1) {
                 value_omitted,
                 ..
             } => {
-                *value = None;
-                *value_omitted = true;
+                if value.take().is_some() {
+                    *value_omitted = true;
+                }
             }
             DataResultV1::Action {
                 result,
                 result_omitted,
                 ..
             } => {
-                *result = None;
-                *result_omitted = true;
+                if result.take().is_some() {
+                    *result_omitted = true;
+                }
             }
             DataResultV1::FileCommitted { metadata, .. } => *metadata = None,
             DataResultV1::Batch { outcomes } => {
@@ -336,5 +338,54 @@ mod tests {
             panic!("compacted action must remain a successful commit")
         };
         assert_eq!(compacted_commit, commit);
+    }
+
+    #[test]
+    fn compacting_void_actions_preserves_their_non_omitted_shape_directly_and_in_batches() {
+        let direct_commit = commit("Temper.Example.Customer", "customer-1", 7);
+        let batch_commit = commit("Temper.Example.Customer", "customer-2", 8);
+        let void = |commit| DataResultV1::Action {
+            commit,
+            result: None,
+            result_omitted: false,
+        };
+        let mut direct = DataResponseV1::ok(void(direct_commit.clone()));
+        let mut batch = DataResponseV1::ok(DataResultV1::Batch {
+            outcomes: vec![temper_wasm_sdk::data::DataOutcomeV1::Ok {
+                result: void(batch_commit.clone()),
+            }],
+        });
+
+        compact_committed_results(&mut direct);
+        compact_committed_results(&mut batch);
+
+        let temper_wasm_sdk::data::DataOutcomeV1::Ok {
+            result:
+                DataResultV1::Action {
+                    commit,
+                    result: None,
+                    result_omitted: false,
+                },
+        } = direct.outcome
+        else {
+            panic!("direct void action must remain distinguishable from an omitted result")
+        };
+        assert_eq!(commit, direct_commit);
+        let temper_wasm_sdk::data::DataOutcomeV1::Ok {
+            result: DataResultV1::Batch { outcomes },
+        } = batch.outcome
+        else {
+            panic!("batch response must retain its outcome list")
+        };
+        assert!(matches!(
+            outcomes.as_slice(),
+            [temper_wasm_sdk::data::DataOutcomeV1::Ok {
+                result: DataResultV1::Action {
+                    commit,
+                    result: None,
+                    result_omitted: false,
+                },
+            }] if commit == &batch_commit
+        ));
     }
 }

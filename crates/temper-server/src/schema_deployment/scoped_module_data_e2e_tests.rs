@@ -213,35 +213,57 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         kind: "task".into(),
         id: scope_id.into(),
     };
+    let submit_request = SubmitSchemaBundleRequestV1 {
+        request_id: "generated-client-submit".into(),
+        idempotency_key: "generated-client-submit".into(),
+        scope: scope.clone(),
+        expected_predecessor: None,
+        expected_digest: digest.clone(),
+        canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2.into(),
+        csdl: CSDL.into(),
+        ioa: sources
+            .iter()
+            .map(|source| SchemaIoaSourceV1 {
+                entity_type: source.entity_type.clone(),
+                source: source.source.clone(),
+            })
+            .collect(),
+        cedar_policies: Vec::new(),
+        wasm_modules: vec![SchemaWasmArtifactV1 {
+            name: MODULE_NAME.into(),
+            artifact_digest,
+            data_binding: Some(packaged.manifest.clone()),
+        }],
+        migration: None,
+        budgets: transport_budgets(&budgets),
+    };
+    let mut unversioned_request = submit_request.clone();
+    unversioned_request.request_id = "generated-client-unversioned-submit".into();
+    unversioned_request.idempotency_key = "generated-client-unversioned-submit".into();
+    unversioned_request.wasm_modules[0]
+        .data_binding
+        .as_mut()
+        .expect("fixture binding exists")
+        .contract_version = None;
+    let error = service
+        .submit(
+            TenantId::default().as_str(),
+            &SecurityContext::system(),
+            unversioned_request,
+        )
+        .await
+        .expect_err("direct publication must reject a newly supplied unversioned binding");
+    assert!(
+        error.message().contains("invalid current data binding"),
+        "publication error must identify the rejected current binding: {}",
+        error.message()
+    );
+
     let submitted = service
         .submit(
             TenantId::default().as_str(),
             &SecurityContext::system(),
-            SubmitSchemaBundleRequestV1 {
-                request_id: "generated-client-submit".into(),
-                idempotency_key: "generated-client-submit".into(),
-                scope: scope.clone(),
-                expected_predecessor: None,
-                expected_digest: digest.clone(),
-                canonicalization_version: temper_spec::bundle::SCOPED_SPEC_BUNDLE_CONTRACT_V2
-                    .into(),
-                csdl: CSDL.into(),
-                ioa: sources
-                    .iter()
-                    .map(|source| SchemaIoaSourceV1 {
-                        entity_type: source.entity_type.clone(),
-                        source: source.source.clone(),
-                    })
-                    .collect(),
-                cedar_policies: Vec::new(),
-                wasm_modules: vec![SchemaWasmArtifactV1 {
-                    name: MODULE_NAME.into(),
-                    artifact_digest,
-                    data_binding: Some(packaged.manifest.clone()),
-                }],
-                migration: None,
-                budgets: transport_budgets(&budgets),
-            },
+            submit_request,
         )
         .await
         .expect("bundle submission should persist the exact generated-client binding");

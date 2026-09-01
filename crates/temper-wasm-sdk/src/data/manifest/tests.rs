@@ -119,6 +119,10 @@ fn semantic_hashes_change_when_a_used_property_changes() {
         source: ManifestValueSourceV1::StoredField,
         default_value: None,
         enum_members: Vec::new(),
+        write_policy: Some(ManifestPropertyWritePolicyV1 {
+            create: ManifestCreateRoleV1::Required,
+            patch: ManifestPatchRoleV1::Writable,
+        }),
     };
     let manifest = |properties| {
         ModuleSdkManifest::new(
@@ -156,6 +160,17 @@ fn semantic_hashes_change_when_a_used_property_changes() {
     assert_ne!(
         old.used_symbol_hashes().unwrap(),
         lifecycle.used_symbol_hashes().unwrap()
+    );
+
+    let mut host_owned_property = property("Id", false);
+    host_owned_property.write_policy = Some(ManifestPropertyWritePolicyV1 {
+        create: ManifestCreateRoleV1::Forbidden,
+        patch: ManifestPatchRoleV1::Forbidden,
+    });
+    let host_owned = manifest(vec![host_owned_property]);
+    assert_ne!(
+        old.used_symbol_hashes().unwrap(),
+        host_owned.used_symbol_hashes().unwrap()
     );
 }
 
@@ -209,6 +224,7 @@ fn manifest_with_action_parameter(nullable: bool) -> ModuleSdkManifest {
         source: ManifestValueSourceV1::Input,
         default_value: None,
         enum_members: Vec::new(),
+        write_policy: None,
     };
     let entity = ManifestEntityV1 {
         entity_type: "Temper.Task".into(),
@@ -222,6 +238,7 @@ fn manifest_with_action_parameter(nullable: bool) -> ModuleSdkManifest {
             parameters: vec![parameter],
             result_type: None,
             result_enum_members: Vec::new(),
+            result_cardinality: Some(ManifestActionResultCardinalityV1::Void),
             composite: false,
         }],
     };
@@ -263,4 +280,47 @@ fn nullable_to_required_action_parameter_names_the_breaking_narrowing() {
     assert!(error.contains("action='Close'"));
     assert!(error.contains("parameter='ReasonCode'"));
     assert!(error.contains("old_nullable=true new_nullable=false"));
+}
+
+#[test]
+fn action_result_cardinality_changes_semantic_hash() {
+    let required = manifest_with_action_parameter(false);
+    let mut nullable = required.clone();
+    nullable.entities[0].actions[0].result_type = Some("Edm.String".into());
+    nullable.entities[0].actions[0].result_cardinality =
+        Some(ManifestActionResultCardinalityV1::Nullable);
+    let mut required_result = nullable.clone();
+    required_result.entities[0].actions[0].result_cardinality =
+        Some(ManifestActionResultCardinalityV1::Required);
+
+    assert_ne!(
+        nullable.used_symbol_hashes().unwrap(),
+        required_result.used_symbol_hashes().unwrap()
+    );
+}
+
+#[test]
+fn authenticated_historical_manifest_preserves_legacy_json_and_digest() {
+    let mut historical = manifest_with_action_parameter(false);
+    historical.contract_version = None;
+    for entity in &mut historical.entities {
+        for property in &mut entity.properties {
+            property.write_policy = None;
+        }
+        for action in &mut entity.actions {
+            action.result_cardinality = None;
+        }
+    }
+    let json = serde_json::to_string(&historical).unwrap();
+    assert!(!json.contains("contract_version"));
+    assert!(!json.contains("write_policy"));
+    assert!(!json.contains("result_cardinality"));
+
+    let restored: ModuleSdkManifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        restored.binding_digest().unwrap(),
+        historical.binding_digest().unwrap()
+    );
+    restored.verify_binding().unwrap();
+    assert!(restored.verify_current_binding().is_err());
 }

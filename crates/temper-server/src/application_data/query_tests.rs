@@ -56,6 +56,7 @@ fn fallback_order_matches_declared_direction_and_null_rules() {
             source: temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
             default_value: None,
             enum_members: Vec::new(),
+            write_policy: None,
         }],
         actions: Vec::new(),
     };

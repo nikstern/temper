@@ -1,8 +1,8 @@
 //! Bound-schema validation and shared governed write prechecks.
 
 use temper_wasm_sdk::data::{
-    ManifestEntityV1, ManifestPropertyV1, ManifestValueSourceV1, ModuleDataError,
-    ModuleDataErrorKind,
+    ManifestCreateRoleV1, ManifestEntityV1, ManifestPatchRoleV1, ManifestPropertyV1,
+    ManifestPropertyWritePolicyV1, ManifestValueSourceV1, ModuleDataError, ModuleDataErrorKind,
 };
 
 use crate::action_input_contract::{
@@ -12,6 +12,15 @@ use crate::action_input_contract::{
 use crate::entity_actor::EntityState;
 
 use super::{ApplicationDataInvocation, ModuleDataTarget, data_error, short_type};
+
+/// Entity write operation whose property admission is being validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntityWriteOperation {
+    /// Initial entity creation.
+    Create,
+    /// Partial entity update.
+    Patch,
+}
 
 #[cfg(feature = "test-helpers")]
 /// Canonicalize committed entity state with the production module-data response path.
@@ -62,11 +71,7 @@ impl ApplicationDataInvocation {
         canonical_entity_value(schema, state)
     }
 
-    pub(super) fn action_result_entity_type(
-        &self,
-        entity_type: &str,
-        action: &str,
-    ) -> Option<&str> {
+    pub(super) fn action_result_type(&self, entity_type: &str, action: &str) -> Option<&str> {
         self.authority
             .binding
             .entities
@@ -79,14 +84,13 @@ impl ApplicationDataInvocation {
                     .find(|candidate| candidate.canonical_name == action)
             })
             .and_then(|action| action.result_type.as_deref())
-            .filter(|result_type| *result_type == entity_type)
     }
 
     pub(super) fn validate_entity_object(
         &self,
         entity_type: &str,
         value: &serde_json::Map<String, serde_json::Value>,
-        require_non_nullable: bool,
+        operation: EntityWriteOperation,
     ) -> Result<(), ModuleDataError> {
         let entity = self
             .authority
@@ -101,7 +105,7 @@ impl ApplicationDataInvocation {
                     "entity type is absent from the bound schema",
                 )
             })?;
-        validate_manifest_entity_object(entity, value, require_non_nullable)
+        validate_manifest_entity_object(entity, value, operation)
     }
 
     pub(super) fn validate_action_params(
@@ -265,7 +269,7 @@ impl ApplicationDataInvocation {
 pub(crate) fn validate_manifest_entity_object(
     entity: &ManifestEntityV1,
     value: &serde_json::Map<String, serde_json::Value>,
-    require_non_nullable: bool,
+    operation: EntityWriteOperation,
 ) -> Result<(), ModuleDataError> {
     for (name, field_value) in value {
         let property = entity
@@ -279,6 +283,28 @@ pub(crate) fn validate_manifest_entity_object(
                     "property is absent from the bound schema",
                 )
             })?;
+        let policy = effective_write_policy(property);
+        let forbidden = match operation {
+            EntityWriteOperation::Create => policy.create == ManifestCreateRoleV1::Forbidden,
+            EntityWriteOperation::Patch => policy.patch == ManifestPatchRoleV1::Forbidden,
+        };
+        if forbidden {
+            let (code, message) = match operation {
+                EntityWriteOperation::Create => (
+                    "ForbiddenCreateProperty",
+                    "property is not caller-writable during entity creation",
+                ),
+                EntityWriteOperation::Patch => (
+                    "ForbiddenPatchProperty",
+                    "property is not caller-writable during entity patching",
+                ),
+            };
+            return Err(data_error(
+                ModuleDataErrorKind::SchemaMismatch,
+                code,
+                message,
+            ));
+        }
         if !property_accepts(property, field_value) {
             return Err(data_error(
                 ModuleDataErrorKind::SchemaMismatch,
@@ -287,11 +313,9 @@ pub(crate) fn validate_manifest_entity_object(
             ));
         }
     }
-    if require_non_nullable
+    if operation == EntityWriteOperation::Create
         && entity.properties.iter().any(|property| {
-            !property.nullable
-                && property.source == ManifestValueSourceV1::StoredField
-                && property.default_value.is_none()
+            effective_write_policy(property).create == ManifestCreateRoleV1::Required
                 && !value.contains_key(&property.canonical_name)
         })
     {
@@ -302,6 +326,30 @@ pub(crate) fn validate_manifest_entity_object(
         ));
     }
     Ok(())
+}
+
+fn effective_write_policy(property: &ManifestPropertyV1) -> ManifestPropertyWritePolicyV1 {
+    property.write_policy.unwrap_or_else(|| {
+        let create = match property.source {
+            ManifestValueSourceV1::EntityId => ManifestCreateRoleV1::Required,
+            ManifestValueSourceV1::StoredField
+                if property.nullable || property.default_value.is_some() =>
+            {
+                ManifestCreateRoleV1::Optional
+            }
+            ManifestValueSourceV1::StoredField => ManifestCreateRoleV1::Required,
+            ManifestValueSourceV1::LifecycleStatus | ManifestValueSourceV1::Input => {
+                ManifestCreateRoleV1::Forbidden
+            }
+        };
+        let patch = match property.source {
+            ManifestValueSourceV1::StoredField => ManifestPatchRoleV1::Writable,
+            ManifestValueSourceV1::EntityId
+            | ManifestValueSourceV1::LifecycleStatus
+            | ManifestValueSourceV1::Input => ManifestPatchRoleV1::Forbidden,
+        };
+        ManifestPropertyWritePolicyV1 { create, patch }
+    })
 }
 
 pub(crate) fn validate_manifest_action_params(
@@ -432,148 +480,5 @@ fn stored_property_value<'a>(
 }
 
 #[cfg(test)]
-mod action_param_tests {
-    use super::*;
-    use temper_wasm_sdk::data::ManifestActionV1;
-
-    fn csdl() -> temper_spec::csdl::CsdlDocument {
-        temper_spec::parse_csdl(
-            r#"<?xml version="1.0"?><edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx"><edmx:DataServices><Schema Namespace="Temper" xmlns="http://docs.oasis-open.org/odata/ns/edm"><EntityType Name="Task"></EntityType><EntityType Name="User"></EntityType><EnumType Name="Phase"><Member Name="Open"/><Member Name="Closed"/></EnumType><ComplexType Name="Payload"><Property Name="Value" Type="Edm.String"/></ComplexType></Schema></edmx:DataServices></edmx:Edmx>"#,
-        )
-        .expect("test CSDL")
-    }
-
-    fn entity() -> ManifestEntityV1 {
-        ManifestEntityV1 {
-            entity_type: "Temper.Task".into(),
-            entity_set: "Tasks".into(),
-            generated_name: "Task".into(),
-            lifecycle_states: Vec::new(),
-            properties: Vec::new(),
-            actions: vec![ManifestActionV1 {
-                canonical_name: "Close".into(),
-                generated_name: "close".into(),
-                parameters: vec![
-                    ManifestPropertyV1 {
-                        canonical_name: "ReasonCode".into(),
-                        generated_name: "reason_code".into(),
-                        type_name: "Edm.String".into(),
-                        nullable: false,
-                        source: ManifestValueSourceV1::Input,
-                        default_value: None,
-                        enum_members: Vec::new(),
-                    },
-                    ManifestPropertyV1 {
-                        canonical_name: "Payload".into(),
-                        generated_name: "payload".into(),
-                        type_name: "Temper.Payload".into(),
-                        nullable: true,
-                        source: ManifestValueSourceV1::Input,
-                        default_value: None,
-                        enum_members: Vec::new(),
-                    },
-                    ManifestPropertyV1 {
-                        canonical_name: "Phase".into(),
-                        generated_name: "phase".into(),
-                        type_name: "Temper.Phase".into(),
-                        nullable: true,
-                        source: ManifestValueSourceV1::Input,
-                        default_value: None,
-                        enum_members: vec!["Open".into(), "Closed".into()],
-                    },
-                    ManifestPropertyV1 {
-                        canonical_name: "Owner".into(),
-                        generated_name: "owner".into(),
-                        type_name: "Temper.User".into(),
-                        nullable: true,
-                        source: ManifestValueSourceV1::Input,
-                        default_value: None,
-                        enum_members: Vec::new(),
-                    },
-                ],
-                result_type: None,
-                result_enum_members: Vec::new(),
-                composite: false,
-            }],
-        }
-    }
-
-    #[test]
-    fn module_action_missing_and_null_required_values_share_the_stable_code() {
-        for params in [
-            serde_json::json!({}),
-            serde_json::json!({"ReasonCode": null}),
-        ] {
-            let entity = entity();
-            let error = validate_manifest_action_params(
-                &csdl(),
-                &entity,
-                "Close",
-                params.as_object().unwrap(),
-            )
-            .unwrap_err();
-            assert_eq!(error.kind, ModuleDataErrorKind::SchemaMismatch);
-            assert_eq!(error.code, "MissingActionParameter");
-        }
-    }
-
-    #[test]
-    fn module_action_aliases_are_accepted_and_extras_use_type_mismatch() {
-        let entity = entity();
-        validate_manifest_action_params(
-            &csdl(),
-            &entity,
-            "Close",
-            serde_json::json!({"reason_code": "done"})
-                .as_object()
-                .unwrap(),
-        )
-        .unwrap();
-        let error = validate_manifest_action_params(
-            &csdl(),
-            &entity,
-            "Close",
-            serde_json::json!({"ReasonCode": "done", "Other": true})
-                .as_object()
-                .unwrap(),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "ActionParameterTypeMismatch");
-    }
-
-    #[test]
-    fn module_action_rejects_unknown_enum_and_wrong_reference_shape() {
-        let entity = entity();
-        for params in [
-            serde_json::json!({"ReasonCode": "done", "Phase": "Unknown"}),
-            serde_json::json!({"ReasonCode": "done", "Owner": {"Id": "user-1"}}),
-            serde_json::json!({"ReasonCode": "done", "Payload": "not-an-object"}),
-        ] {
-            let result = validate_manifest_action_params(
-                &csdl(),
-                &entity,
-                "Close",
-                params.as_object().unwrap(),
-            );
-            let error = match result {
-                Ok(()) => panic!("invalid params unexpectedly accepted: {params}"),
-                Err(error) => error,
-            };
-            assert_eq!(error.code, "ActionParameterTypeMismatch");
-        }
-        validate_manifest_action_params(
-            &csdl(),
-            &entity,
-            "Close",
-            serde_json::json!({
-                "ReasonCode": "done",
-                "Phase": "Open",
-                "Owner": "user-1",
-                "Payload": {"Value": "ok"}
-            })
-            .as_object()
-            .unwrap(),
-        )
-        .unwrap();
-    }
-}
+#[path = "schema_action_param_tests.rs"]
+mod action_param_tests;

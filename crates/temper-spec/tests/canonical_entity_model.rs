@@ -315,3 +315,69 @@ fn unrelated_same_suffix_annotations_are_preserved() {
             .contains("Term=\"Temper.Vocab.StateMachine.States\"")
     );
 }
+
+#[test]
+fn paired_write_annotations_link_closed_operation_contracts() {
+    let csdl = STRUCTURAL_CSDL.replace(
+        r#"        <Property Name="State" Type="Example.TaskState" Nullable="false"/>"#,
+        r#"        <Property Name="State" Type="Example.TaskState" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String" Nullable="false"/>
+        <Property Name="Output" Type="Edm.String" Nullable="false" DefaultValue=""/>
+        <Annotation Term="Temper.Vocab.Write.CreateProperties"><Collection><String>Title</String></Collection></Annotation>
+        <Annotation Term="Temper.Vocab.Write.PatchProperties"><Collection><String>Title</String></Collection></Annotation>"#,
+    );
+    let bundle = ScopedSpecBundle::compile(input(&csdl, IOA)).unwrap();
+    let task = &bundle.canonical_model().unwrap().entities()["Example.Task"];
+    assert!(task.write_contract().explicit());
+    assert_eq!(
+        task.write_contract()
+            .create_properties()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["Title"]
+    );
+    assert_eq!(
+        task.write_contract()
+            .patch_properties()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["Title"]
+    );
+    assert!(
+        bundle
+            .canonical_csdl()
+            .contains("Temper.Vocab.Write.CreateProperties")
+    );
+}
+
+#[test]
+fn incomplete_or_host_owned_write_annotations_fail_closed() {
+    let create_only = STRUCTURAL_CSDL.replacen(
+        "      </EntityType>",
+        r#"        <Annotation Term="Temper.Vocab.Write.CreateProperties"><Collection/></Annotation>
+      </EntityType>"#,
+        1,
+    );
+    assert!(
+        ScopedSpecBundle::compile(input(&create_only, IOA))
+            .unwrap_err()
+            .to_string()
+            .contains("must be declared together")
+    );
+
+    let host_owned = STRUCTURAL_CSDL.replacen(
+        "      </EntityType>",
+        r#"        <Annotation Term="Temper.Vocab.Write.CreateProperties"><Collection><String>Id</String></Collection></Annotation>
+        <Annotation Term="Temper.Vocab.Write.PatchProperties"><Collection><String>State</String></Collection></Annotation>
+      </EntityType>"#,
+        1,
+    );
+    assert!(
+        ScopedSpecBundle::compile(input(&host_owned, IOA))
+            .unwrap_err()
+            .to_string()
+            .contains("host-owned property")
+    );
+}

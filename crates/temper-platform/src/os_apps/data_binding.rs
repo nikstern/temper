@@ -205,7 +205,7 @@ pub(super) fn verify_module_data_binding(
     supplied: &ModuleSdkManifest,
     regenerated: &ModuleSdkManifest,
 ) -> Result<ModuleSdkManifest, String> {
-    supplied.verify_binding()?;
+    supplied.verify_current_binding()?;
     if supplied.module_name != module_name {
         return Err("module data binding name mismatch".into());
     }

@@ -50,7 +50,7 @@ pub(super) fn emit_named_property_type(
         return Ok(());
     }
     if property.enum_members.is_empty() {
-        source.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]\n#[serde(transparent)]\npub struct {generated}(pub String);\n\n"));
+        emit_id_types(source, &generated);
     } else {
         source.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]\npub enum {generated} {{\n"));
         let mut variants = BTreeSet::new();
@@ -69,6 +69,12 @@ pub(super) fn emit_named_property_type(
         source.push_str("}\n\n");
     }
     Ok(())
+}
+
+pub(super) fn emit_id_types(source: &mut String, generated: &str) {
+    source.push_str(&format!(
+        "#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]\n#[serde(transparent)]\npub struct {generated}(pub String);\nimpl AsRef<str> for {generated} {{ fn as_ref(&self) -> &str {{ &self.0 }} }}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]\n#[serde(transparent)]\npub struct {generated}Ref<'a>(pub &'a str);\nimpl<'a> {generated}Ref<'a> {{ pub const fn new(value: &'a str) -> Self {{ Self(value) }} }}\nimpl<'a> From<&'a {generated}> for {generated}Ref<'a> {{ fn from(value: &'a {generated}) -> Self {{ Self(&value.0) }} }}\nimpl AsRef<str> for {generated}Ref<'_> {{ fn as_ref(&self) -> &str {{ self.0 }} }}\n\n"
+    ));
 }
 
 pub(super) fn register_generated_type(
@@ -104,6 +110,38 @@ pub(super) fn generated_rust_type(
         format!("{}Id", rust_type_name(&property.type_name))
     } else {
         rust_type_name(&property.type_name)
+    }
+}
+
+pub(super) fn generated_command_type(
+    property: &ManifestPropertyV1,
+    generated_entity: Option<&str>,
+) -> String {
+    if property.source == ManifestValueSourceV1::EntityId {
+        return format!(
+            "{}IdRef<'a>",
+            generated_entity.expect("entity ID command field must name its generated entity")
+        );
+    }
+    if property.type_name == temper_wasm_sdk::data::FAILURE_ENVELOPE_CSDL_TYPE_V1 {
+        "&'a FailureEnvelopeV1".into()
+    } else if matches!(
+        property.type_name.as_str(),
+        "Edm.Boolean"
+            | "Edm.Byte"
+            | "Edm.Int16"
+            | "Edm.Int32"
+            | "Edm.Int64"
+            | "Edm.Single"
+            | "Edm.Double"
+    ) {
+        generated_rust_type(property, None)
+    } else if property.type_name.starts_with("Edm.") {
+        "&'a str".into()
+    } else if property.enum_members.is_empty() {
+        format!("{}IdRef<'a>", rust_type_name(&property.type_name))
+    } else {
+        format!("&'a {}", rust_type_name(&property.type_name))
     }
 }
 
@@ -202,6 +240,7 @@ mod tests {
             source: ManifestValueSourceV1::Input,
             default_value: None,
             enum_members: Vec::new(),
+            write_policy: None,
         }
     }
 
@@ -233,6 +272,7 @@ mod tests {
             source: ManifestValueSourceV1::LifecycleStatus,
             default_value: None,
             enum_members: vec!["Open".into()],
+            write_policy: None,
         };
         let mut emitted = BTreeMap::from([(
             "ExampleStatus".into(),

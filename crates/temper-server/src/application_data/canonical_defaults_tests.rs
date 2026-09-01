@@ -131,11 +131,11 @@ fn server_materialized_keyed_and_action_responses_decode() {{
     assert_eq!(read.value.attempt_count, 0);
     assert!(!read.value.enabled);
     assert!(matches!(read.value.phase, TemperExamplePhase::Ready));
-    let renamed = client.rename(
-        "{id}",
-        None,
-        CustomerRenameInput {{ name: "Ada".into() }},
-    ).expect("generated entity action result decodes");
+    let name = String::from("Ada");
+    let rename = CustomerRenameInput::new(&name);
+    let renamed = client.rename("{id}", None, &rename)
+        .expect("generated entity action result decodes");
+    assert_eq!(name, "Ada", "generated action input only borrows its string");
     let customer = renamed.result.expect("entity-valued action returns a customer");
     assert_eq!(customer.failure_reason, "");
     assert_eq!(customer.label, "unknown");
@@ -212,6 +212,7 @@ async fn canonical_read_fails_closed_when_required_property_has_no_value_or_defa
             source: temper_wasm_sdk::data::ManifestValueSourceV1::StoredField,
             default_value: None,
             enum_members: Vec::new(),
+            write_policy: None,
         });
     let response = call(
         &invocation,

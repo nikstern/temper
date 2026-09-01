@@ -2,6 +2,26 @@
 
 use super::*;
 
+fn regenerated_comparison_view(
+    supplied: &temper_wasm_sdk::data::ModuleSdkManifest,
+    regenerated: &temper_wasm_sdk::data::ModuleSdkManifest,
+) -> temper_wasm_sdk::data::ModuleSdkManifest {
+    let mut comparison = regenerated.clone();
+    comparison.compatibility_proof = None;
+    if supplied.contract_version.is_none() {
+        comparison.contract_version = None;
+        for entity in &mut comparison.entities {
+            for property in &mut entity.properties {
+                property.write_policy = None;
+            }
+            for action in &mut entity.actions {
+                action.result_cardinality = None;
+            }
+        }
+    }
+    comparison
+}
+
 fn binding_matches_regenerated(
     wasm: &[u8],
     module_name: &str,
@@ -21,15 +41,14 @@ fn binding_matches_regenerated(
     }
     let mut supplied_without_proof = supplied.clone();
     supplied_without_proof.compatibility_proof = None;
-    let mut regenerated_without_proof = regenerated.clone();
-    regenerated_without_proof.compatibility_proof = None;
+    let regenerated_without_proof = regenerated_comparison_view(supplied, regenerated);
     if supplied_without_proof == regenerated_without_proof {
         return Ok(());
     }
     let prior_hashes = supplied.used_symbol_hashes()?;
-    let candidate_hashes = regenerated.used_symbol_hashes()?;
+    let candidate_hashes = regenerated_without_proof.used_symbol_hashes()?;
     let compatible_nullability_changes =
-        supplied.compatible_action_nullability_widenings(regenerated)?;
+        supplied.compatible_action_nullability_widenings(&regenerated_without_proof)?;
     let proof = supplied
         .compatibility_proof
         .as_ref()
@@ -148,9 +167,10 @@ pub(super) async fn verify_scoped_module_data_bindings(
 mod tests {
     use super::*;
     use temper_wasm_sdk::data::{
-        ArtifactModuleSdkBinding, DataOperationKind, EntityDataGrant, ManifestActionV1,
-        ManifestEntityV1, ManifestPropertyV1, ManifestValueSourceV1, ModuleDataGrant,
-        ModuleSdkManifest, ModuleSdkMetadataDigests, bind_module_sdk_artifact,
+        ArtifactModuleSdkBinding, DataOperationKind, EntityDataGrant,
+        ManifestActionResultCardinalityV1, ManifestActionV1, ManifestEntityV1, ManifestPropertyV1,
+        ManifestValueSourceV1, ModuleDataGrant, ModuleSdkCompatibilityProof, ModuleSdkManifest,
+        ModuleSdkMetadataDigests, bind_module_sdk_artifact,
     };
 
     fn manifest(nullable: bool) -> ModuleSdkManifest {
@@ -189,15 +209,30 @@ mod tests {
                         source: ManifestValueSourceV1::Input,
                         default_value: None,
                         enum_members: Vec::new(),
+                        write_policy: None,
                     }],
                     result_type: None,
                     result_enum_members: Vec::new(),
+                    result_cardinality: Some(ManifestActionResultCardinalityV1::Void),
                     composite: false,
                 }],
             }],
             ["Close".to_string()].into_iter().collect(),
         )
         .unwrap()
+    }
+
+    fn historical_view(mut manifest: ModuleSdkManifest) -> ModuleSdkManifest {
+        manifest.contract_version = None;
+        for entity in &mut manifest.entities {
+            for property in &mut entity.properties {
+                property.write_policy = None;
+            }
+            for action in &mut entity.actions {
+                action.result_cardinality = None;
+            }
+        }
+        manifest
     }
 
     #[test]
@@ -214,5 +249,40 @@ mod tests {
         assert!(error.contains("action='Close'"));
         assert!(error.contains("parameter='Reason'"));
         assert!(error.contains("old_nullable=true new_nullable=false"));
+    }
+
+    #[test]
+    fn scoped_restart_accepts_authenticated_historical_manifest_shape() {
+        let candidate = manifest(false);
+        let historical = historical_view(candidate.clone());
+        let wasm = bind_module_sdk_artifact(
+            b"\0asm\x01\0\0\0",
+            &ArtifactModuleSdkBinding::from_manifest(&historical).unwrap(),
+        )
+        .unwrap();
+
+        binding_matches_regenerated(&wasm, "worker", &historical, &candidate).unwrap();
+    }
+
+    #[test]
+    fn scoped_restart_recomputes_historical_compatibility_proof_in_legacy_view() {
+        let candidate = manifest(true);
+        let historical_candidate = historical_view(candidate.clone());
+        let mut historical_prior = historical_view(manifest(false));
+        historical_prior.compatibility_proof = Some(ModuleSdkCompatibilityProof {
+            prior_closure_digest: historical_prior.closure_digest.clone(),
+            candidate_closure_digest: candidate.closure_digest.clone(),
+            prior_used_symbol_hashes: historical_prior.used_symbol_hashes().unwrap(),
+            candidate_used_symbol_hashes: historical_candidate.used_symbol_hashes().unwrap(),
+            prior_grant_digest: historical_prior.grant_digest.clone(),
+            candidate_grant_digest: candidate.grant_digest.clone(),
+        });
+        let wasm = bind_module_sdk_artifact(
+            b"\0asm\x01\0\0\0",
+            &ArtifactModuleSdkBinding::from_manifest(&historical_prior).unwrap(),
+        )
+        .unwrap();
+
+        binding_matches_regenerated(&wasm, "worker", &historical_prior, &candidate).unwrap();
     }
 }

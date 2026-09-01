@@ -1,8 +1,11 @@
 enum FileLifecycleState
 struct FileId
+struct FileIdRef
 struct File
 struct FileClient
 const ENTITY_TYPE
 fn new
 fn get
+fn get_at_least
+fn read_committed
 fn open_file_read

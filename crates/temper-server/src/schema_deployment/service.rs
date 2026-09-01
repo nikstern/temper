@@ -221,6 +221,20 @@ impl<'a> GovernedSchemaDeploymentService<'a> {
                 false,
             ));
         }
+        for module in &request.wasm_modules {
+            if let Some(binding) = &module.data_binding {
+                binding.verify_current_binding().map_err(|error| {
+                    ServiceError::new(
+                        "invalid_bundle",
+                        format!(
+                            "module {} has an invalid current data binding: {error}",
+                            module.name
+                        ),
+                        false,
+                    )
+                })?;
+            }
+        }
         let canonicalization_version = request.canonicalization_version.clone();
         let compiled = ScopedSpecBundle::compile_with_version(
             ScopedSpecBundleInput {

@@ -66,10 +66,12 @@ fn manifest_property(
         source,
         default_value,
         enum_members,
+        write_policy: None,
     }
 }
 
 mod file_capability_tests;
+mod write_role_tests;
 
 pub(super) fn authenticated_router(state: ServerState, security: SecurityContext) -> Router {
     crate::build_router(state).layer(Extension(AuthenticatedRequestContext::new(
@@ -193,6 +195,7 @@ pub(super) fn invocation(
                     parameters: Vec::new(),
                     result_type: None,
                     result_enum_members: Vec::new(),
+                    result_cardinality: None,
                     composite: false,
                 },
                 ManifestActionV1 {
@@ -208,6 +211,7 @@ pub(super) fn invocation(
                     )],
                     result_type: Some("Temper.Example.Customer".into()),
                     result_enum_members: Vec::new(),
+                    result_cardinality: None,
                     composite: false,
                 },
             ],
@@ -369,29 +373,6 @@ async fn successful_create_and_read_share_governed_service() {
             result: temper_wasm_sdk::data::DataResultV1::Batch { .. }
         }
     ));
-}
-
-#[tokio::test]
-async fn schema_validation_rejects_noncanonical_guid_before_dispatch() {
-    let invocation = invocation(
-        BTreeSet::from([DataOperationKind::EntityCreate]),
-        SecurityContext::system(),
-    );
-    let response = call(
-        &invocation,
-        DataOperationV1::EntityCreate {
-            entity_type: "Temper.Example.Customer".into(),
-            value: serde_json::json!({"Id":"NOT-A-GUID"})
-                .as_object()
-                .cloned()
-                .unwrap_or_default(),
-        },
-    )
-    .await;
-    assert_eq!(
-        response_error(response).kind,
-        ModuleDataErrorKind::SchemaMismatch
-    );
 }
 
 #[tokio::test]

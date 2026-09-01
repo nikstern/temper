@@ -8,12 +8,11 @@ temper_module! {
     fn generated_scoped_data(ctx: Context) -> Result<Value> {
         let mut client = CustomerClient::new();
         let created_sequence = if ctx.entity_id == "worker-before-restart" {
+            let id = CustomerId(CUSTOMER_ID.into());
+            let name = String::from("generated-scoped-client");
+            let create = CustomerCreate::new(CustomerIdRef::from(&id)).with_name(&name);
             client
-                .create(CustomerCreate {
-                    id: CUSTOMER_ID.into(),
-                    name: Some("generated-scoped-client".into()),
-                    status: "Active".into(),
-                })
+                .create(&create)
                 .map_err(|error| error.to_string())?
                 .commit
                 .sequence

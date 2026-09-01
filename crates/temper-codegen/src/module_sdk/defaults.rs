@@ -23,6 +23,7 @@ pub(super) fn manifest_property(
         source,
         default_value,
         enum_members,
+        write_policy: None,
     })
 }
 

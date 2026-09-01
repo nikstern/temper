@@ -111,7 +111,7 @@ fn one_action_surface_matches_golden() {
         include_str!("../../../tests/goldens/module_sdk_one_action.txt"),
     );
     assert!(generated.source.contains("pub fn start_work("));
-    assert_eq!(generated.source.matches("Input {").count(), 1);
+    assert_eq!(generated.source.matches("Input<'a> {").count(), 2);
     for absent in [
         "TaskCreate",
         "TaskPatch",
