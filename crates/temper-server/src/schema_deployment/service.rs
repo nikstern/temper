@@ -16,6 +16,7 @@ mod supervisor;
 mod support;
 #[cfg(test)]
 mod support_test;
+mod timeout_intents;
 mod validation;
 
 use error::ServiceError;

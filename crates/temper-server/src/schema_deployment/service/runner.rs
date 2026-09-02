@@ -1,4 +1,5 @@
 use super::source_state::{canonicalize_migration_source_state, migration_source_properties};
+use super::timeout_intents::{MigratedTimeoutContext, attach_migrated_state_timeout_intents};
 use super::*;
 
 impl GovernedSchemaDeploymentService<'_> {
@@ -295,6 +296,8 @@ impl GovernedSchemaDeploymentService<'_> {
                 let mut payload = serde_json::to_value(&event).map_err(|error| {
                     ServiceError::new("migration_rejected", error.to_string(), false)
                 })?;
+                let schema_pin =
+                    crate::entity_actor::schema_event_pin(&target_pin, &entity_type, action);
                 payload
                     .as_object_mut()
                     .ok_or_else(|| {
@@ -306,15 +309,23 @@ impl GovernedSchemaDeploymentService<'_> {
                     })?
                     .insert(
                         crate::entity_actor::SCHEMA_PIN_FIELD.into(),
-                        serde_json::to_value(crate::entity_actor::schema_event_pin(
-                            &target_pin,
-                            &entity_type,
-                            action,
-                        ))
-                        .map_err(|error| {
+                        serde_json::to_value(&schema_pin).map_err(|error| {
                             ServiceError::new("migration_rejected", error.to_string(), false)
                         })?,
                     );
+                attach_migrated_state_timeout_intents(
+                    &mut payload,
+                    MigratedTimeoutContext {
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        entity_id: &entity_id,
+                        source_sequence: target_sequence.saturating_add(1),
+                        event: &event,
+                        source_fields: &target_fields,
+                        table: &target_table,
+                        schema_pin,
+                    },
+                )?;
                 let event_id = temper_runtime::scheduler::sim_uuid();
                 shadow_rows.push(SchemaMigrationShadowRow {
                     entity_type,

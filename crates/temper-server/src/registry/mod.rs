@@ -193,6 +193,7 @@ pub struct SpecRegistry {
     tenants: BTreeMap<TenantId, TenantConfig>,
     scoped_bundles: BTreeMap<(TenantId, SchemaScope, String), TenantConfig>,
     scoped_modules: BTreeMap<(TenantId, SchemaScope, String, String), ScopedModuleDescriptor>,
+    scoped_cedar_policies: BTreeMap<(TenantId, SchemaScope, String), BTreeMap<String, String>>,
     active_scopes: BTreeMap<(TenantId, SchemaScope), String>,
     global_compatible_scopes: std::collections::BTreeSet<(TenantId, SchemaScope)>,
 }

@@ -1243,6 +1243,27 @@ impl ServerState {
         }
     }
 
+    /// Authorize against the immutable policy text carried by one scoped pin.
+    pub(crate) fn authorize_with_scoped_policy(
+        &self,
+        policy_text: &str,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), AuthzDenial> {
+        let engine = AuthzEngine::new(policy_text)
+            .map_err(|error| AuthzDenial::EngineError(error.to_string()))?;
+        let attrs: std::collections::HashMap<_, _> = resource_attrs
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        match engine.authorize_or_bypass(security_ctx, action, resource_type, &attrs) {
+            AuthzDecision::Allow { .. } => Ok(()),
+            AuthzDecision::Deny(denial) => Err(denial),
+        }
+    }
+
     /// Get the current state of an entity actor (legacy single-tenant).
     #[deprecated(note = "Use `get_tenant_entity_state` with explicit tenant")]
     pub async fn get_entity_state(
@@ -2744,5 +2765,5 @@ impl ServerState {
     }
 }
 
-use temper_authz::{AuthzDecision, AuthzDenial, SecurityContext};
+use temper_authz::{AuthzDecision, AuthzDenial, AuthzEngine, SecurityContext};
 use temper_runtime::actor::ActorRef;

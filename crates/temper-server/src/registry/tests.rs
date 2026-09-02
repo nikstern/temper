@@ -235,6 +235,49 @@ fn scoped_modules_resolve_only_for_the_exact_tenant_scope_and_digest() {
 }
 
 #[test]
+fn scoped_cedar_policies_resolve_only_for_the_exact_immutable_bundle() {
+    let mut registry = SpecRegistry::new();
+    let tenant = TenantId::new("alpha");
+    let scope = task_scope();
+    let digest = "sha256:bundle-one";
+    registry
+        .stage_scoped_cedar_policies(
+            tenant.clone(),
+            scope.clone(),
+            digest.into(),
+            BTreeMap::from([(
+                "resume".into(),
+                "permit(principal, action == Action::\"Resume\", resource);".into(),
+            )]),
+        )
+        .unwrap();
+
+    assert!(
+        registry
+            .scoped_cedar_policy_at_digest(&tenant, &scope, digest)
+            .unwrap()
+            .contains("Action::\"Resume\"")
+    );
+    assert!(
+        registry
+            .scoped_cedar_policy_at_digest(&tenant, &scope, "sha256:other")
+            .is_none()
+    );
+    assert!(
+        registry
+            .scoped_cedar_policy_at_digest(
+                &tenant,
+                &SchemaScope {
+                    kind: SchemaScopeKind::Task,
+                    id: "task-43".into(),
+                },
+                digest,
+            )
+            .is_none()
+    );
+}
+
+#[test]
 fn scoped_activation_rejects_stale_predecessor_without_changing_reader() {
     let mut registry = SpecRegistry::new();
     let tenant = TenantId::new("alpha");
