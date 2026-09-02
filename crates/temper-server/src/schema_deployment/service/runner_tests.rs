@@ -5,7 +5,8 @@ use temper_runtime::persistence::schema_deployment::{
     SchemaEventPin, SchemaExecutionPin, SchemaScope, SchemaScopeKind,
 };
 
-use super::runner::{attach_migrated_state_timeout_intents, collapse_runtime_alias};
+use super::runner::collapse_runtime_alias;
+use super::timeout_intents::{MigratedTimeoutContext, attach_migrated_state_timeout_intents};
 
 const MIGRATED_TIMEOUT_IOA: &str = r#"
 [automaton]
@@ -50,16 +51,19 @@ fn migrated_state_entry_co_commits_its_timeout_intent() {
     };
     let mut payload = serde_json::to_value(&event).unwrap();
 
+    let source_fields = json!({"id": "run-1", "status": "ResumeReady"});
     attach_migrated_state_timeout_intents(
         &mut payload,
-        "tenant-a",
-        "ArcSynthesisRun",
-        "run-1",
-        1,
-        &event,
-        &json!({"id": "run-1", "status": "ResumeReady"}),
-        &table,
-        schema_pin,
+        MigratedTimeoutContext {
+            tenant: "tenant-a",
+            entity_type: "ArcSynthesisRun",
+            entity_id: "run-1",
+            source_sequence: 1,
+            event: &event,
+            source_fields: &source_fields,
+            table: &table,
+            schema_pin,
+        },
     )
     .expect("migration state entry should schedule its declared timeout");
 

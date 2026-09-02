@@ -274,20 +274,6 @@ fn runtime_entity_type(entity_type: &str) -> &str {
     entity_type.rsplit('.').next().unwrap_or(entity_type)
 }
 
-#[cfg(test)]
-mod scoped_entity_type_tests {
-    use super::runtime_entity_type;
-
-    #[test]
-    fn qualified_scoped_type_resolves_to_the_runtime_automaton_name() {
-        assert_eq!(
-            runtime_entity_type("TemperPaw.ArcAgi2Scoped.ArcSynthesisRun"),
-            "ArcSynthesisRun"
-        );
-        assert_eq!(runtime_entity_type("ArcSynthesisRun"), "ArcSynthesisRun");
-    }
-}
-
 /// Get the CSDL XML for a tenant.
 ///
 /// Tries SpecRegistry first, then legacy csdl_xml.
@@ -527,5 +513,19 @@ pub(super) fn check_has_stream_or_400(
             &format!("Entity type '{entity_type}' does not support $value (HasStream=false)"),
         )
         .into_response())
+    }
+}
+
+#[cfg(test)]
+mod scoped_entity_type_tests {
+    use super::runtime_entity_type;
+
+    #[test]
+    fn qualified_scoped_type_resolves_to_the_runtime_automaton_name() {
+        assert_eq!(
+            runtime_entity_type("TemperPaw.ArcAgi2Scoped.ArcSynthesisRun"),
+            "ArcSynthesisRun"
+        );
+        assert_eq!(runtime_entity_type("ArcSynthesisRun"), "ArcSynthesisRun");
     }
 }
