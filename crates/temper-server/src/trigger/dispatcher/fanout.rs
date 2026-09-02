@@ -227,13 +227,30 @@ impl ReactionDispatcher {
             };
 
             let security_ctx = effective_trigger_security_context(&dispatch_ctx);
-            if let Err(denial) = state.authorize_with_context(
-                &security_ctx,
-                &rule.then.action,
-                &rule.then.entity_type,
-                &authz_resource_attrs,
-                tenant.as_str(),
-            ) {
+            let scoped_policy = dispatch_ctx.schema_pin.as_ref().and_then(|pin| {
+                state
+                    .registry
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .scoped_cedar_policy_at_digest(tenant, &pin.scope, &pin.bundle_digest)
+            });
+            let authorization = match scoped_policy.as_deref() {
+                Some(policy) => state.authorize_with_scoped_policy(
+                    policy,
+                    &security_ctx,
+                    &rule.then.action,
+                    &rule.then.entity_type,
+                    &authz_resource_attrs,
+                ),
+                None => state.authorize_with_context(
+                    &security_ctx,
+                    &rule.then.action,
+                    &rule.then.entity_type,
+                    &authz_resource_attrs,
+                    tenant.as_str(),
+                ),
+            };
+            if let Err(denial) = authorization {
                 let failure = reaction_authorization_failure(&denial);
                 let decision_id = reaction_authorization_decision_id(&denial);
                 let reason = denial.to_string();

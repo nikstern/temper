@@ -1,6 +1,42 @@
 use super::*;
 
 impl SpecRegistry {
+    /// Retain the exact immutable Cedar policy set bound into a scoped bundle.
+    pub fn stage_scoped_cedar_policies(
+        &mut self,
+        tenant: TenantId,
+        scope: SchemaScope,
+        digest: String,
+        policies: BTreeMap<String, String>,
+    ) -> Result<(), RegistryError> {
+        let key = (tenant.clone(), scope.clone(), digest.clone());
+        if let Some(existing) = self.scoped_cedar_policies.get(&key) {
+            if existing == &policies {
+                return Ok(());
+            }
+            return Err(RegistryError::ScopedBundleConflict {
+                tenant: tenant.to_string(),
+                scope: scope.id,
+                digest,
+            });
+        }
+        self.scoped_cedar_policies.insert(key, policies);
+        Ok(())
+    }
+
+    /// Canonical policy text for one exact immutable scoped bundle.
+    pub fn scoped_cedar_policy_at_digest(
+        &self,
+        tenant: &TenantId,
+        scope: &SchemaScope,
+        digest: &str,
+    ) -> Option<String> {
+        self.scoped_cedar_policies
+            .get(&(tenant.clone(), scope.clone(), digest.to_string()))
+            .filter(|policies| !policies.is_empty())
+            .map(|policies| policies.values().cloned().collect::<Vec<_>>().join("\n"))
+    }
+
     /// Stage one immutable scoped registry bundle without changing any reader.
     pub fn stage_scoped_bundle(
         &mut self,

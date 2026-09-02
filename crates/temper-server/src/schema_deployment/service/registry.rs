@@ -138,7 +138,15 @@ impl GovernedSchemaDeploymentService<'_> {
                 modules,
             ),
         };
-        result.map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))
+        result.map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))?;
+        registry
+            .stage_scoped_cedar_policies(
+                TenantId::new(&record.bundle.tenant),
+                record.bundle.scope.clone(),
+                record.bundle.digest.clone(),
+                record.bundle.cedar_policies.clone(),
+            )
+            .map_err(|error| ServiceError::new("invalid_bundle", error.to_string(), false))
     }
 
     pub(crate) async fn recover_registry_pointer(
