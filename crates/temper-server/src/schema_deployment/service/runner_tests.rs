@@ -1,6 +1,80 @@
 use serde_json::json;
 
-use super::runner::collapse_runtime_alias;
+use chrono::{TimeZone, Utc};
+use temper_runtime::persistence::schema_deployment::{
+    SchemaEventPin, SchemaExecutionPin, SchemaScope, SchemaScopeKind,
+};
+
+use super::runner::{attach_migrated_state_timeout_intents, collapse_runtime_alias};
+
+const MIGRATED_TIMEOUT_IOA: &str = r#"
+[automaton]
+name = "ArcSynthesisRun"
+states = ["Draft", "ResumeReady", "Completed"]
+initial = "Draft"
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["ResumeReady"]
+to = "Completed"
+
+[[state_timeout]]
+state = "ResumeReady"
+after_seconds = 1
+on_timeout = "Resume"
+max_occurrences = 1
+"#;
+
+#[test]
+fn migrated_state_entry_co_commits_its_timeout_intent() {
+    let table = temper_jit::table::TransitionTable::from_ioa_source(MIGRATED_TIMEOUT_IOA);
+    let pin = SchemaExecutionPin {
+        scope: SchemaScope {
+            kind: SchemaScopeKind::Task,
+            id: "arc-1".into(),
+        },
+        bundle_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let schema_pin = SchemaEventPin {
+        execution: pin,
+        action_digest: format!("sha256:{}", "b".repeat(64)),
+    };
+    let event = crate::entity_actor::EntityEvent {
+        action: crate::entity_actor::types::FIELD_UPDATE_EVENT_TYPE.into(),
+        from_status: "Draft".into(),
+        to_status: "ResumeReady".into(),
+        timestamp: Utc.timestamp_opt(1_800_000_000, 0).single().unwrap(),
+        params: json!({"replace": true, "migration": true}),
+        idempotency_key: Some("migration-1".into()),
+    };
+    let mut payload = serde_json::to_value(&event).unwrap();
+
+    attach_migrated_state_timeout_intents(
+        &mut payload,
+        "tenant-a",
+        "ArcSynthesisRun",
+        "run-1",
+        1,
+        &event,
+        &json!({"id": "run-1", "status": "ResumeReady"}),
+        &table,
+        schema_pin,
+    )
+    .expect("migration state entry should schedule its declared timeout");
+
+    let intents = crate::trigger::delivery::extract_intents(&payload).unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(
+        intents[0].kind,
+        crate::trigger::delivery::DeliveryKind::StateTimeout
+    );
+    assert_eq!(intents[0].source_sequence, 1);
+    assert_eq!(
+        intents[0].state_timeout.as_ref().unwrap().state,
+        "ResumeReady"
+    );
+}
 
 #[test]
 fn migration_boundary_retains_only_the_snake_case_runtime_name() {

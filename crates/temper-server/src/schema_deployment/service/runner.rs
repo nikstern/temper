@@ -1,6 +1,40 @@
 use super::source_state::{canonicalize_migration_source_state, migration_source_properties};
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attach_migrated_state_timeout_intents(
+    payload: &mut serde_json::Value,
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    source_sequence: u64,
+    event: &EntityEvent,
+    source_fields: &serde_json::Value,
+    table: &temper_jit::table::TransitionTable,
+    schema_pin: temper_runtime::persistence::schema_deployment::SchemaEventPin,
+) -> Result<(), ServiceError> {
+    let intents = crate::trigger::delivery::state_timeout_intents(
+        crate::trigger::delivery::StateTimeoutIntentContext {
+            tenant,
+            entity_type,
+            entity_id,
+            source_sequence,
+            event,
+            source_fields,
+            table,
+            schema_pin: Some(schema_pin),
+            triggering_authority: None,
+            durable_idempotency_evidence: &BTreeMap::new(),
+        },
+    )
+    .map_err(|error| ServiceError::new("migration_rejected", error, false))?;
+    if !intents.is_empty() {
+        crate::trigger::delivery::attach_intents(payload, &intents)
+            .map_err(|error| ServiceError::new("migration_rejected", error, false))?;
+    }
+    Ok(())
+}
+
 impl GovernedSchemaDeploymentService<'_> {
     pub(super) async fn run_migration_batch(
         &self,
@@ -295,6 +329,8 @@ impl GovernedSchemaDeploymentService<'_> {
                 let mut payload = serde_json::to_value(&event).map_err(|error| {
                     ServiceError::new("migration_rejected", error.to_string(), false)
                 })?;
+                let schema_pin =
+                    crate::entity_actor::schema_event_pin(&target_pin, &entity_type, action);
                 payload
                     .as_object_mut()
                     .ok_or_else(|| {
@@ -306,15 +342,21 @@ impl GovernedSchemaDeploymentService<'_> {
                     })?
                     .insert(
                         crate::entity_actor::SCHEMA_PIN_FIELD.into(),
-                        serde_json::to_value(crate::entity_actor::schema_event_pin(
-                            &target_pin,
-                            &entity_type,
-                            action,
-                        ))
-                        .map_err(|error| {
+                        serde_json::to_value(&schema_pin).map_err(|error| {
                             ServiceError::new("migration_rejected", error.to_string(), false)
                         })?,
                     );
+                attach_migrated_state_timeout_intents(
+                    &mut payload,
+                    &tenant,
+                    &entity_type,
+                    &entity_id,
+                    target_sequence.saturating_add(1),
+                    &event,
+                    &target_fields,
+                    &target_table,
+                    schema_pin,
+                )?;
                 let event_id = temper_runtime::scheduler::sim_uuid();
                 shadow_rows.push(SchemaMigrationShadowRow {
                     entity_type,
