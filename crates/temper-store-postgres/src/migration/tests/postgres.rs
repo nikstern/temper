@@ -50,7 +50,7 @@ fn lineage_boundaries(lineage: LineageFixture) -> Vec<&'static Migration> {
     let mut migrations = migrations_in_range(&FORK_MIGRATOR, 1..=11);
     match lineage {
         LineageFixture::Fork => {
-            migrations.extend(migrations_in_range(&FORK_MIGRATOR, 12..=13));
+            migrations.extend(migrations_in_range(&FORK_MIGRATOR, 12..=14));
             migrations.extend(migrations_in_range(
                 &HISTORICAL_CONVERGENCE_MIGRATOR,
                 16..=16,
@@ -123,7 +123,7 @@ async fn seed_invalid_history(pool: &PgPool, history: InvalidHistory) {
             seed_boundaries(pool, &migrations_in_range(&FORK_MIGRATOR, 13..=13)).await;
         }
         InvalidHistory::WrongSixteen => {
-            seed_boundaries(pool, &migrations_in_range(&FORK_MIGRATOR, 12..=13)).await;
+            seed_boundaries(pool, &migrations_in_range(&FORK_MIGRATOR, 12..=14)).await;
             seed_boundaries(
                 pool,
                 &migrations_in_range(&FIXED_UPSTREAM_MIGRATOR, 16..=16),
@@ -338,7 +338,10 @@ async fn real_postgres_restarts_after_every_boundary_and_converges_identically()
             }
             assert_eq!(
                 migrated_history.last().map(|row| row.0),
-                Some(18),
+                SHARED_MIGRATOR
+                    .iter()
+                    .last()
+                    .map(|migration| migration.version),
                 "{lineage:?} boundary {boundary} did not reach the shared stream"
             );
             assert_union_schema(&pool).await;

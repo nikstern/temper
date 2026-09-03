@@ -10,6 +10,40 @@ use super::{
 };
 
 impl ApplicationDataInvocation {
+    /// Load the authoritative actor selected by a durable journal identity.
+    ///
+    /// Unlike `get_target_entity`, this follows the winning stream's immutable
+    /// pin instead of assuming it has the same target as the request.
+    pub(super) async fn get_durable_target_entity(
+        &self,
+        entity_type: &str,
+        journal_entity_id: &str,
+    ) -> Result<crate::entity_actor::EntityResponse, ModuleDataError> {
+        let service = GovernedApplicationDataService::new(&self.state);
+        let result = if let Some((entity_id, pin)) =
+            temper_runtime::persistence::schema_deployment::split_scoped_journal_entity_id(
+                journal_entity_id,
+            ) {
+            service
+                .get_scoped(
+                    &self.authority.tenant,
+                    short_type(entity_type),
+                    entity_id,
+                    pin,
+                )
+                .await
+        } else {
+            service
+                .get(
+                    &self.authority.tenant,
+                    short_type(entity_type),
+                    journal_entity_id,
+                )
+                .await
+        };
+        result.map_err(internal_error)
+    }
+
     pub(super) async fn get_target_entity(
         &self,
         entity_type: &str,

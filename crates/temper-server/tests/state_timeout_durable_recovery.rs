@@ -10,7 +10,21 @@ use temper_server::storage::{BoxedEventStore, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 
-const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.TimeoutRecoveryTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Ticket">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Tickets" EntityType="Temper.TimeoutRecoveryTest.Ticket"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
 
 const TICKET_WITH_TIMEOUT_IOA: &str = r#"
 [automaton]

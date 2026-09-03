@@ -1,3 +1,7 @@
+pub mod conformance;
+mod creation_repair;
+#[macro_use]
+mod creation_methods;
 mod query_projection;
 pub mod schema_deployment;
 mod stream_descriptor;
@@ -6,12 +10,15 @@ mod types;
 mod unscoped_methods;
 #[macro_use]
 mod scoped_methods;
+pub use creation_repair::{CreationCoveragePublication, CreationMetadataRepair};
 pub use query_projection::{QueryProjectionOrder, QueryProjectionOrderTarget};
 pub use stream_descriptor::*;
 pub use types::*;
 
 /// Event-store backend contract.
 pub trait EventStore: Send + Sync + 'static {
+    impl_creation_event_store_methods!();
+
     fn append(
         &self,
         persistence_id: &str,
@@ -310,6 +317,59 @@ pub trait EventStore: Send + Sync + 'static {
         tenant: &str,
         entity_type: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send;
+
+    /// Enumerate every durable ownership source for creation-metadata repair.
+    ///
+    /// Backends with projections or secondary ownership indexes must override
+    /// this and return their union, including tombstones and orphan rows.
+    fn list_creation_source_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, PersistenceError>> + Send {
+        self.list_entity_ids_by_type(tenant, entity_type)
+    }
+
+    /// Return the monotonic sum of authoritative stream write versions for a type.
+    fn creation_source_write_version(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> impl std::future::Future<Output = Result<u64, PersistenceError>> + Send {
+        async move {
+            let mut after = None::<(String, String)>;
+            let mut version = 0u64;
+            loop {
+                let page = self
+                    .list_journal_ids_page(
+                        tenant,
+                        Some(entity_type),
+                        after
+                            .as_ref()
+                            .map(|(kind, id)| (kind.as_str(), id.as_str())),
+                        256,
+                    )
+                    .await?;
+                if page.is_empty() {
+                    return Ok(version);
+                }
+                for (kind, id) in &page {
+                    let persistence_id = format!("{tenant}:{kind}:{id}");
+                    let latest = self.read_events(&persistence_id, 0).await?;
+                    let latest_sequence = latest.last().map_or(0, |event| event.sequence_nr);
+                    version = version.checked_add(latest_sequence).ok_or_else(|| {
+                        PersistenceError::Storage(
+                            "creation source write version overflow".to_string(),
+                        )
+                    })?;
+                }
+                after = page.last().cloned();
+                if page.len() < 256 {
+                    return Ok(version);
+                }
+            }
+        }
+    }
 
     /// List at most `limit` authoritative `(entity_type, entity_id)` pairs for
     /// a tenant, optionally scoped to one entity type.

@@ -109,6 +109,7 @@ async fn generated_faults_and_crashes_reconstruct_every_collection_boundary() {
                 concurrency_violation_prob: 0.2,
                 read_truncation_prob: 0.0,
                 snapshot_failure_prob: 0.0,
+                create_or_verify_reply_loss_prob: 0.0,
             },
         );
         let mut rng = DeterministicRng::new(seed.wrapping_add(0xd57c_011e_c710));

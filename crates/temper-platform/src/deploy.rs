@@ -770,6 +770,10 @@ kind = "internal"
       </Action>
       <EntityContainer Name="Container">"#,
         );
+        let csdl_xml = csdl_xml.replace(
+            "        <EntitySet Name=\"Tasks\" EntityType=\"Test.TaskTracker.Task\" />",
+            "        <EntitySet Name=\"Tasks\" EntityType=\"Test.TaskTracker.Task\" />\n        <EntitySet Name=\"Bugs\" EntityType=\"Test.TaskTracker.Bug\" />",
+        );
 
         let input = DeployInput {
             tenant_name: "multi-tenant".into(),

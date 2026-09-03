@@ -148,6 +148,7 @@ impl ApplicationDataInvocation {
         action: &str,
         operation: &str,
         fields: &serde_json::Value,
+        enforce_process_local_uniqueness: bool,
     ) -> Result<(), ModuleDataError> {
         crate::odata::rate_limit::enforce_commons_write_rate_limit(
             &self.state,
@@ -231,21 +232,23 @@ impl ApplicationDataInvocation {
                     "commons account verification rejected the operation",
                 )
             })?;
-        self.state
-            .enforce_commons_app_name_unique_for_write(
-                &self.authority.tenant,
-                short_type(entity_type),
-                entity_id,
-                fields,
-            )
-            .await
-            .map_err(|_| {
-                data_error(
-                    ModuleDataErrorKind::AlreadyExists,
-                    "UniqueConstraintViolation",
-                    "governed uniqueness check rejected the operation",
+        if enforce_process_local_uniqueness {
+            self.state
+                .enforce_commons_app_name_unique_for_write(
+                    &self.authority.tenant,
+                    short_type(entity_type),
+                    entity_id,
+                    fields,
                 )
-            })?;
+                .await
+                .map_err(|_| {
+                    data_error(
+                        ModuleDataErrorKind::AlreadyExists,
+                        "UniqueConstraintViolation",
+                        "governed uniqueness check rejected the operation",
+                    )
+                })?;
+        }
         self.state
             .enforce_commons_storage_cap_for_write(
                 &self.authority.tenant,
@@ -328,7 +331,9 @@ pub(crate) fn validate_manifest_entity_object(
     Ok(())
 }
 
-fn effective_write_policy(property: &ManifestPropertyV1) -> ManifestPropertyWritePolicyV1 {
+pub(super) fn effective_write_policy(
+    property: &ManifestPropertyV1,
+) -> ManifestPropertyWritePolicyV1 {
     property.write_policy.unwrap_or_else(|| {
         let create = match property.source {
             ManifestValueSourceV1::EntityId => ManifestCreateRoleV1::Required,

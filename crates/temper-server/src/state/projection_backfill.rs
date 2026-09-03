@@ -8,10 +8,12 @@ use crate::runtime_metrics;
 
 use super::ServerState;
 
+mod creation_contract;
 mod key_index;
 mod replay_parity;
 mod vector_index;
 
+pub(super) use creation_contract::populate_creation_contracts;
 pub(super) use key_index::populate_key_index_from_snapshots;
 pub(super) use replay_parity::verify_query_projection_replay_parity;
 pub(super) use vector_index::populate_vector_index_from_snapshots;

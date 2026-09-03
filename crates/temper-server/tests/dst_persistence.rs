@@ -11,6 +11,15 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+fn dst_creation_contract() -> temper_runtime::persistence::CreationContract {
+    temper_runtime::persistence::CreationContract {
+        version: temper_runtime::persistence::CREATION_CONTRACT_VERSION_V1,
+        schema_digest: "dst:test-schema".into(),
+        fields: Vec::new(),
+        digest: "dst:empty-create".into(),
+    }
+}
+
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
@@ -109,6 +118,7 @@ async fn dst_typed_reference_is_set_once_and_replays() {
                 store.clone(),
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default"),
             &entity_id,
         );
@@ -175,6 +185,7 @@ async fn dst_typed_reference_is_set_once_and_replays() {
                 store,
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default"),
             format!("{entity_id}-replayed"),
         );
@@ -200,6 +211,7 @@ async fn dst_field_update_consumes_sequence_and_replays() {
             store.clone(),
             BackendLabel::Sim,
         )
+        .with_creation_contract(dst_creation_contract())
         .with_tenant("default");
         let actor_ref = system.spawn(actor, &entity_id);
         let before = get_state(&actor_ref).await.state.sequence_nr;
@@ -230,6 +242,7 @@ async fn dst_field_update_consumes_sequence_and_replays() {
                 store,
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default"),
             format!("{entity_id}-replayed"),
         );
@@ -262,6 +275,7 @@ async fn dst_replay_fidelity() {
                 store.clone(),
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
 
@@ -295,6 +309,7 @@ async fn dst_replay_fidelity() {
             store.clone(),
             BackendLabel::Sim,
         )
+        .with_creation_contract(dst_creation_contract())
         .with_tenant("default");
         let actor_ref2 = system2.spawn(actor2, format!("{entity_id}-replay"));
 
@@ -333,6 +348,7 @@ async fn dst_sequence_monotonicity() {
             store.clone(),
             BackendLabel::Sim,
         )
+        .with_creation_contract(dst_creation_contract())
         .with_tenant("default");
         let actor_ref = system.spawn(actor, &entity_id);
 
@@ -381,6 +397,7 @@ async fn dst_crash_recovery() {
                 store.clone(),
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
 
@@ -408,6 +425,7 @@ async fn dst_crash_recovery() {
                 store.clone(),
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default");
             let actor_ref = system.spawn(actor, format!("{entity_id}-2"));
 
@@ -449,6 +467,7 @@ async fn dst_determinism_canary() {
                 store.clone(),
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
 
@@ -518,6 +537,7 @@ async fn dst_replay_preserves_data_fields() {
                 store.clone(),
                 BackendLabel::Sim,
             )
+            .with_creation_contract(dst_creation_contract())
             .with_tenant("default");
             let actor_ref = system.spawn(actor, &entity_id);
 
@@ -555,6 +575,7 @@ async fn dst_replay_preserves_data_fields() {
             store.clone(),
             BackendLabel::Sim,
         )
+        .with_creation_contract(dst_creation_contract())
         .with_tenant("default");
         let actor_ref2 = system2.spawn(actor2, format!("{entity_id}-replay"));
 

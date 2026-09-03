@@ -233,6 +233,8 @@ pub struct RelationGraph {
 pub struct TenantConfig {
     /// Immutable linked CSDL/IOA model swapped as one registry revision.
     pub canonical_model: Arc<CanonicalSpecModel>,
+    /// Canonical create manifests compiled once with the verified registry revision.
+    pub creation_manifests: BTreeMap<String, temper_wasm_sdk::data::ManifestEntityV1>,
     /// The CSDL document describing this tenant's entity model.
     pub csdl: Arc<CsdlDocument>,
     /// Raw CSDL XML for serving via `$metadata`.

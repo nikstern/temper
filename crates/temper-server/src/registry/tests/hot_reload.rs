@@ -131,7 +131,7 @@ fn replace_removes_entities_not_in_new_spec_set() {
     registry.register_tenant("alpha", csdl, xml, &[("Order", ORDER_IOA)]);
     let tenant = TenantId::new("alpha");
 
-    let (csdl2, xml2) = minimal_csdl();
+    let (csdl2, xml2) = task_csdl();
     registry
         .try_register_tenant_with_reactions_and_constraints(
             "alpha",

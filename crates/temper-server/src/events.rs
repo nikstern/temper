@@ -10,13 +10,17 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
 
 use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
 use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
+
+mod replay;
+pub(crate) use replay::{
+    durable_entity_change_stream, replay_durable_entity_changes, replay_durable_tenant_changes,
+};
 
 /// A notification emitted when an entity transitions to a new state.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -61,22 +65,31 @@ pub async fn handle_events(
     require_observe_auth(&state, authenticated, "read_events", "Entity")?;
     let filter_tenant = observe_tenant_scope(authenticated).as_str().to_string();
     let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
-        match result {
-            Ok(change) => {
-                // Enforce tenant scope: only emit events for the scoped tenant.
-                if change.tenant != filter_tenant {
-                    return None;
-                }
+    let replay = replay_durable_tenant_changes(&state, &filter_tenant, None, None)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let replay_high_water = replay
+        .iter()
+        .map(|change| {
+            (
+                (change.entity_type.clone(), change.entity_id.clone()),
+                change.seq,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let replay_stream = tokio_stream::iter(replay.into_iter().map(|change| {
+        let data = serde_json::to_string(&change).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().event("state_change").data(data))
+    }));
+    let live_stream =
+        durable_entity_change_stream(state, rx, filter_tenant, None, None, replay_high_water).map(
+            |change| {
                 let data = serde_json::to_string(&change).unwrap_or_default();
-                Some(Ok(Event::default().event("state_change").data(data)))
-            }
-            // Lagged receiver: skip missed events and continue
-            Err(_) => None,
-        }
-    });
+                Ok(Event::default().event("state_change").data(data))
+            },
+        );
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]

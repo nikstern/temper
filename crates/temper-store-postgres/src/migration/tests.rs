@@ -77,7 +77,7 @@ fn embedded_migration_streams_preserve_every_published_boundary() {
             .iter()
             .map(|migration| migration.version)
             .collect::<Vec<_>>(),
-        vec![17, 18]
+        vec![17, 18, 19]
     );
     assert_ne!(
         migration_at(&FORK_MIGRATOR, 12).unwrap().checksum,
@@ -146,7 +146,7 @@ fn migration_lineage_classifies_complete_histories() {
     );
 
     let mut fork = common_history();
-    fork.extend(applied(&FORK_MIGRATOR, &[12, 13]));
+    fork.extend(applied(&FORK_MIGRATOR, &[12, 13, 14]));
     fork.extend(applied(&HISTORICAL_CONVERGENCE_MIGRATOR, &[16]));
     fork.extend(applied(&SHARED_MIGRATOR, &[17]));
     assert_eq!(
@@ -183,7 +183,7 @@ fn migration_lineage_accepts_every_distinguishable_interrupted_stream() {
     );
 
     let mut fork = ambiguous_twelve.clone();
-    fork.extend(applied(&FORK_MIGRATOR, &[13]));
+    fork.extend(applied(&FORK_MIGRATOR, &[13, 14]));
     assert_eq!(
         classify_migration_lineage(&fork).unwrap(),
         MigrationLineage::Fork
@@ -228,7 +228,7 @@ fn migration_lineage_rejects_unknown_mixed_gapped_and_failed_histories() {
     );
 
     let mut wrong_sixteen = common_history();
-    wrong_sixteen.extend(applied(&FORK_MIGRATOR, &[12, 13]));
+    wrong_sixteen.extend(applied(&FORK_MIGRATOR, &[12, 13, 14]));
     wrong_sixteen.extend(applied(&FIXED_UPSTREAM_MIGRATOR, &[16]));
     assert!(
         classify_migration_lineage(&wrong_sixteen)

@@ -515,6 +515,7 @@ async fn installed_application_fence_is_atomic_tenant_scoped_and_action_scoped()
                 key_rows: Vec::new(),
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                first_event: None,
             }])
             .await
             .unwrap_err(),

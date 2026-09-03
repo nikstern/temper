@@ -303,8 +303,6 @@ mod tests {
 
     const CSDL_XML: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
     const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-    const PROCESS_IOA: &str = include_str!("../../../../test-fixtures/specs/process.ioa.toml");
-
     fn registry_with(tenant: &str, entity_type: &str, ioa_source: &str) -> SpecRegistry {
         let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
         let mut registry = SpecRegistry::new();
@@ -397,7 +395,57 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_actor_effects() {
-        let registry = registry_with("alpha", "Process", PROCESS_IOA);
+        const UNSUPPORTED_IOA: &str = r#"
+[automaton]
+name = "Process"
+states = ["Ready", "Done"]
+initial = "Ready"
+lifecycle_property = "Status"
+
+[[state]]
+name = "count"
+type = "counter"
+initial = "0"
+
+[[action]]
+name = "Advance"
+kind = "input"
+from = ["Ready"]
+to = "Done"
+params = [{ name = "amount", type = "integer" }]
+effect = [{ type = "increment", var = "count", amount = "amount" }]
+"#;
+        const PROCESS_CSDL: &str = r#"
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Process">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false" DefaultValue="Ready"/>
+        <Property Name="Count" Type="Edm.Int64" Nullable="false" DefaultValue="0"/>
+      </EntityType>
+      <Action Name="Advance" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Test.Process" Nullable="false"/>
+        <Parameter Name="amount" Type="Edm.Int64" Nullable="false"/>
+        <ReturnType Type="Temper.Test.Process"/>
+      </Action>
+      <EntityContainer Name="Service">
+        <EntitySet Name="Processes" EntityType="Temper.Test.Process"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
+"#;
+        let csdl = parse_csdl(PROCESS_CSDL).expect("process CSDL should parse");
+        let mut registry = SpecRegistry::new();
+        registry.register_tenant(
+            "alpha",
+            csdl,
+            PROCESS_CSDL.to_string(),
+            &[("Process", UNSUPPORTED_IOA)],
+        );
         let err = collect_actor_runtime_definitions(&registry, &["Process".into()]).unwrap_err();
 
         assert!(err.to_string().contains("not yet supported"));

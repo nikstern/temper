@@ -77,7 +77,16 @@
       "budget_seconds": 300,
       "required_pr": true,
       "environment": {"TEMPER_REQUIRE_BACKEND_PARITY": "1"},
-      "commands": [["cargo", "test", "-p", "temper-server", "--test", "reaction_backend_parity"]]
+      "commands": [
+        ["cargo", "test", "-p", "temper-server", "--test", "reaction_backend_parity"],
+        ["cargo", "test", "-p", "temper-store-sim", "backend_neutral_create_or_verify_conformance"],
+        ["cargo", "test", "-p", "temper-store-turso", "backend_neutral_create_or_verify_conformance"],
+        ["cargo", "test", "-p", "temper-store-redis", "backend_neutral_create_or_verify_conformance"],
+        ["cargo", "test", "-p", "temper-store-redis", "actual_cluster_lua_and_restart_safe_migration"],
+        ["cargo", "test", "-p", "temper-store-postgres", "backend_neutral_create_or_verify_conformance"],
+        ["cargo", "test", "-p", "temper-store-postgres", "real_postgres_restarts_after_every_boundary_and_converges_identically"],
+        ["cargo", "test", "-p", "temper-store-postgres", "real_postgres_rejects_invalid_histories_before_mutation"]
+      ]
     },
     {
       "id": "observe-tests",

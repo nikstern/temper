@@ -75,6 +75,68 @@ pub const CREATE_ENTITY_KEY_INDEX_ENTITY: &str = "\
 CREATE INDEX IF NOT EXISTS idx_eki_entity
     ON entity_key_index(tenant, entity_type, entity_id);";
 
+/// Coverage proof for a fully reconciled declared-key set.
+pub const CREATE_KEY_INDEX_BACKFILL_WATERMARK: &str = "\
+CREATE TABLE IF NOT EXISTS key_index_backfill_watermark (
+    tenant      TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    key_set     TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (tenant, entity_type)
+);";
+
+/// Immutable canonical sequence-1 contracts used by atomic create-or-verify.
+pub const CREATE_ENTITY_CREATION_CONTRACTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_creation_contracts (
+    tenant          TEXT NOT NULL,
+    entity_type     TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    contract_json   TEXT NOT NULL,
+    contract_digest TEXT NOT NULL,
+    notification_pending INTEGER NOT NULL DEFAULT 0,
+    contract_revision INTEGER NOT NULL,
+    schema_identity TEXT NOT NULL,
+    declared_key_signature TEXT NOT NULL,
+    source_write_version INTEGER NOT NULL,
+    PRIMARY KEY (tenant, entity_type, entity_id)
+);";
+
+/// Stable-pass coverage for creation contracts and exact declared keys.
+pub const CREATE_ENTITY_CREATION_COVERAGE_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_creation_coverage (
+    tenant                 TEXT NOT NULL,
+    entity_type            TEXT NOT NULL,
+    schema_identity        TEXT NOT NULL,
+    contract_revision      INTEGER NOT NULL,
+    declared_key_signature TEXT NOT NULL,
+    cursor                 TEXT NOT NULL,
+    source_write_version   INTEGER NOT NULL,
+    covered_write_version  INTEGER NOT NULL,
+    completed_at           TEXT,
+    PRIMARY KEY (
+        tenant, entity_type, schema_identity, contract_revision, declared_key_signature
+    )
+);";
+
+/// Caller request identities for atomic create-or-verify replay.
+pub const CREATE_ENTITY_CREATE_OR_VERIFY_IDEMPOTENCY_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS entity_create_or_verify_idempotency (
+    tenant          TEXT NOT NULL,
+    module_name     TEXT NOT NULL,
+    entity_type     TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    requested_entity_id TEXT NOT NULL,
+    requested_contract_json TEXT NOT NULL,
+    contract_digest TEXT NOT NULL,
+    PRIMARY KEY (tenant, module_name, entity_type, idempotency_key)
+);";
+
+/// Upgrade pre-existing request records with durable Created-notification recovery.
+pub const ADD_CREATE_OR_VERIFY_NOTIFICATION_PENDING: &str = "\
+ALTER TABLE entity_create_or_verify_idempotency
+ADD COLUMN notification_pending INTEGER NOT NULL DEFAULT 0;";
+
 /// ADR-0155: declared vector access path — the exact-scan kNN index. One row per
 /// (declared vector path, model tag, entity). `vector` is packed little-endian
 /// f32; `model_tag` partitions the space. Unlike keys, Turso maintains this

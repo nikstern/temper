@@ -1,6 +1,16 @@
 //! Versioned transport-neutral request and response contracts.
 
 use serde::{Deserialize, Serialize};
+
+#[path = "contracts/create_or_verify.rs"]
+mod create_or_verify;
+pub use create_or_verify::CreateOrVerifyResultV1;
+#[path = "contracts/commit.rs"]
+mod commit;
+pub use commit::CommitToken;
+#[path = "contracts/retryability.rs"]
+mod retryability;
+pub use retryability::Retryability;
 use serde_json::{Map, Value};
 
 use super::DataOutcomeV1;
@@ -63,6 +73,15 @@ pub enum DataOperationV1 {
     EntityCreate {
         /// Fully qualified CSDL entity type.
         entity_type: String,
+        /// Typed entity value encoded with canonical property names.
+        value: DataObject,
+    },
+    /// Atomically create one entity or verify the matching immutable creation contract.
+    EntityCreateOrVerify {
+        /// Fully qualified CSDL entity type.
+        entity_type: String,
+        /// Non-empty caller request identity, scoped by tenant, module, and entity type.
+        idempotency_key: String,
         /// Typed entity value encoded with canonical property names.
         value: DataObject,
     },
@@ -315,6 +334,11 @@ pub enum DataResultV1 {
         /// Whether the value was omitted after the write committed.
         value_omitted: bool,
     },
+    /// A closed atomic create-or-verify result.
+    CreateOrVerify {
+        /// Creation, canonical match, or bounded conflict classification.
+        outcome: CreateOrVerifyResultV1,
+    },
     /// A committed action.
     Action {
         /// Durable per-entity commit token.
@@ -366,18 +390,6 @@ pub struct SequencedValueV1 {
     /// Canonical entity value.
     pub value: DataObject,
     /// Entity stream sequence represented by the value.
-    pub sequence: u64,
-}
-
-/// Per-entity post-commit consistency token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitToken {
-    /// Fully qualified entity type.
-    pub entity_type: String,
-    /// Canonical entity identifier.
-    pub entity_id: String,
-    /// Durable entity stream sequence.
     pub sequence: u64,
 }
 
@@ -475,18 +487,6 @@ pub enum ModuleDataErrorKind {
     TransientUnavailable,
     /// Safe internal failure without sensitive details.
     Internal,
-}
-
-/// Whether retrying an operation can be useful.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Retryability {
-    /// Repeating the same request cannot help.
-    Never,
-    /// Retry only after refreshing state or a commit token.
-    AfterRefresh,
-    /// Retry with bounded exponential backoff.
-    WithBackoff,
 }
 
 #[cfg(test)]

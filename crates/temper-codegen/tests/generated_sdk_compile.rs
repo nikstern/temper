@@ -106,6 +106,7 @@ params = [{ name = "Failure", type = "Temper.FailureEnvelopeV1" }]
                 DataOperationKind::EntityGet,
                 DataOperationKind::EntityQuery,
                 DataOperationKind::EntityCreate,
+                DataOperationKind::EntityCreateOrVerify,
                 DataOperationKind::EntityPatch,
                 DataOperationKind::ActionInvoke,
                 DataOperationKind::Batch,
@@ -220,11 +221,12 @@ pub fn typecheck_surface() {
     );
     fn failure_input(failure: &FailureEnvelopeV1) -> FileHandleFailureInput<'_> { FileHandleFailureInput::new(failure) }
     fn create_signature(client: &mut FileClient, value: &FileCreate<'_>) -> Result<TypedWrite<File>, ModuleDataError> { client.create(value) }
+    fn create_or_verify_signature(client: &mut FileClient, value: &FileCreate<'_>) -> Result<CreateOrVerifyOutcome<File>, ModuleDataError> { client.create_or_verify("request-1", value) }
     fn patch_signature(client: &mut FileClient, id: &str, value: &FilePatch<'_>) -> Result<TypedWrite<File>, ModuleDataError> { client.patch(id, None, value) }
     fn snapshot_signature(client: &mut FileClient, id: &str, value: &FileSnapshotInput<'_>) -> Result<TypedAction<File>, ModuleDataError> { client.snapshot(id, None, value) }
     fn maybe_snapshot_signature(client: &mut FileClient, id: &str, value: &FileMaybeSnapshotInput<'_>) -> Result<TypedAction<Option<File>>, ModuleDataError> { client.maybe_snapshot(id, None, value) }
     fn failure_signature(client: &mut FileClient, id: &str, value: &FileHandleFailureInput<'_>) -> Result<TypedAction<()>, ModuleDataError> { client.handle_failure(id, None, value) }
-    let _ = (create_signature, patch_signature, snapshot_signature, maybe_snapshot_signature, failure_signature);
+    let _ = (create_signature, create_or_verify_signature, patch_signature, snapshot_signature, maybe_snapshot_signature, failure_signature);
     let _ = (failure_input, &create, &patch, &snapshot, &complete, &maybe_snapshot);
     assert_eq!(id.as_ref(), "file-1");
     assert_eq!(owner.as_ref(), "user-1");
@@ -258,6 +260,12 @@ fn generated_entity_action_decodes_and_advances_the_next_read() {
         ..create_commit.clone()
     };
     install_native_data_host_for_test(vec![
+        DataResponseV1::ok(DataResultV1::CreateOrVerify {
+            outcome: CreateOrVerifyResultV1::Created {
+                commit: create_commit.clone(),
+                value: value.as_object().cloned().expect("fixture entity is an object"),
+            },
+        }),
         DataResponseV1::ok(DataResultV1::Write {
             commit: create_commit.clone(),
             value: Some(value.as_object().cloned().expect("fixture entity is an object")),
@@ -273,6 +281,19 @@ fn generated_entity_action_decodes_and_advances_the_next_read() {
     let mut client = FileClient::new();
     let create = FileCreate::new(FileIdRef::from(&id), TemperGeneratedUserIdRef::from(&owner))
         .with_estimate_null();
+    let verified = client
+        .create_or_verify("request-1", &create)
+        .expect("borrowed create command executes atomically");
+    match verified {
+        CreateOrVerifyOutcome::Created { commit, value }
+        | CreateOrVerifyOutcome::AlreadyMatches { commit, value } => {
+            assert_eq!(commit, create_commit);
+            assert_eq!(value.id, "file-1");
+        }
+        CreateOrVerifyOutcome::Conflict { fields, truncated } => {
+            panic!("unexpected conflict: {fields:?}, truncated={truncated}")
+        }
+    }
     let created = client.create(&create).expect("borrowed create command executes");
     assert_eq!(created.commit, create_commit);
     assert_eq!(created.value.expect("created entity").id, "file-1");
@@ -288,10 +309,20 @@ fn generated_entity_action_decodes_and_advances_the_next_read() {
     assert_eq!(owner.as_ref(), "user-1", "commands only borrow the owner");
 
     let write_requests = take_native_data_requests_for_test();
+    let DataOperationV1::EntityCreateOrVerify {
+        idempotency_key,
+        value: verified_value,
+        ..
+    } = &write_requests[0].operation
+    else {
+        panic!("first generated write must be create-or-verify");
+    };
+    assert_eq!(idempotency_key, "request-1");
+    assert!(verified_value.contains_key("Id"));
     let DataOperationV1::EntityCreate {
         value: create_value,
         ..
-    } = &write_requests[0].operation
+    } = &write_requests[1].operation
     else {
         panic!("first generated write must be create");
     };
@@ -305,7 +336,7 @@ fn generated_entity_action_decodes_and_advances_the_next_read() {
         expected_sequence,
         value: patch_value,
         ..
-    } = &write_requests[1].operation else {
+    } = &write_requests[2].operation else {
         panic!("second generated write must be patch");
     };
     assert_eq!(*expected_sequence, Some(create_commit.sequence));

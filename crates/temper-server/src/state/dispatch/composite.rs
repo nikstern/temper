@@ -76,6 +76,7 @@ struct AtomicCompositeStream {
     state: EntityState,
     expected_sequence: u64,
     events: Vec<PersistenceEnvelope>,
+    first_event: Option<temper_runtime::persistence::FirstEventMetadata>,
 }
 
 fn composite_persistence_id(
@@ -438,16 +439,84 @@ impl crate::state::ServerState {
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
 
+        for stream in streams.values_mut() {
+            if stream.expected_sequence != 0
+                || stream.events.is_empty()
+                || stream.first_event.is_some()
+            {
+                continue;
+            }
+            let created: crate::entity_actor::EntityEvent =
+                serde_json::from_value(stream.events[0].payload.clone()).map_err(|error| {
+                    DispatchError::Internal(format!(
+                        "invalid composite sequence-1 event for {}: {error}",
+                        stream.entity_type
+                    ))
+                })?;
+            let contract = crate::state::entity_ops::actor_creation_contract(
+                self,
+                tenant,
+                &stream.entity_type,
+                &stream.entity_id,
+                &created.params,
+                schema_pin,
+            )
+            .map_err(|error| {
+                DispatchError::Internal(format!(
+                    "verified composite create for {} is missing its creation contract: {error}",
+                    stream.entity_type
+                ))
+            })?;
+            let declared_keys = self.declared_keys_for(tenant, &stream.entity_type);
+            stream.first_event = Some(temper_runtime::persistence::FirstEventMetadata {
+                contract_revision: contract.version,
+                schema_identity: contract.schema_digest.clone(),
+                declared_key_signature: crate::application_data::declared_key_signature(
+                    &declared_keys,
+                    &contract,
+                ),
+                contract,
+            });
+        }
+
         let appends = streams
             .iter()
             .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
-                persistence_id: persistence_id.clone(),
-                expected_sequence: stream.expected_sequence,
-                events: stream.events.clone(),
-                key_rows: Vec::new(),
-                vector_rows: Vec::new(),
-                reconcile_vectors: false,
+            .map(|(persistence_id, stream)| {
+                let mut key_rows = if stream.state.status == "Deleted" {
+                    Vec::new()
+                } else {
+                    self.declared_keys_for(tenant, &stream.entity_type)
+                        .iter()
+                        .filter_map(|key| {
+                            stream.state.fields.as_object().and_then(|fields| {
+                                crate::key_index::canonical_key_hash(
+                                    &key.name,
+                                    &key.properties,
+                                    fields,
+                                )
+                                .map(|key_hash| {
+                                    temper_runtime::persistence::EntityKeyRow {
+                                        key_name: key.name.clone(),
+                                        key_hash,
+                                    }
+                                })
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                };
+                key_rows.sort_by(|left, right| {
+                    (&left.key_name, &left.key_hash).cmp(&(&right.key_name, &right.key_hash))
+                });
+                PersistenceAppend {
+                    persistence_id: persistence_id.clone(),
+                    expected_sequence: stream.expected_sequence,
+                    events: stream.events.clone(),
+                    key_rows,
+                    vector_rows: Vec::new(),
+                    reconcile_vectors: false,
+                    first_event: stream.first_event.clone(),
+                }
             })
             .collect::<Vec<_>>();
         if appends.is_empty() {
@@ -594,6 +663,7 @@ impl crate::state::ServerState {
         };
         let expected_sequence = state.sequence_nr;
         let mut events = Vec::new();
+        let mut first_event = None;
         if !suppress_bootstrap_event
             && !target_exists
             && expected_sequence == 0
@@ -608,6 +678,29 @@ impl crate::state::ServerState {
                 idempotency_key: None,
             };
             events.push(composite_envelope(&persistence_id, &bootstrap)?);
+            let declared_keys = self.declared_keys_for(tenant, entity_type);
+            let contract = crate::state::entity_ops::actor_creation_contract(
+                self,
+                tenant,
+                entity_type,
+                entity_id,
+                &serde_json::json!({}),
+                schema_pin,
+            )
+            .map_err(|error| {
+                DispatchError::Internal(format!(
+                    "verified composite bootstrap for {entity_type} is missing its creation contract: {error}"
+                ))
+            })?;
+            first_event = Some(temper_runtime::persistence::FirstEventMetadata {
+                contract_revision: contract.version,
+                schema_identity: contract.schema_digest.clone(),
+                declared_key_signature: crate::application_data::declared_key_signature(
+                    &declared_keys,
+                    &contract,
+                ),
+                contract,
+            });
             state.sequence_nr = state.sequence_nr.saturating_add(1);
             state.push_event_bounded(bootstrap);
         }
@@ -620,6 +713,7 @@ impl crate::state::ServerState {
                 state,
                 expected_sequence,
                 events,
+                first_event,
             },
         );
         Ok(())
@@ -793,23 +887,13 @@ impl crate::state::ServerState {
             });
         }
 
-        let known_absent_create_targets = if composite_agent_ctx.schema_pin.is_some() {
-            BTreeSet::new()
-        } else {
-            self.composite_known_absent_create_targets(tenant, &prepared)
-                .await?
-        };
-
         for write in &mut prepared {
-            let known_absent_create = known_absent_create_targets
-                .contains(&(write.entity_type.clone(), write.entity_id.clone()));
             write.preflight_target = Some(
                 self.preflight_composite_sub_write_transition(
                     tenant,
                     entity_type,
                     action,
                     write,
-                    known_absent_create,
                     composite_agent_ctx.schema_pin.as_ref(),
                 )
                 .await?,
@@ -849,71 +933,15 @@ impl crate::state::ServerState {
         Ok(prepared)
     }
 
-    async fn composite_known_absent_create_targets(
-        &self,
-        tenant: &TenantId,
-        prepared: &[PreparedCompositeSubWrite],
-    ) -> Result<BTreeSet<(String, String)>, DispatchError> {
-        let Some(query_plane) = self.query_plane_store() else {
-            return Ok(BTreeSet::new());
-        };
-
-        let mut by_type: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for write in prepared {
-            if write.uses_parent_gate
-                || write.action != "Create"
-                || self.entity_exists(tenant, &write.entity_type, &write.entity_id)
-            {
-                continue;
-            }
-            by_type
-                .entry(write.entity_type.clone())
-                .or_default()
-                .insert(write.entity_id.clone());
-        }
-
-        let mut absent = BTreeSet::new();
-        for (entity_type, ids) in by_type {
-            let entity_ids = ids.into_iter().collect::<Vec<_>>();
-            let Some(rows) = query_plane
-                .load_entity_catalog_rows(tenant.as_str(), &entity_type, &entity_ids)
-                .await
-                .map_err(|e| {
-                    DispatchError::Internal(format!(
-                        "query projection preflight failed for composite {entity_type} creates: {e}"
-                    ))
-                })?
-            else {
-                continue;
-            };
-
-            let present = rows
-                .into_iter()
-                .map(|row| row.entity_id)
-                .collect::<BTreeSet<_>>();
-            for entity_id in entity_ids {
-                if !present.contains(&entity_id) {
-                    absent.insert((entity_type.clone(), entity_id));
-                }
-            }
-        }
-
-        Ok(absent)
-    }
-
     async fn preflight_composite_sub_write_transition(
         &self,
         tenant: &TenantId,
         parent_entity_type: &str,
         parent_action: &str,
         write: &PreparedCompositeSubWrite,
-        known_absent_create: bool,
         schema_pin: Option<&SchemaExecutionPin>,
     ) -> Result<PreflightCompositeTarget, DispatchError> {
         let table = self.transition_table_for_context(tenant, &write.entity_type, schema_pin)?;
-        let known_absent_create = known_absent_create
-            && write.action == "Create"
-            && !self.entity_exists(tenant, &write.entity_type, &write.entity_id);
         let scoped_target = match schema_pin {
             Some(pin) => self
                 .get_scoped_entity_state(tenant, &write.entity_type, &write.entity_id, pin.clone())
@@ -921,9 +949,7 @@ impl crate::state::ServerState {
                 .ok(),
             None => None,
         };
-        let target_exists = if known_absent_create {
-            false
-        } else if schema_pin.is_some() {
+        let target_exists = if schema_pin.is_some() {
             scoped_target
                 .as_ref()
                 .is_some_and(|response| response.state.sequence_nr > 0)
@@ -931,9 +957,7 @@ impl crate::state::ServerState {
             self.ensure_entity_loaded(tenant, &write.entity_type, &write.entity_id)
                 .await
         };
-        let target_state = if known_absent_create {
-            synthetic_initial_state(&write.entity_type, &write.entity_id, &table)
-        } else if let Some(response) = scoped_target {
+        let target_state = if let Some(response) = scoped_target {
             response.state
         } else if target_exists {
             self.get_tenant_entity_state(tenant, &write.entity_type, &write.entity_id)

@@ -470,6 +470,7 @@ pub(super) fn spawn_key_index_rekey_after_spec_change(state: &PlatformState, ten
     let server = state.server.clone();
     let tenant = tenant_id.clone();
     tokio::spawn(async move {
+        server.populate_creation_contracts(&tenant).await;
         server.populate_key_index_from_snapshots(&tenant).await;
         // ADR-0155: same race for a newly declared [[vector]] path — re-index existing
         // entities here (watermark-gated,

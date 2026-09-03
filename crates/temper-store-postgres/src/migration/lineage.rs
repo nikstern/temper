@@ -136,7 +136,7 @@ fn classify_divergent_stream(
 
 fn pre_shared_migrations(lineage: MigrationLineage) -> Result<Vec<&'static Migration>, String> {
     let mut migrations = match lineage {
-        MigrationLineage::Fork => migrations_in_range(&FORK_MIGRATOR, 12, 13),
+        MigrationLineage::Fork => migrations_in_range(&FORK_MIGRATOR, 12, 14),
         MigrationLineage::LegacyUpstream => migrations_in_range(&LEGACY_UPSTREAM_MIGRATOR, 12, 15),
         MigrationLineage::FixedUpstream => {
             let mut fixed = vec![migration_at(&FORK_MIGRATOR, 12)?];

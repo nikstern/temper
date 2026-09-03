@@ -3,6 +3,8 @@
 mod action;
 mod authority;
 mod batch;
+mod create_or_verify;
+mod creation_contract;
 mod helpers;
 mod invocation;
 mod query;
@@ -27,6 +29,10 @@ use temper_wasm_sdk::data::{
     DataResultV1, ModuleDataError, ModuleDataErrorKind,
 };
 
+pub(crate) use creation_contract::{
+    compile_creation_contract, declared_key_signature, materialize_actor_creation_fields,
+    materialize_creation_fields,
+};
 use helpers::{
     commit, compact_committed_results, data_error, extract_id, internal_error, short_type,
     validate_value_budget, write_result,
@@ -38,6 +44,12 @@ use telemetry::{record_operation_fields, result_kind};
 
 #[cfg(test)]
 mod canonical_defaults_tests;
+#[cfg(all(test, feature = "sim"))]
+mod create_or_verify_dst_tests;
+#[cfg(test)]
+mod create_or_verify_fault_tests;
+#[cfg(all(test, feature = "sim"))]
+mod create_or_verify_tests;
 #[cfg(test)]
 mod entity_action_result_tests;
 #[cfg(test)]
@@ -212,6 +224,14 @@ impl ApplicationDataInvocation {
             DataOperationV1::EntityCreate { entity_type, value } => {
                 self.entity_create(&entity_type, value).await
             }
+            DataOperationV1::EntityCreateOrVerify {
+                entity_type,
+                idempotency_key,
+                value,
+            } => {
+                self.entity_create_or_verify(&entity_type, &idempotency_key, value)
+                    .await
+            }
             DataOperationV1::EntityPatch {
                 entity_type,
                 entity_id,
@@ -324,8 +344,15 @@ impl ApplicationDataInvocation {
             .state
             .acquire_commons_write_guardrail_lock(&self.authority.tenant)
             .await;
-        self.run_governed_write_prechecks(entity_type, &entity_id, "Create", "create", &fields)
-            .await?;
+        self.run_governed_write_prechecks(
+            entity_type,
+            &entity_id,
+            "Create",
+            "create",
+            &fields,
+            true,
+        )
+        .await?;
         let service = GovernedApplicationDataService::new(&self.state);
         let response = match &self.authority.target {
             ModuleDataTarget::TenantGlobal => {
@@ -386,8 +413,15 @@ impl ApplicationDataInvocation {
             .state
             .acquire_commons_write_guardrail_lock(&self.authority.tenant)
             .await;
-        self.run_governed_write_prechecks(entity_type, entity_id, "Patch", "patch", &prospective)
-            .await?;
+        self.run_governed_write_prechecks(
+            entity_type,
+            entity_id,
+            "Patch",
+            "patch",
+            &prospective,
+            true,
+        )
+        .await?;
         let service = GovernedApplicationDataService::new(&self.state);
         let response = match &self.authority.target {
             ModuleDataTarget::TenantGlobal => {

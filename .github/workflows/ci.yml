@@ -197,10 +197,19 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           cache-suffix: backend-parity
+      - name: Start single-node Redis Cluster
+        run: |
+          docker run -d --name temper-redis-cluster -p 6380:6379 redis:7 redis-server --cluster-enabled yes --cluster-config-file nodes.conf --cluster-require-full-coverage yes --cluster-announce-ip 127.0.0.1 --cluster-announce-port 6380
+          for attempt in {1..30}; do
+            if docker exec temper-redis-cluster redis-cli ping; then break; fi
+            sleep 1
+          done
+          docker exec temper-redis-cluster sh -c 'redis-cli cluster addslots $(seq 0 16383)'
       - name: Run durable reaction backend parity lane
         env:
           DATABASE_URL: postgres://temper:temper@localhost:5432/temper_test
           REDIS_URL: redis://localhost:6379/0
+          REDIS_CLUSTER_URL: redis-cluster://localhost:6380
         run: python3 scripts/validation.py run backend-parity
       - name: Upload lane timing
         if: always()

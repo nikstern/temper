@@ -132,6 +132,7 @@ fn generate_module_sdk_impl(
             DataOperationKind::EntityGet,
             DataOperationKind::EntityQuery,
             DataOperationKind::EntityCreate,
+            DataOperationKind::EntityCreateOrVerify,
             DataOperationKind::EntityPatch,
         ]
         .into_iter()

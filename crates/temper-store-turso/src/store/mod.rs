@@ -22,6 +22,7 @@ mod append_config;
 mod authz;
 mod blobs;
 mod constraints;
+mod create_or_verify;
 mod entity_listing;
 mod event_store;
 mod evolution;
@@ -484,6 +485,30 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_ENTITY_KEY_INDEX_ENTITY, ())
             .await
             .map_err(storage_error)?;
+        conn.execute(schema::CREATE_KEY_INDEX_BACKFILL_WATERMARK, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_CREATION_CONTRACTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_CREATION_COVERAGE_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_CREATE_OR_VERIFY_IDEMPOTENCY_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        if let Err(error) = conn
+            .execute(schema::ADD_CREATE_OR_VERIFY_NOTIFICATION_PENDING, ())
+            .await
+        {
+            let message = error.to_string();
+            if !message.contains("duplicate column")
+                && !message.contains("already exists")
+                && !message.contains("already has")
+            {
+                return Err(storage_error(error));
+            }
+        }
 
         // Entity vector index (ADR-0155) — declared vector paths for exact-scan kNN,
         // maintained write-behind (the event append is followed by the index write).

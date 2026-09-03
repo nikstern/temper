@@ -2,7 +2,8 @@ use super::*;
 use crate::migration::run_migrations;
 use sqlx::PgPool;
 use temper_runtime::persistence::{
-    EntityKeyRow, EventStore, QueryProjectionOrder, QueryProjectionOrderTarget,
+    CREATION_CONTRACT_VERSION_V1, CreationContract, EntityKeyRow, EventStore, FirstEventCommit,
+    QueryProjectionOrder, QueryProjectionOrderTarget,
 };
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {
@@ -18,6 +19,37 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
             actor_id: "store-projection-test".to_string(),
             kernel: None,
         },
+    }
+}
+
+fn first_event_commit(
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    mut event: PersistenceEnvelope,
+) -> FirstEventCommit {
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    event.sequence_nr = 1;
+    event.metadata.actor_id = persistence_id.clone();
+    FirstEventCommit {
+        tenant: tenant.to_string(),
+        entity_type: entity_type.to_string(),
+        entity_id: entity_id.to_string(),
+        persistence_id,
+        event,
+        contract: CreationContract {
+            version: CREATION_CONTRACT_VERSION_V1,
+            schema_digest: "test-schema".to_string(),
+            fields: Vec::new(),
+            digest: "test-contract".to_string(),
+        },
+        contract_revision: CREATION_CONTRACT_VERSION_V1,
+        schema_identity: "test-schema".to_string(),
+        declared_key_signature: String::new(),
+        key_rows: Vec::new(),
+        vector_rows: Vec::new(),
+        reconcile_vectors: false,
+        projection: None,
     }
 }
 
@@ -761,6 +793,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         });
         let mut envelope = test_envelope("Created", fields.clone());
         envelope.sequence_nr = 1;
+        let first_event = first_event_commit(&tenant, entity_type, entity_id, envelope.clone());
 
         let sequence_nr = store
             .create_data_only_entity_native(
@@ -769,7 +802,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
                 entity_id,
                 "Active",
                 &fields,
-                &envelope,
+                &first_event,
             )
             .await
             .unwrap();
@@ -826,7 +859,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
                 entity_id,
                 "Active",
                 &fields,
-                &envelope,
+                &first_event,
             )
             .await;
         assert!(matches!(
