@@ -2,6 +2,32 @@
 
 use super::{CommitToken, TypedAction, TypedWrite};
 
+/// Typed closed outcome from atomic create-or-verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateOrVerifyOutcome<T> {
+    /// This invocation committed the entity creation.
+    Created {
+        /// Durable commit for the authoritative entity.
+        commit: CommitToken,
+        /// Canonical authoritative entity value.
+        value: T,
+    },
+    /// An existing entity has the same immutable creation contract.
+    AlreadyMatches {
+        /// Durable commit for the authoritative entity, which may use another ID.
+        commit: CommitToken,
+        /// Canonical authoritative entity value.
+        value: T,
+    },
+    /// The requested creation contract conflicts with existing ownership.
+    Conflict {
+        /// Sorted, bounded canonical schema-owned field identifiers.
+        fields: Vec<String>,
+        /// Whether additional conflicting fields were withheld.
+        truncated: bool,
+    },
+}
+
 /// A typed value paired with the durable commit that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed<T> {

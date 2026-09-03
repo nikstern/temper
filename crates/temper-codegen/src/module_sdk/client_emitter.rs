@@ -274,9 +274,11 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
     let entity_get = grant.permits(DataOperationKind::EntityGet, canonical, None);
     let entity_query = grant.permits(DataOperationKind::EntityQuery, canonical, None);
     let entity_create = grant.permits(DataOperationKind::EntityCreate, canonical, None);
+    let entity_create_or_verify =
+        grant.permits(DataOperationKind::EntityCreateOrVerify, canonical, None);
     let entity_patch = grant.permits(DataOperationKind::EntityPatch, canonical, None);
 
-    if entity_create {
+    if entity_create || entity_create_or_verify {
         emit_create_command(source, generated, properties);
     }
     if entity_patch {
@@ -317,6 +319,9 @@ pub(super) fn emit_entity_client(source: &mut String, spec: EntityClientSpec<'_>
     }
     if entity_create {
         source.push_str(&format!("    pub fn create(&mut self, value: &{generated}Create<'_>) -> Result<TypedWrite<{generated}>, ModuleDataError> {{ decode_write(self.data.call(DataOperationV1::EntityCreate {{ entity_type: Self::ENTITY_TYPE.into(), value: encode_command_object(value)? }})?) }}\n"));
+    }
+    if entity_create_or_verify {
+        source.push_str(&format!("    pub fn create_or_verify(&mut self, idempotency_key: impl Into<String>, value: &{generated}Create<'_>) -> Result<CreateOrVerifyOutcome<{generated}>, ModuleDataError> {{ decode_create_or_verify(self.data.call(DataOperationV1::EntityCreateOrVerify {{ entity_type: Self::ENTITY_TYPE.into(), idempotency_key: idempotency_key.into(), value: encode_command_object(value)? }})?) }}\n"));
     }
     if entity_patch {
         source.push_str(&format!("    pub fn patch(&mut self, id: impl AsRef<str>, expected_sequence: Option<u64>, value: &{generated}Patch<'_>) -> Result<TypedWrite<{generated}>, ModuleDataError> {{ decode_write(self.data.call(DataOperationV1::EntityPatch {{ entity_type: Self::ENTITY_TYPE.into(), entity_id: id.as_ref().into(), expected_sequence, value: encode_command_object(value)? }})?) }}\n"));

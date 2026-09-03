@@ -1,4 +1,7 @@
 use super::*;
+#[path = "registration/creation.rs"]
+mod creation;
+use creation::build_creation_manifests;
 
 impl SpecRegistry {
     /// Register a tenant with its CSDL document and IOA specs.
@@ -203,6 +206,12 @@ impl SpecRegistry {
         };
         let csdl = canonical_model.emitted_csdl().clone();
         let csdl_xml = canonical_model.emitted_csdl_xml().to_owned();
+        let creation_manifests = build_creation_manifests(
+            &tenant_name,
+            &canonical_model,
+            &structural_csdl,
+            complete_sources.keys().cloned(),
+        )?;
         let cross_invariants = cross_invariants_source
             .as_ref()
             .filter(|s| !s.trim().is_empty())
@@ -372,6 +381,7 @@ impl SpecRegistry {
                     .collect();
             }
             existing_config.canonical_model = Arc::new(canonical_model);
+            existing_config.creation_manifests = creation_manifests;
             drop(locked_guards);
         } else {
             // First registration: create new TenantConfig.
@@ -408,6 +418,7 @@ impl SpecRegistry {
                 tenant,
                 TenantConfig {
                     canonical_model: Arc::new(canonical_model),
+                    creation_manifests,
                     csdl: Arc::new(csdl),
                     csdl_xml: Arc::new(csdl_xml),
                     entity_set_map,

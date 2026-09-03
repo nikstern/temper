@@ -77,6 +77,7 @@ fn source_append(
         key_rows: Vec::new(),
         vector_rows: Vec::new(),
         reconcile_vectors: false,
+        first_event: None,
     }
 }
 

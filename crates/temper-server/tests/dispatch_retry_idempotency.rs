@@ -12,7 +12,21 @@ use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
 
-const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.DispatchRetryTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="TimedTask">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="TimedTasks" EntityType="Temper.DispatchRetryTest.TimedTask"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
 
 const TASK_WITH_TIMEOUT_IOA: &str = r#"
 [automaton]

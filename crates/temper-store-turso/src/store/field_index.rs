@@ -19,7 +19,7 @@ use super::{TursoEventStore, TursoQueryProjectionRow};
 /// `entity_catalog.fields` but are not copied into the filter index.
 const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
 
-fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
+pub(super) fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(status.as_bytes());
     hasher.update(b"\n");
@@ -43,7 +43,10 @@ fn projection_hash(status: &str, fields: &serde_json::Value) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn canonical_projection_status<'a>(fallback: &'a str, state: &'a serde_json::Value) -> &'a str {
+pub(super) fn canonical_projection_status<'a>(
+    fallback: &'a str,
+    state: &'a serde_json::Value,
+) -> &'a str {
     state
         .get("status")
         .and_then(|value| value.as_str())
@@ -856,7 +859,7 @@ fn scalar_to_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn indexed_projection_fields(
+pub(super) fn indexed_projection_fields(
     status: &str,
     fields: &serde_json::Value,
 ) -> Vec<(String, Option<String>)> {

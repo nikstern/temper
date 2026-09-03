@@ -12,6 +12,10 @@ use crate::state::ServerState;
 
 impl ServerState {
     pub(crate) fn blob_store_for_tenant(&self, tenant: &TenantId) -> Result<BlobStore, String> {
+        #[cfg(test)]
+        if let Some(store) = &self.blob_store_override {
+            return Ok(store.clone());
+        }
         if let Some(vault) = self.secrets_vault.as_ref()
             && let Some(endpoint) = vault.get_secret(tenant.as_str(), "blob_endpoint")
             && !endpoint.trim().is_empty()

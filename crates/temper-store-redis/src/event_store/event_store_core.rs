@@ -87,149 +87,7 @@ macro_rules! redis_event_store_core_methods {
             &self,
             appends: &[PersistenceAppend],
         ) -> Result<Vec<PersistenceAppendResult>, PersistenceError> {
-            if appends.is_empty() {
-                return Ok(Vec::new());
-            }
-            // Redis has no query-plane projections; match `append_with_index_rows`
-            // by accepting and intentionally ignoring derived projection rows.
-            if let [append] = appends {
-                let sequence_nr = self
-                    .append(
-                        &append.persistence_id,
-                        append.expected_sequence,
-                        &append.events,
-                    )
-                    .await?;
-                return Ok(vec![PersistenceAppendResult {
-                    persistence_id: append.persistence_id.clone(),
-                    sequence_nr,
-                }]);
-            }
-
-            let mut seen = std::collections::BTreeSet::new();
-            let mut parsed = Vec::with_capacity(appends.len());
-            let mut tenant_name: Option<&str> = None;
-            for append in appends {
-                if !seen.insert(append.persistence_id.as_str()) {
-                    return Err(PersistenceError::Storage(format!(
-                        "duplicate persistence_id '{}' in append_batch",
-                        append.persistence_id
-                    )));
-                }
-                let (tenant, entity_type, entity_id) =
-                    parse_persistence_id_parts(&append.persistence_id)
-                        .map_err(PersistenceError::Storage)?;
-                if tenant_name.is_some_and(|expected| expected != tenant) {
-                    return Err(PersistenceError::Storage(
-                        "append_batch cannot span Redis tenant indexes".to_string(),
-                    ));
-                }
-                tenant_name = Some(tenant);
-                parsed.push((tenant, entity_type, entity_id));
-            }
-            let tenant = tenant_name.expect("non-empty appends set tenant");
-            let mut keys = Vec::with_capacity(appends.len() * 5 + 2);
-            let mut args = Vec::new();
-            args.push(appends.len().to_string());
-            for (append, (_, entity_type, entity_id)) in appends.iter().zip(parsed.iter()) {
-                keys.push(Self::seq_key(tenant, entity_type, entity_id));
-                keys.push(Self::events_key(tenant, entity_type, entity_id));
-                keys.push(Self::unscoped_journals_key(tenant, entity_type));
-                keys.push(Self::unscoped_generation_key(tenant, entity_type));
-                keys.push(Self::unscoped_fence_key(tenant, entity_type));
-                args.push(append.expected_sequence.to_string());
-                let entity_ref = EntityRef {
-                    entity_type: (*entity_type).to_string(),
-                    entity_id: (*entity_id).to_string(),
-                };
-                args.push(
-                    serde_json::to_string(&entity_ref)
-                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
-                );
-                args.push(Self::journal_member(entity_type, entity_id));
-                args.push(
-                    split_scoped_journal_entity_id(entity_id)
-                        .is_none()
-                        .then(|| encode_lex_component(entity_id))
-                        .unwrap_or_default(),
-                );
-                args.push(append.events.len().to_string());
-                let mut sequence = append.expected_sequence;
-                for event in &append.events {
-                    sequence += 1;
-                    let mut stored = event.clone();
-                    stored.sequence_nr = sequence;
-                    args.push(
-                        serde_json::to_string(&stored)
-                            .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
-                    );
-                }
-            }
-            keys.push(Self::tenant_entities_key(tenant));
-            keys.push(Self::tenant_journals_key(tenant));
-            let result: Vec<i64> = self
-                .append_batch_script
-                .evalsha_with_reload(&self.client, keys, args)
-                .await
-                .map_err(storage_error)?;
-            if result.first() == Some(&-1) {
-                return Err(PersistenceError::Storage(
-                    "stream descriptor publication fence".into(),
-                ));
-            }
-            if result.first() == Some(&0) {
-                let [_, append_index, actual] = result.as_slice() else {
-                    return Err(PersistenceError::Storage(format!(
-                        "unexpected Redis append_batch conflict result: {result:?}"
-                    )));
-                };
-                let index = usize::try_from(*append_index)
-                    .ok()
-                    .and_then(|index| index.checked_sub(1))
-                    .filter(|index| *index < appends.len())
-                    .ok_or_else(|| {
-                        PersistenceError::Storage(
-                            "Redis append_batch returned an invalid conflict index".to_string(),
-                        )
-                    })?;
-                return Err(PersistenceError::ConcurrencyViolation {
-                    expected: appends[index].expected_sequence,
-                    actual: *actual as u64,
-                });
-            }
-            if result.len() != appends.len() + 1 || result.first() != Some(&1) {
-                return Err(PersistenceError::Storage(format!(
-                    "unexpected Redis append_batch result: {result:?}"
-                )));
-            }
-
-            let mut results = Vec::with_capacity(appends.len());
-            for (((append, (tenant, entity_type, entity_id)), new_sequence), result_index) in
-                appends
-                    .iter()
-                    .zip(parsed.iter())
-                    .zip(result.iter().skip(1))
-                    .zip(0..appends.len())
-            {
-                let new_sequence = u64::try_from(*new_sequence).map_err(|_| {
-                    PersistenceError::Storage(format!(
-                        "Redis append_batch returned a negative sequence at index {result_index}"
-                    ))
-                })?;
-                self.update_segment_after_append(
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    append.expected_sequence,
-                    new_sequence,
-                )
-                .await?;
-                results.push(PersistenceAppendResult {
-                    persistence_id: append.persistence_id.clone(),
-                    sequence_nr: new_sequence,
-                });
-            }
-            Ok(results)
+            self.append_batch_inner(appends).await
         }
 
         async fn read_events(
@@ -475,6 +333,32 @@ macro_rules! redis_event_store_core_methods {
                 }
             }
 
+            out.sort();
+            out.dedup();
+            Ok(out)
+        }
+
+        async fn list_creation_source_ids_by_type(
+            &self,
+            tenant: &str,
+            entity_type: &str,
+        ) -> Result<Vec<String>, PersistenceError> {
+            let mut out = self.list_entity_ids_by_type(tenant, entity_type).await?;
+            let owners_key = Self::create_or_verify_hash_key(tenant, entity_type, "owners");
+            let entity_keys_key =
+                Self::create_or_verify_hash_key(tenant, entity_type, "entity_keys");
+            let owners: Vec<String> = self
+                .client
+                .hvals(&owners_key)
+                .await
+                .map_err(storage_error)?;
+            let indexed_entities: Vec<String> = self
+                .client
+                .hkeys(&entity_keys_key)
+                .await
+                .map_err(storage_error)?;
+            out.extend(owners);
+            out.extend(indexed_entities);
             out.sort();
             out.dedup();
             Ok(out)

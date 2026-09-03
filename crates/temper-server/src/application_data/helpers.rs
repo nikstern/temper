@@ -5,7 +5,7 @@ use temper_wasm_sdk::data::{
     ModuleDataErrorKind, Retryability,
 };
 
-const MAX_CANONICAL_IDENTIFIER_BYTES: usize = 256;
+pub(super) const MAX_CANONICAL_IDENTIFIER_BYTES: usize = 256;
 const COMPACT_OUTCOME_BYTES: usize = 3_840;
 
 pub(super) fn reserve_compact_response(
@@ -102,6 +102,15 @@ pub(super) fn validate_operation_identifiers(
         }
         DataOperationV1::EntityCreate { entity_type, value } => {
             identifier(entity_type)?;
+            super::extract_id(value).and_then(|id| identifier(&id))
+        }
+        DataOperationV1::EntityCreateOrVerify {
+            entity_type,
+            idempotency_key,
+            value,
+        } => {
+            identifier(entity_type)?;
+            identifier(idempotency_key)?;
             super::extract_id(value).and_then(|id| identifier(&id))
         }
         DataOperationV1::ActionInvoke {

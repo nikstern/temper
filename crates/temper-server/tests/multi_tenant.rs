@@ -19,6 +19,22 @@ use temper_spec::csdl::parse_csdl;
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
+const TASK_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.MultiTenantTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Tasks" EntityType="Temper.MultiTenantTest.Task"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
 /// Minimal Task spec — inline to avoid external dependencies.
 const TASK_IOA: &str = r#"
 [automaton]
@@ -56,8 +72,13 @@ fn build_multi_tenant_state() -> ServerState {
         &[("Order", ORDER_IOA)],
     );
 
-    let csdl2 = parse_csdl(CSDL_XML).expect("CSDL should parse");
-    registry.register_tenant("beta", csdl2, CSDL_XML.to_string(), &[("Task", TASK_IOA)]);
+    let task_csdl = parse_csdl(TASK_CSDL_XML).expect("Task CSDL should parse");
+    registry.register_tenant(
+        "beta",
+        task_csdl,
+        TASK_CSDL_XML.to_string(),
+        &[("Task", TASK_IOA)],
+    );
 
     let system = ActorSystem::new("multi-tenant-test");
     ServerState::from_registry(system, registry)

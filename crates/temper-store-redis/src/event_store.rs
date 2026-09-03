@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use fred::prelude::*;
 use fred::types::scripts::Script;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use temper_runtime::persistence::schema_deployment::{
     SchemaScope, StreamPublicationFence, scoped_journal_pin_prefix, split_scoped_journal_entity_id,
 };
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
-    storage_error,
+    CreateOrVerifyRequest, CreateOrVerifyStoreOutcome, EventStore, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -32,369 +32,81 @@ mod event_store_core;
 #[macro_use]
 #[path = "event_store/event_store_schema.rs"]
 mod event_store_schema;
-
-/// Lua script for atomic append: check expected sequence, append events, and index the journal.
-///
-/// KEYS[1] = seq_key, KEYS[2] = events_key, KEYS[3] = entities_key,
-/// KEYS[4] = journals_key, KEYS[5] = unscoped index, KEYS[6] = generation,
-/// KEYS[7] = publication fence
-/// ARGV[1] = expected_seq (string-encoded integer)
-/// ARGV[2] = entity_ref_json (for SADD into entities set)
-/// ARGV[3] = journal_member (order-preserving encoded type and id)
-/// ARGV[4] = unscoped member or empty, ARGV[5..N] = serialized event JSONs
-///
-/// Returns: `{1, new_seq}` on success, `{0, current_seq}` on conflict.
-const APPEND_LUA: &str = r#"
-local seq_key = KEYS[1]
-local events_key = KEYS[2]
-local entities_key = KEYS[3]
-local journals_key = KEYS[4]
-local unscoped_index_key = KEYS[5]
-local generation_key = KEYS[6]
-local fence_key = KEYS[7]
-local expected = tonumber(ARGV[1])
-local entity_ref = ARGV[2]
-local journal_member = ARGV[3]
-local unscoped_member = ARGV[4]
-
-local current = tonumber(redis.call('GET', seq_key) or '0')
-if current ~= expected then
-    return {0, current}
-end
-
-if unscoped_member ~= '' then
-    local fence_json = redis.call('GET', fence_key)
-    if fence_json then
-        local fence = cjson.decode(fence_json)
-        for i = 5, #ARGV do
-            local event = cjson.decode(ARGV[i])
-            if event.event_type == fence.publication_action
-                and (not event.metadata.kernel or event.metadata.kernel == cjson.null) then
-                return {-1, current}
-            end
-        end
-    end
-end
-
-for i = 5, #ARGV do
-    redis.call('RPUSH', events_key, ARGV[i])
-end
-
-local event_count = #ARGV - 4
-local new_seq = expected + event_count
-redis.call('SET', seq_key, tostring(new_seq))
-redis.call('SADD', entities_key, entity_ref)
-redis.call('ZADD', journals_key, 0, journal_member)
-if unscoped_member ~= '' then
-    redis.call('ZADD', unscoped_index_key, 0, unscoped_member)
-    redis.call('INCRBY', generation_key, event_count)
-end
-
-return {1, new_seq}
-"#;
-
-/// Atomically validate generations and replace an installed application's fences.
-const ACTIVATE_UNSCOPED_FENCE_LUA: &str = r#"
-local current_pointer = redis.call('GET', KEYS[1]) or ''
-if current_pointer ~= ARGV[1] then
-    return {-2}
-end
-local binding_count = tonumber(ARGV[2])
-for i = 1, binding_count do
-    local expected = tonumber(ARGV[2 + (i - 1) * 2 + 1])
-    if expected >= 0 then
-        local actual = tonumber(redis.call('GET', KEYS[2 + (i - 1) * 2]) or '0')
-        if actual ~= expected then
-            return {0, i, actual}
-        end
-    end
-end
-for i = 1, binding_count do
-    local fence_json = ARGV[2 + (i - 1) * 2 + 2]
-    local fence_key = KEYS[3 + (i - 1) * 2]
-    if fence_json == '' then
-        redis.call('DEL', fence_key)
-    else
-        redis.call('SET', fence_key, fence_json)
-    end
-end
-local new_pointer = ARGV[3 + binding_count * 2]
-if new_pointer == '' then
-    redis.call('DEL', KEYS[1])
-else
-    redis.call('SET', KEYS[1], new_pointer)
-end
-return {1}
-"#;
-
-/// Lua script for one atomic, same-tenant multi-journal append.
-///
-/// Keys are `(sequence, events)` pairs followed by the tenant entity and journal
-/// indexes. Arguments are the append count followed by, for each append,
-/// `(expected sequence, entity ref, journal member, event count, events...)`.
-/// Every optimistic fence is checked before any key is mutated.
-const APPEND_BATCH_LUA: &str = r#"
-local append_count = tonumber(ARGV[1])
-local arg_index = 2
-local key_index = 1
-
-for append_index = 1, append_count do
-    local expected = tonumber(ARGV[arg_index])
-    local unscoped_member = ARGV[arg_index + 3]
-    local event_count = tonumber(ARGV[arg_index + 4])
-    local current = tonumber(redis.call('GET', KEYS[key_index]) or '0')
-    if current ~= expected then
-        return {0, append_index, current}
-    end
-    if unscoped_member ~= '' then
-        local fence_json = redis.call('GET', KEYS[key_index + 4])
-        if fence_json then
-            local fence = cjson.decode(fence_json)
-            for event_offset = 1, event_count do
-                local event = cjson.decode(ARGV[arg_index + 4 + event_offset])
-                if event.event_type == fence.publication_action
-                    and (not event.metadata.kernel or event.metadata.kernel == cjson.null) then
-                    return {-1, append_index, current}
-                end
-            end
-        end
-    end
-    arg_index = arg_index + 5 + event_count
-    key_index = key_index + 5
-end
-
-local entities_key = KEYS[append_count * 5 + 1]
-local journals_key = KEYS[append_count * 5 + 2]
-local result = {1}
-arg_index = 2
-key_index = 1
-
-for append_index = 1, append_count do
-    local expected = tonumber(ARGV[arg_index])
-    local entity_ref = ARGV[arg_index + 1]
-    local journal_member = ARGV[arg_index + 2]
-    local unscoped_member = ARGV[arg_index + 3]
-    local event_count = tonumber(ARGV[arg_index + 4])
-    for event_offset = 1, event_count do
-        redis.call('RPUSH', KEYS[key_index + 1], ARGV[arg_index + 4 + event_offset])
-    end
-    local new_seq = expected + event_count
-    redis.call('SET', KEYS[key_index], tostring(new_seq))
-    redis.call('SADD', entities_key, entity_ref)
-    redis.call('ZADD', journals_key, 0, journal_member)
-    if unscoped_member ~= '' then
-        redis.call('ZADD', KEYS[key_index + 2], 0, unscoped_member)
-        redis.call('INCRBY', KEYS[key_index + 3], event_count)
-    end
-    table.insert(result, new_seq)
-    arg_index = arg_index + 5 + event_count
-    key_index = key_index + 5
-end
-
-return result
-"#;
-
-/// Atomically advances the bounded historical-journal index backfill.
-const BACKFILL_UNSCOPED_INDEX_LUA: &str = r#"
-local current = redis.call('GET', KEYS[1]) or ''
-if current ~= ARGV[1] then
-    return {0}
-end
-for i = 4, #ARGV do
-    redis.call('ZADD', KEYS[2], 0, ARGV[i])
-end
-redis.call('SET', KEYS[1], ARGV[2])
-if ARGV[3] == '1' then
-    redis.call('SET', KEYS[3], '1')
-end
-return {1}
-"#;
+#[path = "event_store/batch.rs"]
+mod batch;
+#[path = "event_store/create_or_verify.rs"]
+mod create_or_verify;
+#[path = "event_store/first_event.rs"]
+mod first_event;
+#[path = "event_store/first_event_mutation.rs"]
+mod first_event_mutation;
+#[path = "event_store/key_migration.rs"]
+mod key_migration;
+#[path = "event_store/keyspace.rs"]
+mod keyspace;
+#[path = "event_store/projection.rs"]
+mod projection;
+#[path = "event_store/records.rs"]
+mod records;
+#[path = "event_store/scripts.rs"]
+mod scripts;
+use records::{
+    EntityRef, SegmentRecord, SnapshotHistoryRecord, SnapshotRecord, contract_record_json,
+};
 
 /// Redis-backed event store.
 #[derive(Clone)]
 pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
+    append_with_keys_script: Script,
     append_batch_script: Script,
     activate_unscoped_fence_script: Script,
     backfill_unscoped_index_script: Script,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SnapshotRecord {
-    sequence_nr: u64,
-    snapshot: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SnapshotHistoryRecord {
-    sequence_nr: u64,
-    snapshot: Vec<u8>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SegmentRecord {
-    segment_index: u64,
-    start_sequence_nr: u64,
-    end_sequence_nr: Option<u64>,
-    snapshot_sequence: Option<u64>,
-    event_count: u64,
-    sealed_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct EntityRef {
-    entity_type: String,
-    entity_id: String,
+    create_or_verify_script: Script,
+    commit_first_event_script: Script,
+    reconcile_creation_script: Script,
+    publish_creation_coverage_script: Script,
+    clustered: bool,
 }
 
 impl RedisEventStore {
     /// Connect to Redis using a URL such as `redis://localhost:6379/0`.
     pub async fn new(redis_url: &str) -> Result<Self, PersistenceError> {
         let config = Config::from_url(redis_url).map_err(storage_error)?;
+        let clustered = config.server.is_clustered();
         let client = Builder::from_config(config)
             .build()
             .map_err(storage_error)?;
         client.init().await.map_err(storage_error)?;
         Ok(Self {
             client: Arc::new(client),
-            append_script: Script::from_lua(APPEND_LUA),
-            append_batch_script: Script::from_lua(APPEND_BATCH_LUA),
-            activate_unscoped_fence_script: Script::from_lua(ACTIVATE_UNSCOPED_FENCE_LUA),
-            backfill_unscoped_index_script: Script::from_lua(BACKFILL_UNSCOPED_INDEX_LUA),
+            append_script: Script::from_lua(scripts::APPEND_LUA),
+            append_with_keys_script: Script::from_lua(scripts::APPEND_WITH_KEYS_LUA),
+            append_batch_script: Script::from_lua(first_event_mutation::compose(
+                scripts::APPEND_BATCH_LUA,
+            )),
+            activate_unscoped_fence_script: Script::from_lua(scripts::ACTIVATE_UNSCOPED_FENCE_LUA),
+            backfill_unscoped_index_script: Script::from_lua(scripts::BACKFILL_UNSCOPED_INDEX_LUA),
+            create_or_verify_script: Script::from_lua(first_event_mutation::compose(
+                create_or_verify::CREATE_OR_VERIFY_LUA,
+            )),
+            commit_first_event_script: Script::from_lua(first_event_mutation::compose(
+                first_event::COMMIT_FIRST_EVENT_LUA,
+            )),
+            reconcile_creation_script: Script::from_lua(
+                first_event::RECONCILE_CREATION_METADATA_LUA,
+            ),
+            publish_creation_coverage_script: Script::from_lua(
+                first_event::PUBLISH_CREATION_COVERAGE_LUA,
+            ),
+            clustered,
         })
     }
 
     /// Return a reference to the underlying Redis client.
     pub fn client(&self) -> &fred::clients::Client {
         &self.client
-    }
-
-    fn events_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
-        format!(
-            "{}:events:{tenant}:{entity_type}:{entity_id}",
-            crate::keys::PREFIX
-        )
-    }
-
-    fn seq_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
-        format!(
-            "{}:events_seq:{tenant}:{entity_type}:{entity_id}",
-            crate::keys::PREFIX
-        )
-    }
-
-    fn snapshot_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
-        format!(
-            "{}:snapshot:{tenant}:{entity_type}:{entity_id}",
-            crate::keys::PREFIX
-        )
-    }
-
-    fn snapshot_history_key(
-        tenant: &str,
-        entity_type: &str,
-        entity_id: &str,
-        sequence_nr: u64,
-    ) -> String {
-        format!(
-            "{}:snapshot_history:{tenant}:{entity_type}:{entity_id}:{sequence_nr}",
-            crate::keys::PREFIX
-        )
-    }
-
-    fn current_segment_key(tenant: &str, entity_type: &str, entity_id: &str) -> String {
-        format!(
-            "{}:event_segment_current:{tenant}:{entity_type}:{entity_id}",
-            crate::keys::PREFIX
-        )
-    }
-
-    fn segment_key(tenant: &str, entity_type: &str, entity_id: &str, segment_index: u64) -> String {
-        format!(
-            "{}:event_segment:{tenant}:{entity_type}:{entity_id}:{segment_index}",
-            crate::keys::PREFIX
-        )
-    }
-
-    fn tenant_entities_key(tenant: &str) -> String {
-        format!("{}:entities:{tenant}", crate::keys::PREFIX)
-    }
-
-    fn tenant_journals_key(tenant: &str) -> String {
-        format!("{}:journals:{tenant}", crate::keys::PREFIX)
-    }
-
-    fn unscoped_journals_key(tenant: &str, entity_type: &str) -> String {
-        format!(
-            "{}:unscoped_journals:{tenant}:{}",
-            crate::keys::PREFIX,
-            encode_lex_component(entity_type)
-        )
-    }
-
-    fn unscoped_index_cursor_key(tenant: &str, entity_type: &str) -> String {
-        format!(
-            "{}:unscoped_journals_cursor:{tenant}:{}",
-            crate::keys::PREFIX,
-            encode_lex_component(entity_type)
-        )
-    }
-
-    fn unscoped_index_complete_key(tenant: &str, entity_type: &str) -> String {
-        format!(
-            "{}:unscoped_journals_complete:{tenant}:{}",
-            crate::keys::PREFIX,
-            encode_lex_component(entity_type)
-        )
-    }
-
-    fn unscoped_generation_key(tenant: &str, entity_type: &str) -> String {
-        format!(
-            "{}:unscoped_generation:{tenant}:{}",
-            crate::keys::PREFIX,
-            encode_lex_component(entity_type)
-        )
-    }
-
-    fn unscoped_fence_key(tenant: &str, entity_type: &str) -> String {
-        format!(
-            "{}:unscoped_fence:{tenant}:{}",
-            crate::keys::PREFIX,
-            encode_lex_component(entity_type)
-        )
-    }
-
-    fn unscoped_application_fence_key(tenant: &str, application_id: &str) -> String {
-        format!(
-            "{}:unscoped_application_fence:{tenant}:{}",
-            crate::keys::PREFIX,
-            encode_lex_component(application_id)
-        )
-    }
-
-    fn journal_member(entity_type: &str, entity_id: &str) -> String {
-        format!(
-            "{}!{}",
-            encode_lex_component(entity_type),
-            encode_lex_component(entity_id)
-        )
-    }
-
-    fn parse_journal_member(member: &str) -> Result<(String, String), PersistenceError> {
-        let (entity_type, entity_id) = member.split_once('!').ok_or_else(|| {
-            PersistenceError::Serialization("invalid Redis journal index member".to_string())
-        })?;
-        Ok((
-            decode_lex_component(entity_type)?,
-            decode_lex_component(entity_id)?,
-        ))
-    }
-
-    fn trajectory_key(tenant: &str) -> String {
-        format!("{}:trajectories:{tenant}", crate::keys::PREFIX)
     }
 
     async fn update_segment_after_append(
@@ -495,9 +207,203 @@ impl RedisEventStore {
             .map_err(storage_error)?;
         Ok(entries)
     }
+
+    async fn append_with_keys_inner(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<u64, PersistenceError> {
+        #[derive(Serialize)]
+        struct LuaKeyRow<'a> {
+            owner_field: String,
+            #[serde(skip)]
+            _key_name: &'a str,
+        }
+
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let contracts_key = Self::create_or_verify_hash_key(tenant, entity_type, "contracts");
+        let stored_contract: Option<String> = self
+            .client
+            .hget(&contracts_key, entity_id)
+            .await
+            .map_err(storage_error)?;
+        let coverage_metadata = stored_contract
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+        let metadata_string = |name: &str| {
+            coverage_metadata
+                .as_ref()
+                .and_then(|value| value.get(name))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let schema_identity = metadata_string("schema_identity");
+        let declared_key_signature = metadata_string("declared_key_signature");
+        let contract_revision = coverage_metadata
+            .as_ref()
+            .and_then(|value| value.get("contract_revision"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        let encoded_keys = key_rows
+            .iter()
+            .map(|row| LuaKeyRow {
+                owner_field: format!("{}\0{}", row.key_name, row.key_hash),
+                _key_name: &row.key_name,
+            })
+            .collect::<Vec<_>>();
+        let mut args = vec![
+            expected_sequence.to_string(),
+            serde_json::to_string(&EntityRef {
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+            })
+            .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            Self::journal_member(entity_type, entity_id),
+            if split_scoped_journal_entity_id(entity_id).is_none() {
+                encode_lex_component(entity_id)
+            } else {
+                String::new()
+            },
+            entity_id.to_string(),
+            serde_json::to_string(&encoded_keys)
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            schema_identity.clone(),
+            contract_revision.map_or_else(String::new, |value| value.to_string()),
+            declared_key_signature.clone(),
+            format!("[{}!", encode_lex_component(entity_type)),
+            format!("[{}!\u{10ffff}", encode_lex_component(entity_type)),
+        ];
+        let mut sequence = expected_sequence;
+        for event in events {
+            sequence += 1;
+            let mut event = event.clone();
+            event.sequence_nr = sequence;
+            args.push(
+                serde_json::to_string(&event)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+            );
+        }
+        let keys = vec![
+            Self::seq_key(tenant, entity_type, entity_id),
+            Self::events_key(tenant, entity_type, entity_id),
+            Self::tenant_entities_key(tenant),
+            Self::tenant_journals_key(tenant),
+            Self::unscoped_journals_key(tenant, entity_type),
+            Self::unscoped_generation_key(tenant, entity_type),
+            Self::unscoped_fence_key(tenant, entity_type),
+            Self::create_or_verify_hash_key(tenant, entity_type, "owners"),
+            Self::create_or_verify_hash_key(tenant, entity_type, "entity_keys"),
+            contracts_key,
+            contract_revision.map_or_else(
+                || {
+                    Self::create_or_verify_hash_key(
+                        tenant,
+                        &format!("{entity_type}:{entity_id}"),
+                        "unused_coverage",
+                    )
+                },
+                |revision| {
+                    Self::creation_coverage_key(
+                        tenant,
+                        entity_type,
+                        &schema_identity,
+                        revision,
+                        &declared_key_signature,
+                    )
+                },
+            ),
+        ];
+        let result: Vec<i64> = self
+            .append_with_keys_script
+            .evalsha_with_reload(&self.client, keys, args)
+            .await
+            .map_err(storage_error)?;
+        match result.as_slice() {
+            [1, new_sequence] => {
+                let new_sequence = u64::try_from(*new_sequence).map_err(storage_error)?;
+                self.update_segment_after_append(
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    expected_sequence,
+                    new_sequence,
+                )
+                .await?;
+                Ok(new_sequence)
+            }
+            [0, actual] => Err(PersistenceError::ConcurrencyViolation {
+                expected: expected_sequence,
+                actual: u64::try_from(*actual).map_err(storage_error)?,
+            }),
+            [-1, _] => Err(PersistenceError::Storage(
+                "stream descriptor publication fence".to_string(),
+            )),
+            [-2, _] => Err(PersistenceError::Storage(
+                "duplicate declared key".to_string(),
+            )),
+            other => Err(PersistenceError::Storage(format!(
+                "unexpected append-with-keys Lua result: {other:?}"
+            ))),
+        }
+    }
 }
 
 impl EventStore for RedisEventStore {
+    async fn reconcile_creation_metadata(
+        &self,
+        repair: &temper_runtime::persistence::CreationMetadataRepair,
+    ) -> Result<(), PersistenceError> {
+        self.reconcile_creation_metadata_inner(repair).await
+    }
+
+    async fn publish_creation_coverage(
+        &self,
+        publication: &temper_runtime::persistence::CreationCoveragePublication,
+    ) -> Result<(), PersistenceError> {
+        self.publish_creation_coverage_inner(publication).await
+    }
+
+    async fn commit_first_event(
+        &self,
+        commit: &temper_runtime::persistence::FirstEventCommit,
+    ) -> Result<u64, PersistenceError> {
+        self.commit_first_event_inner(commit).await
+    }
+
+    async fn create_or_verify(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<CreateOrVerifyStoreOutcome, PersistenceError> {
+        request.first_event.validate()?;
+        self.create_or_verify_inner(request).await
+    }
+
+    async fn acknowledge_create_or_verify_notification(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<(), PersistenceError> {
+        self.acknowledge_notification_inner(request).await
+    }
+
+    async fn append_with_index_rows(
+        &self,
+        persistence_id: &str,
+        expected_sequence: u64,
+        events: &[PersistenceEnvelope],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        _vector_rows: &[temper_runtime::persistence::EntityVectorRow],
+        _reconcile_vectors: bool,
+    ) -> Result<u64, PersistenceError> {
+        self.append_with_keys_inner(persistence_id, expected_sequence, events, key_rows)
+            .await
+    }
+
     redis_event_store_core_methods!();
     redis_event_store_schema_methods!();
 }

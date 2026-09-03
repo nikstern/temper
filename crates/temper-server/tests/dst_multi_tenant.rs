@@ -37,14 +37,36 @@ to = "Cancelled"
 kind = "input"
 "#;
 
+const TASK_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.MultiTenantTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Task">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Tasks" EntityType="Temper.MultiTenantTest.Task"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
 fn build_two_tenant_state(seed: u64) -> temper_server::ServerState {
     common::build_two_tenant_state(
         seed,
         "dst-mt",
-        "tenant-a",
-        &[("Order", common::ORDER_IOA)],
-        "tenant-b",
-        &[("Task", TASK_IOA)],
+        common::TenantFixture {
+            tenant: "tenant-a",
+            csdl_xml: common::CSDL_XML,
+            entities: &[("Order", common::ORDER_IOA)],
+        },
+        common::TenantFixture {
+            tenant: "tenant-b",
+            csdl_xml: TASK_CSDL,
+            entities: &[("Task", TASK_IOA)],
+        },
     )
 }
 

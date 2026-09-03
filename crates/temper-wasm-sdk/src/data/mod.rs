@@ -18,8 +18,8 @@ pub use artifact::{
 };
 pub use client::{
     DataClient, FileReader, FileWriter, OpenedFileRead, TypedAction, TypedEntity, TypedPage,
-    TypedWrite, decode_action, decode_entity, decode_file_read, decode_file_write, decode_page,
-    decode_write,
+    TypedWrite, decode_action, decode_create_or_verify, decode_entity, decode_file_read,
+    decode_file_write, decode_page, decode_write,
 };
 pub use command::{NullablePatch, encode_command_object};
 pub use contracts::*;

@@ -9,6 +9,7 @@ use temper_runtime::persistence::{
 use super::{PublishedArtifactUpsert, QueryProjectionUpsert, TursoEventStore};
 use crate::TursoSpecVerificationUpdate;
 
+mod create_or_verify;
 mod evolution_tenant;
 mod policy_approval;
 
@@ -408,6 +409,7 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
             key_rows: Vec::new(),
             vector_rows: Vec::new(),
             reconcile_vectors: false,
+            first_event: None,
         }])
         .await
         .unwrap_err();
@@ -426,7 +428,7 @@ async fn append_batch_zero_sequence_detects_existing_stream_by_unique_key() {
 }
 
 #[tokio::test]
-async fn append_batch_commits_vectors_and_ignores_unsupported_keys() {
+async fn append_batch_commits_vectors_and_declared_keys() {
     let store = make_store("append-batch-projections").await;
     let vector_append = PersistenceAppend {
         persistence_id: "tenant-a:Item:item-vector".to_string(),
@@ -439,6 +441,7 @@ async fn append_batch_commits_vectors_and_ignores_unsupported_keys() {
             vector: vec![1.0, 0.0],
         }],
         reconcile_vectors: true,
+        first_event: None,
     };
     let companion = PersistenceAppend {
         persistence_id: "tenant-a:_CollectionWorkflow:workflow-1".to_string(),
@@ -447,6 +450,7 @@ async fn append_batch_commits_vectors_and_ignores_unsupported_keys() {
         key_rows: Vec::new(),
         vector_rows: Vec::new(),
         reconcile_vectors: false,
+        first_event: None,
     };
     store
         .append_batch(&[vector_append, companion])
@@ -469,11 +473,12 @@ async fn append_batch_commits_vectors_and_ignores_unsupported_keys() {
         }],
         vector_rows: Vec::new(),
         reconcile_vectors: false,
+        first_event: None,
     };
     store
         .append_batch(&[keyed])
         .await
-        .expect("Turso ignores key rows like its single-stream append path");
+        .expect("Turso co-commits declared key rows");
     assert_eq!(
         store
             .read_events("tenant-a:Item:item-keyed", 0)
@@ -481,6 +486,14 @@ async fn append_batch_commits_vectors_and_ignores_unsupported_keys() {
             .unwrap()
             .len(),
         1
+    );
+    assert_eq!(
+        store
+            .lookup_by_key("tenant-a", "Item", "ByName", "sha256:test")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("item-keyed")
     );
 }
 

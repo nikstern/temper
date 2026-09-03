@@ -91,23 +91,41 @@ pub fn build_single_tenant_state(
     (state, sim_store)
 }
 
+/// One tenant's linked schema and automata for a multi-tenant test state.
+pub struct TenantFixture<'a> {
+    /// Tenant identifier registered in the test registry.
+    pub tenant: &'a str,
+    /// CSDL source declaring every registered entity type.
+    pub csdl_xml: &'a str,
+    /// Entity type and IOA source pairs registered for this tenant.
+    pub entities: &'a [(&'a str, &'a str)],
+}
+
 /// Build a `ServerState` with two tenants for isolation tests.
 pub fn build_two_tenant_state(
     seed: u64,
     system_name: &str,
-    tenant_a: &str,
-    entities_a: &[(&str, &str)],
-    tenant_b: &str,
-    entities_b: &[(&str, &str)],
+    tenant_a: TenantFixture<'_>,
+    tenant_b: TenantFixture<'_>,
 ) -> ServerState {
     let sim_store = SimEventStore::no_faults(seed);
 
     let mut registry = SpecRegistry::new();
-    let csdl_a = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(tenant_a, csdl_a, CSDL_XML.to_string(), entities_a);
+    let csdl_a = parse_csdl(tenant_a.csdl_xml).expect("tenant A CSDL parse");
+    registry.register_tenant(
+        tenant_a.tenant,
+        csdl_a,
+        tenant_a.csdl_xml.to_string(),
+        tenant_a.entities,
+    );
 
-    let csdl_b = parse_csdl(CSDL_XML).expect("CSDL parse");
-    registry.register_tenant(tenant_b, csdl_b, CSDL_XML.to_string(), entities_b);
+    let csdl_b = parse_csdl(tenant_b.csdl_xml).expect("tenant B CSDL parse");
+    registry.register_tenant(
+        tenant_b.tenant,
+        csdl_b,
+        tenant_b.csdl_xml.to_string(),
+        tenant_b.entities,
+    );
 
     let system = ActorSystem::new(system_name);
     let mut state = ServerState::from_registry(system, registry);

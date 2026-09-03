@@ -35,7 +35,7 @@ fn unknown_tenant_returns_none() {
 fn multiple_tenants_isolated() {
     let mut registry = SpecRegistry::new();
     let (csdl1, csdl_xml1) = minimal_csdl();
-    let (csdl2, csdl_xml2) = minimal_csdl();
+    let (csdl2, csdl_xml2) = task_csdl();
 
     registry.register_tenant("alpha", csdl1, csdl_xml1, &[("Order", ORDER_IOA)]);
     registry.register_tenant("beta", csdl2, csdl_xml2, &[("Task", ORDER_IOA)]);

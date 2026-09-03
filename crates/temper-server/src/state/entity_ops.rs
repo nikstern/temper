@@ -21,6 +21,13 @@ use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
 
 mod bootstrap;
+mod creation;
+mod projection_metrics;
+pub(crate) use creation::actor_creation_contract;
+use projection_metrics::{
+    record_projection_update_error, record_projection_update_started,
+    record_projection_update_success,
+};
 
 fn actor_idle_timeout_secs() -> i64 {
     static ACTOR_IDLE_TIMEOUT: OnceLock<i64> = OnceLock::new();
@@ -53,86 +60,6 @@ pub(crate) fn validate_global_entity_id(entity_id: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn record_projection_update_started(
-    tenant: &TenantId,
-    entity_type: &str,
-    operation: &str,
-    source: &str,
-) {
-    crate::query_projection_metrics::record_update_started(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-    );
-}
-
-fn record_projection_update_success(
-    tenant: &TenantId,
-    entity_type: &str,
-    operation: &str,
-    source: &str,
-    sequence_nr: u64,
-    started_at: Instant,
-) {
-    let duration = started_at.elapsed();
-    crate::query_projection_metrics::record_update_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "ok",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_end_to_end_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "ok",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_applied_sequence(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        sequence_nr,
-    );
-}
-
-fn record_projection_update_error(
-    tenant: &TenantId,
-    entity_type: &str,
-    operation: &str,
-    source: &str,
-    started_at: Instant,
-) {
-    let duration = started_at.elapsed();
-    crate::query_projection_metrics::record_update_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "error",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_end_to_end_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "error",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_error(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-    );
 }
 
 /// Error returned when the verification gate blocks an operation.
@@ -777,6 +704,7 @@ impl ServerState {
             BTreeMap::new(),
             None,
             None,
+            false,
         )
     }
 
@@ -797,6 +725,7 @@ impl ServerState {
             BTreeMap::new(),
             Some(schema_pin),
             None,
+            false,
         )
     }
 
@@ -813,6 +742,7 @@ impl ServerState {
         initial_reference_evidence: BTreeMap<String, bool>,
         schema_pin: Option<SchemaExecutionPin>,
         creation_idempotency_key: Option<String>,
+        recovered_stream: bool,
     ) -> Option<ActorRef<EntityMsg>> {
         if schema_pin.is_none() && validate_global_entity_id(entity_id).is_err() {
             tracing::warn!(
@@ -872,6 +802,15 @@ impl ServerState {
         // ADR-0048 sub-decision 5: every actor gets the shared idempotency
         // cache so it can dedupe duplicate asks produced by retry storms.
         let tenant_blob_store = self.blob_store_for_tenant(tenant).ok();
+        let creation_contract = creation::actor_creation_contract_for_spawn(
+            self,
+            tenant,
+            entity_type,
+            &initial_fields,
+            schema_pin.as_ref(),
+            entity_id,
+            recovered_stream,
+        )?;
         let snapshot_queue = self
             .snapshot_write_queue
             .lock()
@@ -888,12 +827,14 @@ impl ServerState {
                 backend,
             )
             .with_tenant(tenant.as_str())
+            .with_creation_contract(creation_contract.clone())
             .with_initial_reference_evidence(initial_reference_evidence.clone())
             .with_snapshot_queue(snapshot_queue)
             .with_idempotency_cache(self.idempotency_cache.clone())
             .with_blob_store(tenant_blob_store.clone()),
             None => EntityActor::new(entity_type, entity_id, table, initial_fields)
                 .with_tenant(tenant.as_str())
+                .with_creation_contract(creation_contract)
                 .with_initial_reference_evidence(initial_reference_evidence)
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
@@ -1254,7 +1195,7 @@ impl ServerState {
     ) -> Result<(), AuthzDenial> {
         let engine = AuthzEngine::new(policy_text)
             .map_err(|error| AuthzDenial::EngineError(error.to_string()))?;
-        let attrs: std::collections::HashMap<_, _> = resource_attrs
+        let attrs: std::collections::HashMap<_, _> = resource_attrs // determinism-ok: Cedar lookup-only API
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
@@ -1573,6 +1514,7 @@ impl ServerState {
                 initial_reference_evidence,
                 schema_pin,
                 creation_idempotency_key.clone(),
+                false,
             )
             .ok_or_else(|| {
                 format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
@@ -1809,7 +1751,7 @@ impl ServerState {
             from_status: String::new(),
             to_status: state.status.clone(),
             timestamp: sim_now(),
-            params: initial_fields,
+            params: initial_fields.clone(),
             idempotency_key: None,
         };
         let payload = serde_json::to_value(&created)
@@ -1826,6 +1768,16 @@ impl ServerState {
                 actor_id: persistence_id.clone(),
                 kernel: None,
             },
+        };
+        let input = creation::FirstEventInput {
+            entity_state: &state,
+            persistence_id: &persistence_id,
+            event: envelope,
+        };
+        let Some(first_event) =
+            creation::first_event_commit(self, tenant, entity_type, entity_id, input)
+        else {
+            return Ok(None);
         };
 
         let projection_fields = self.query_projection_fields(tenant, entity_type, &state.fields);
@@ -1853,7 +1805,7 @@ impl ServerState {
                     status: &state.status,
                     fields: &projection_fields,
                     state: &projection_state,
-                    event: &envelope,
+                    first_event: &first_event,
                 })
                 .instrument(native_span)
                 .await
@@ -1901,9 +1853,7 @@ impl ServerState {
             }
         } else {
             let append_started_at = Instant::now(); // determinism-ok: production-only append wait metric
-            let append_result = store
-                .append(&persistence_id, state.sequence_nr, &[envelope])
-                .await;
+            let append_result = store.commit_first_event(&first_event).await;
             runtime_metrics::record_event_store_append_wait(
                 backend.as_str(),
                 "append",
@@ -2467,7 +2417,21 @@ impl ServerState {
             return false;
         }
 
-        let Some(actor_ref) = self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id) else {
+        let initial_fields = events
+            .first()
+            .and_then(|event| event.payload.get("params"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(actor_ref) = self.get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            BTreeMap::new(),
+            None,
+            None,
+            true,
+        ) else {
             return false;
         };
 

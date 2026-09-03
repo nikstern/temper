@@ -7,12 +7,12 @@ use temper_runtime::persistence::schema_deployment::{
     split_scoped_journal_entity_id,
 };
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, storage_error,
-    unpack_f32_le,
+    CreateOrVerifyRequest, CreateOrVerifyStoreOutcome, EntityVectorCandidate, EntityVectorRow,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, pack_f32_le, storage_error, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
-use tracing::{error, instrument, warn};
+use tracing::{instrument, warn};
 
 use super::TursoEventStore;
 use super::append_config::{append_attempt_timeout, append_max_attempts};
@@ -34,7 +34,7 @@ struct PreparedEventInsert {
     expected_sequence: u64,
 }
 
-async fn assert_scoped_journal_write_fence(
+pub(super) async fn assert_scoped_journal_write_fence(
     tx: &libsql::Transaction,
     tenant: &str,
     entity_type: &str,
@@ -158,7 +158,7 @@ async fn unscoped_publication_is_fenced(
     Ok(rows.next().await.map_err(storage_error)?.is_some())
 }
 
-async fn assert_unscoped_stream_publication_fence(
+pub(super) async fn assert_unscoped_stream_publication_fence(
     tx: &libsql::Transaction,
     tenant: &str,
     entity_type: &str,
@@ -182,6 +182,41 @@ async fn assert_unscoped_stream_publication_fence(
 }
 
 impl EventStore for TursoEventStore {
+    async fn reconcile_creation_metadata(
+        &self,
+        repair: &temper_runtime::persistence::CreationMetadataRepair,
+    ) -> Result<(), PersistenceError> {
+        super::create_or_verify::reconcile_creation_metadata(self, repair).await
+    }
+
+    async fn publish_creation_coverage(
+        &self,
+        publication: &temper_runtime::persistence::CreationCoveragePublication,
+    ) -> Result<(), PersistenceError> {
+        super::create_or_verify::publish_creation_coverage(self, publication).await
+    }
+
+    async fn commit_first_event(
+        &self,
+        commit: &temper_runtime::persistence::FirstEventCommit,
+    ) -> Result<u64, PersistenceError> {
+        super::create_or_verify::commit_first_event(self, commit).await
+    }
+
+    async fn create_or_verify(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<CreateOrVerifyStoreOutcome, PersistenceError> {
+        super::create_or_verify::run(self, request).await
+    }
+
+    async fn acknowledge_create_or_verify_notification(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<(), PersistenceError> {
+        super::create_or_verify::acknowledge_notification(self, request).await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.append"))]
     async fn append(
         &self,
@@ -288,78 +323,171 @@ impl EventStore for TursoEventStore {
         }
     }
 
-    // NOTE (ADR-0153): Turso intentionally does NOT implement `backfill_entity_keys`,
-    // `mark_key_index_backfilled`, or `key_index_backfilled_types` — it keeps the
-    // no-op/empty trait defaults. Turso never co-commits key rows (it does not override
-    // `append_with_keys`), so its `entity_key_index` is never maintained on write. A
-    // store that does not maintain the index live must NEVER become authoritative for
-    // absence: backfilling or watermarking it would let a keyed miss wrongly read a
-    // present entity as absent (or serve a stale keyed hit). Postgres (the current
-    // query-plane backend) co-commits and is authoritative; the sim store does too for
-    // DST. Giving Turso the keyed oracle requires first implementing live co-commit
-    // (completing ADR-0153 phase 2 for Turso) — tracked separately.
+    async fn backfill_entity_keys(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
+    ) -> Result<(), PersistenceError> {
+        let _write_permit = self
+            .acquire_write_permit("turso.backfill_entity_keys", WritePriority::Low)
+            .await?;
+        let conn = self.configured_connection().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(storage_error)?;
+        for key in key_rows {
+            let mut rows = tx
+                .query(
+                    "SELECT entity_id FROM entity_key_index
+                     WHERE tenant = ?1 AND entity_type = ?2
+                       AND key_name = ?3 AND key_hash = ?4",
+                    params![
+                        tenant,
+                        entity_type,
+                        key.key_name.as_str(),
+                        key.key_hash.as_str()
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            if let Some(row) = rows.next().await.map_err(storage_error)? {
+                let holder = row.get::<String>(0).map_err(storage_error)?;
+                if holder != entity_id {
+                    return Err(PersistenceError::Storage(format!(
+                        "entity_key_index backfill conflict for '{}': held by {holder}",
+                        key.key_name
+                    )));
+                }
+            }
+        }
+        tx.execute(
+            "DELETE FROM entity_key_index
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+            params![tenant, entity_type, entity_id],
+        )
+        .await
+        .map_err(storage_error)?;
+        for key in key_rows {
+            tx.execute(
+                "INSERT INTO entity_key_index
+                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                params![
+                    tenant,
+                    entity_type,
+                    key.key_name.as_str(),
+                    key.key_hash.as_str(),
+                    entity_id
+                ],
+            )
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
 
-    // ADR-0155: Turso maintains `entity_vector_index` **write-behind** — the event is
-    // appended first (with retries), then the derived vector rows follow in a separate,
-    // also-retried write. This is safe for vectors (unlike keys) because a vector row
-    // carries no uniqueness constraint and a lagging index write only makes a ranking
-    // temporarily incomplete; it can never corrupt a keyed absence. So Turso implements
-    // the full vector surface below.
+    async fn mark_key_index_backfilled(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        key_set: &str,
+    ) -> Result<(), PersistenceError> {
+        let conn = self.configured_connection().await?;
+        conn.execute(
+            "INSERT INTO key_index_backfill_watermark
+             (tenant, entity_type, key_set, completed_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(tenant, entity_type) DO UPDATE SET
+               key_set = excluded.key_set, completed_at = excluded.completed_at",
+            params![
+                tenant,
+                entity_type,
+                key_set,
+                temper_runtime::scheduler::sim_now().to_rfc3339()
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    async fn key_index_backfilled_types(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_type, key_set FROM key_index_backfill_watermark
+                 WHERE tenant = ?1 ORDER BY entity_type",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            result.push((
+                row.get::<String>(0).map_err(storage_error)?,
+                row.get::<String>(1).map_err(storage_error)?,
+            ));
+        }
+        Ok(result)
+    }
+
+    async fn keyed_entity_ids_for_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT entity_id FROM entity_key_index
+                 WHERE tenant = ?1 AND entity_type = ?2 ORDER BY entity_id",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            result.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(result)
+    }
+
+    // ADR-0196 completes the Turso declared-key query plane: journal, exact key set,
+    // and vector rows share one immediate transaction.
     async fn append_with_index_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
-        _key_rows: &[temper_runtime::persistence::EntityKeyRow],
+        key_rows: &[temper_runtime::persistence::EntityKeyRow],
         vector_rows: &[EntityVectorRow],
         reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
-        // The journal append is the durable event (keys are not maintained on Turso,
-        // per the note above).
-        let new_seq = self
-            .append(persistence_id, expected_sequence, events)
+        let append = PersistenceAppend {
+            persistence_id: persistence_id.to_string(),
+            expected_sequence,
+            events: events.to_vec(),
+            key_rows: key_rows.to_vec(),
+            vector_rows: vector_rows.to_vec(),
+            reconcile_vectors,
+            first_event: None,
+        };
+        let _write_permit = self
+            .acquire_write_permit("turso.append_with_index_rows", WritePriority::High)
             .await?;
-        // Write-behind vector maintenance: reconcile the entity's rows (delete stale,
-        // insert current — an empty `vector_rows` purges a deleted/cleared entity),
-        // RETRIED like the event append rather than a warn-once one-shot, so a
-        // transient failure does not silently drop the write. On final exhaustion the
-        // error is logged loudly; the partition then lags until the next backfill
-        // reconcile runs. Only runs when the type declares vector paths.
-        if reconcile_vectors
-            && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
-        {
-            let total_attempts = append_max_attempts();
-            let mut last_err: Option<PersistenceError> = None;
-            for attempt in 0..total_attempts {
-                if attempt > 0 {
-                    tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;
-                }
-                match self
-                    .backfill_entity_vectors(tenant, entity_type, entity_id, vector_rows)
-                    .await
-                {
-                    Ok(()) => {
-                        last_err = None;
-                        break;
-                    }
-                    Err(err) => {
-                        let transient = matches!(&err, PersistenceError::Storage(msg) if is_transient_write_error(msg));
-                        last_err = Some(err);
-                        if !transient {
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Some(error) = last_err {
-                error!(
-                    persistence_id,
-                    error = %error,
-                    "turso vector-index write-behind failed after retries; partition lags until the next backfill reconcile"
-                );
-            }
-        }
-        Ok(new_seq)
+        self.append_batch_inner(&[append])
+            .await?
+            .into_iter()
+            .next()
+            .map(|result| result.sequence_nr)
+            .ok_or_else(|| PersistenceError::Storage("missing append result".to_string()))
     }
 
     async fn backfill_entity_vectors(
@@ -911,6 +1039,14 @@ impl EventStore for TursoEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         self.list_entity_ids_by_type_from_read_sources(tenant, entity_type)
             .await
+    }
+
+    async fn list_creation_source_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        self.list_creation_source_ids(tenant, entity_type).await
     }
 
     async fn list_entity_ids_limited(
@@ -1808,6 +1944,20 @@ impl TursoEventStore {
                     actual: current_seq,
                 });
             }
+            if let Some(first_event) = &append.first_event {
+                if append.expected_sequence != 0 || append.events.is_empty() {
+                    return Err(PersistenceError::Storage(
+                        "first-event metadata requires a non-empty sequence-0 append".to_string(),
+                    ));
+                }
+                if first_event.contract_revision != first_event.contract.version
+                    || first_event.schema_identity != first_event.contract.schema_digest
+                {
+                    return Err(PersistenceError::Storage(
+                        "invalid first-event metadata".to_string(),
+                    ));
+                }
+            }
             parsed.push((
                 tenant.to_string(),
                 entity_type.to_string(),
@@ -1898,12 +2048,110 @@ impl TursoEventStore {
             }
         }
 
-        for ((append, (tenant, entity_type, entity_id)), result) in appends
-            .iter()
-            .zip(parsed.iter())
-            .zip(results.iter())
-            .filter(|((append, _), _)| append.reconcile_vectors)
+        let mut coverage_changes = std::collections::BTreeMap::<
+            (String, String),
+            (
+                u64,
+                std::collections::BTreeSet<(u32, String, String)>,
+                String,
+            ),
+        >::new();
+        for ((append, (tenant, entity_type, entity_id)), result) in
+            appends.iter().zip(parsed.iter()).zip(results.iter())
         {
+            if let Some(first_event) = &append.first_event {
+                let contract = serde_json::to_string(&first_event.contract)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+                tx.execute(
+                    "INSERT INTO entity_creation_contracts
+                     (tenant, entity_type, entity_id, contract_json, contract_digest,
+                      contract_revision, schema_identity, declared_key_signature, source_write_version)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        tenant.as_str(),
+                        entity_type.as_str(),
+                        entity_id.as_str(),
+                        contract,
+                        first_event.contract.digest.as_str(),
+                        i64::from(first_event.contract_revision),
+                        first_event.schema_identity.as_str(),
+                        first_event.declared_key_signature.as_str(),
+                        i64::try_from(result.sequence_nr).map_err(storage_error)?
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            }
+            if result.sequence_nr > append.expected_sequence
+                && let Some((revision, schema, signature)) =
+                    super::create_or_verify::touch_creation_contract(
+                        &tx,
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        result.sequence_nr,
+                    )
+                    .await?
+            {
+                let entry = coverage_changes
+                    .entry((tenant.clone(), entity_type.clone()))
+                    .or_insert_with(|| (0, std::collections::BTreeSet::new(), entity_id.clone()));
+                entry.0 += result.sequence_nr - append.expected_sequence;
+                entry.1.insert((revision, schema, signature));
+                entry.2 = entity_id.clone();
+            }
+            for key in &append.key_rows {
+                let mut rows = tx
+                    .query(
+                        "SELECT entity_id FROM entity_key_index
+                         WHERE tenant = ?1 AND entity_type = ?2
+                           AND key_name = ?3 AND key_hash = ?4",
+                        params![
+                            tenant.as_str(),
+                            entity_type.as_str(),
+                            key.key_name.as_str(),
+                            key.key_hash.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                if let Some(row) = rows.next().await.map_err(storage_error)? {
+                    let holder = row.get::<String>(0).map_err(storage_error)?;
+                    if holder != *entity_id {
+                        return Err(PersistenceError::Storage(format!(
+                            "duplicate declared key '{}' for {entity_type}",
+                            key.key_name
+                        )));
+                    }
+                }
+            }
+            tx.execute(
+                "DELETE FROM entity_key_index
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant.as_str(), entity_type.as_str(), entity_id.as_str()],
+            )
+            .await
+            .map_err(storage_error)?;
+            for key in &append.key_rows {
+                tx.execute(
+                    "INSERT INTO entity_key_index
+                     (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        tenant.as_str(),
+                        entity_type.as_str(),
+                        key.key_name.as_str(),
+                        key.key_hash.as_str(),
+                        entity_id.as_str(),
+                        result.sequence_nr as i64
+                    ],
+                )
+                .await
+                .map_err(storage_error)?;
+            }
+            if !append.reconcile_vectors {
+                continue;
+            }
             tx.execute(
                 "DELETE FROM entity_vector_index \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
@@ -1928,6 +2176,23 @@ impl TursoEventStore {
                 )
                 .await
                 .map_err(storage_error)?;
+            }
+        }
+        for ((tenant, entity_type), (write_delta, signatures, cursor)) in coverage_changes {
+            for (revision, schema, signature) in signatures {
+                super::create_or_verify::advance_coverage_if_complete(
+                    &tx,
+                    super::create_or_verify::CoverageAdvance {
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        cursor: &cursor,
+                        created_sequence: write_delta,
+                        contract_revision: revision,
+                        schema_identity: &schema,
+                        declared_key_signature: &signature,
+                    },
+                )
+                .await?;
             }
         }
 

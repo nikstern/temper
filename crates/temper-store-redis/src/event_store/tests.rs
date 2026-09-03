@@ -1,6 +1,9 @@
 use super::*;
 use temper_runtime::persistence::EventMetadata;
 
+#[path = "tests/create_or_verify.rs"]
+mod create_or_verify;
+
 fn redis_url() -> Option<String> {
     std::env::var("REDIS_URL").ok()
 }

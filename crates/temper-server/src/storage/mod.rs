@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    CreateOrVerifyRequest, CreateOrVerifyStoreOutcome, CreationCoveragePublication,
+    CreationMetadataRepair, EventStore, FirstEventCommit, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
 };
 use temper_store_postgres::{
     PostgresEventStore, PostgresEvolutionRecordInsert, PostgresPolicyApprovalCommit,
@@ -34,6 +36,8 @@ use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::TrajectoryEntry;
 
 mod backend_label;
+#[macro_use]
+mod creation_methods;
 mod metadata_impls;
 mod observe_read;
 mod policy_store;
@@ -67,6 +71,8 @@ pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Object-safe adapter for the runtime event journal.
 pub trait DynEventStore: Send + Sync {
+    dyn_creation_method_declarations!();
+
     fn append<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -259,6 +265,8 @@ impl<T> DynEventStore for T
 where
     T: EventStore,
 {
+    dyn_creation_method_implementations!();
+
     fn append<'a>(
         &'a self,
         persistence_id: &'a str,
@@ -611,23 +619,7 @@ where
 pub struct BoxedEventStore(Arc<dyn DynEventStore>);
 
 impl BoxedEventStore {
-    pub fn new<T>(store: T) -> Self
-    where
-        T: EventStore,
-    {
-        Self(Arc::new(store))
-    }
-
-    pub fn from_arc<T>(store: Arc<T>) -> Self
-    where
-        T: EventStore,
-    {
-        Self(store)
-    }
-
-    pub fn inner(&self) -> Arc<dyn DynEventStore> {
-        self.0.clone()
-    }
+    boxed_creation_methods!();
 
     pub async fn append(
         &self,
@@ -1395,12 +1387,12 @@ impl StorageStack {
         let store = Arc::new(store);
         Self::new(
             BackendLabel::Redis,
-            BoxedEventStore::from_arc(store),
+            BoxedEventStore::from_arc(store.clone()),
             None,
             None,
             None,
             None,
-            None,
+            Some(store as Arc<dyn QueryPlaneStore>),
             None,
             None,
             None,
@@ -1422,7 +1414,7 @@ impl StorageStack {
             None,
             platform,
             None,
-            None,
+            Some(store.clone() as Arc<dyn QueryPlaneStore>),
             None,
             None,
             None,
@@ -2640,7 +2632,7 @@ impl DataOnlyCreateStore for PostgresEventStore {
             record.status,
             record.fields,
             record.state,
-            record.event,
+            record.first_event,
         )
         .await
     }

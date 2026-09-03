@@ -10,15 +10,17 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Deserialize;
 use temper_authz::AuthenticatedRequestContext;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
 use tracing::instrument;
 
 use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse};
-use crate::state::ServerState;
+use crate::state::{EntityObserveEvent, ServerState};
 
 use super::{EntityInstanceSummary, EventStreamParams};
+
+mod history_format;
+use history_format::format_history_response;
 
 /// GET /observe/entities -- list active entity instances from the actor registry.
 ///
@@ -319,10 +321,37 @@ pub(crate) async fn handle_entity_event_stream(
         .or(params.since)
         .unwrap_or(0);
     let rx = state.entity_observe_tx.subscribe();
-    let replay_events = state
+    let mut replay_events = state
         .replay_entity_observe_events(tenant.as_str(), &entity_type, &entity_id, since)
         .into_iter()
         .collect::<Vec<_>>();
+    for change in crate::events::replay_durable_entity_changes(
+        &state,
+        tenant.as_str(),
+        &entity_type,
+        &entity_id,
+        since,
+    )
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    {
+        if replay_events
+            .iter()
+            .any(|prior| prior.seq == change.seq && prior.event_name == "state_change")
+        {
+            continue;
+        }
+        replay_events.push(EntityObserveEvent {
+            tenant: tenant.to_string(),
+            entity_type: entity_type.clone(),
+            entity_id: entity_id.clone(),
+            seq: change.seq,
+            event_name: "state_change".to_string(),
+            data: serde_json::to_value(change).unwrap_or_default(),
+        });
+    }
+    replay_events
+        .sort_by(|left, right| (left.seq, &left.event_name).cmp(&(right.seq, &right.event_name)));
     let replay_high_water = replay_events.last().map(|event| event.seq).unwrap_or(since);
     let replay = replay_events.into_iter().map(|event| {
         let data = serde_json::to_string(&event.data).unwrap_or_default();
@@ -335,55 +364,59 @@ pub(crate) async fn handle_entity_event_stream(
     });
     let replay_stream = tokio_stream::iter(replay);
 
-    let live_tenant = tenant.clone();
+    let live_state = state;
+    let live_tenant = tenant.to_string();
     let live_entity_type = entity_type.clone();
     let live_entity_id = entity_id.clone();
-    let live_stream = BroadcastStream::new(rx).filter_map(move |result| match result {
-        Ok(event)
-            if event.tenant == live_tenant.as_str()
-                && event.entity_type == live_entity_type
-                && event.entity_id == live_entity_id
-                && event.seq > replay_high_water =>
-        {
-            let data = serde_json::to_string(&event.data).unwrap_or_default();
-            Some(Ok(Event::default()
-                .id(event.seq.to_string())
-                .event(&event.event_name)
-                .data(data)))
+    let live_stream = async_stream::stream! {
+        let mut receiver = rx;
+        let mut high_water = replay_high_water;
+        loop {
+            match receiver.recv().await {
+                Ok(event)
+                    if event.tenant == live_tenant
+                        && event.entity_type == live_entity_type
+                        && event.entity_id == live_entity_id
+                        && event.seq > high_water =>
+                {
+                    high_water = event.seq;
+                    let data = serde_json::to_string(&event.data).unwrap_or_default();
+                    yield Ok(Event::default()
+                        .id(event.seq.to_string())
+                        .event(&event.event_name)
+                        .data(data));
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    match crate::events::replay_durable_entity_changes(
+                        &live_state,
+                        &live_tenant,
+                        &live_entity_type,
+                        &live_entity_id,
+                        high_water,
+                    ).await {
+                        Ok(recovered) => {
+                            for change in recovered {
+                                high_water = high_water.max(change.seq);
+                                let data = serde_json::to_string(&change).unwrap_or_default();
+                                yield Ok(Event::default()
+                                    .id(change.seq.to_string())
+                                    .event("state_change")
+                                    .data(data));
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "durable entity SSE lag recovery failed");
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
-        Ok(_) => None,
-        Err(_) => None,
-    });
+    };
 
     Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
-}
-
-/// Format entity events into the history API response shape.
-fn format_history_response(
-    entity_type: &str,
-    entity_id: &str,
-    events: &std::collections::VecDeque<EntityEvent>,
-) -> serde_json::Value {
-    let formatted: Vec<serde_json::Value> = events
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            serde_json::json!({
-                "sequence": i + 1,
-                "action": e.action,
-                "from_state": e.from_status,
-                "to_state": e.to_status,
-                "timestamp": e.timestamp,
-                "params": e.params,
-            })
-        })
-        .collect();
-
-    serde_json::json!({
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "events": formatted,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -405,32 +438,40 @@ pub(crate) async fn handle_event_stream(
     let rx = state.event_tx.subscribe();
     let filter_type = params.entity_type;
     let filter_id = params.entity_id;
+    let replay = crate::events::replay_durable_tenant_changes(
+        &state,
+        &filter_tenant,
+        filter_type.as_deref(),
+        filter_id.as_deref(),
+    )
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let replay_high_water = replay
+        .iter()
+        .map(|change| {
+            (
+                (change.entity_type.clone(), change.entity_id.clone()),
+                change.seq,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let replay_stream = tokio_stream::iter(replay.into_iter().map(|change| {
+        let data = serde_json::to_string(&change).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().event("state_change").data(data))
+    }));
 
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
-        match result {
-            Ok(change) => {
-                // Apply tenant filter.
-                if change.tenant != filter_tenant {
-                    return None;
-                }
-                // Apply entity type/id filters.
-                if let Some(ref ft) = filter_type
-                    && change.entity_type != *ft
-                {
-                    return None;
-                }
-                if let Some(ref fi) = filter_id
-                    && change.entity_id != *fi
-                {
-                    return None;
-                }
-                let data = serde_json::to_string(&change).unwrap_or_default();
-                Some(Ok(Event::default().event("state_change").data(data)))
-            }
-            // Lagged receiver: skip missed events and continue.
-            Err(_) => None,
-        }
+    let live_stream = crate::events::durable_entity_change_stream(
+        state,
+        rx,
+        filter_tenant,
+        filter_type,
+        filter_id,
+        replay_high_water,
+    )
+    .map(|change| {
+        let data = serde_json::to_string(&change).unwrap_or_default();
+        Ok(Event::default().event("state_change").data(data))
     });
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
 }

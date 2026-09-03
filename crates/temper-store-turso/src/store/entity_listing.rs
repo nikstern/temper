@@ -7,6 +7,32 @@ use tracing::instrument;
 use super::TursoEventStore;
 
 impl TursoEventStore {
+    pub(crate) async fn list_creation_source_ids(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT entity_id FROM (
+                   SELECT entity_id FROM events WHERE tenant=?1 AND entity_type=?2
+                   UNION SELECT entity_id FROM snapshots WHERE tenant=?1 AND entity_type=?2
+                   UNION SELECT entity_id FROM entity_catalog WHERE tenant=?1 AND entity_type=?2
+                   UNION SELECT entity_id FROM entity_field_index WHERE tenant=?1 AND entity_type=?2
+                   UNION SELECT entity_id FROM entity_key_index WHERE tenant=?1 AND entity_type=?2
+                 ) ORDER BY entity_id",
+                params![tenant, entity_type],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            result.push(row.get::<String>(0).map_err(storage_error)?);
+        }
+        Ok(result)
+    }
+
     #[instrument(skip_all, fields(
         tenant,
         entity_type,

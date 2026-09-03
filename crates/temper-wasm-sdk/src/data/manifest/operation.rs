@@ -12,6 +12,8 @@ pub enum DataOperationKind {
     EntityQuery,
     /// Create one entity.
     EntityCreate,
+    /// Atomically create an entity or verify its immutable creation contract.
+    EntityCreateOrVerify,
     /// Patch one entity.
     EntityPatch,
     /// Invoke one bound action.

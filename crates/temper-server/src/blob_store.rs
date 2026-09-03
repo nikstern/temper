@@ -15,6 +15,7 @@ mod endpoint;
 mod keys;
 mod limits;
 mod local;
+mod operations;
 mod raw_ingest;
 mod receipt;
 mod state;
@@ -23,7 +24,7 @@ mod streaming;
 pub(crate) use endpoint::{LocalInternalBlobEndpoint, is_local_internal_blob_endpoint};
 pub(crate) use keys::{DEFAULT_BLOB_BUCKET, hex_lower, wasm_artifact_key};
 use limits::{BLOB_BUFFERED_OPERATION_TIMEOUT, BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore};
-use local::{get_local_blob_observed, local_blob_path, put_local_blob_observed};
+use local::{local_blob_path, put_local_blob_observed};
 pub use raw_ingest::BlobByteStream;
 #[cfg(test)]
 pub(crate) use raw_ingest::BlobIngestProgressPolicy;
@@ -38,6 +39,8 @@ pub use streaming::{BlobObjectStream, BlobStreamRead, decode_json_base64_stream}
 pub(crate) struct BlobStore {
     backend: BlobStoreBackend,
     staging_root: PathBuf,
+    #[cfg(test)]
+    fail_after_puts: Option<std::sync::Arc<std::sync::Mutex<usize>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +65,8 @@ impl BlobStore {
         Self {
             staging_root: root.join(".ingest-staging"),
             backend: BlobStoreBackend::LocalFs { root },
+            #[cfg(test)]
+            fail_after_puts: None,
         }
     }
 
@@ -86,7 +91,16 @@ impl BlobStore {
                     .build()
                     .expect("static blob HTTP client configuration must be valid"), // ci-ok: static reqwest builder options
             }),
+            #[cfg(test)]
+            fail_after_puts: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failing_local_fs(root: impl Into<PathBuf>, successful_puts: usize) -> Self {
+        let mut store = Self::local_fs(root);
+        store.fail_after_puts = Some(std::sync::Arc::new(std::sync::Mutex::new(successful_puts)));
+        store
     }
 
     pub(crate) async fn put_if_absent(
@@ -95,6 +109,14 @@ impl BlobStore {
         body: &[u8],
         ttl: Option<Duration>,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(remaining) = &self.fail_after_puts {
+            let mut remaining = remaining.lock().expect("blob fault counter lock poisoned");
+            if *remaining == 0 {
+                return Err("injected blob put failure".into());
+            }
+            *remaining -= 1;
+        }
         let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
         let _permit =
             tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
@@ -124,73 +146,6 @@ impl BlobStore {
         })
         .await
         .map_err(|_| format!("blob put timed out for '{key}'"))?
-    }
-
-    /// Write bytes to a content-addressed key.
-    ///
-    /// Remote object stores use a direct `PUT` because the key is already
-    /// derived from the payload hash; avoiding a preflight existence check
-    /// saves a round trip on the File `$value` write path.
-    pub(crate) async fn put_content_addressed(
-        &self,
-        key: &str,
-        body: &[u8],
-        ttl: Option<Duration>,
-    ) -> Result<(), String> {
-        let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
-        let _permit =
-            tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
-                .await
-                .map_err(|_| "content-addressed blob put queue deadline exceeded".to_string())?
-                .expect("blob semaphore closed"); // ci-ok: process-global and never closed
-        let wait_duration = queued_at.elapsed();
-        crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "put_content");
-        if wait_duration.as_millis() > 0 {
-            tracing::info!(path = %key, wait_ms = wait_duration.as_millis() as u64, "content-addressed blob put queued");
-        }
-        if ttl.is_some() {
-            tracing::debug!(
-                path = %key,
-                ttl_seconds = ttl.map(|duration| duration.as_secs()),
-                "content-addressed blob write received TTL; retention is delegated to the object store"
-            );
-        }
-
-        tokio::time::timeout(BLOB_BUFFERED_OPERATION_TIMEOUT, async {
-            match &self.backend {
-                BlobStoreBackend::LocalFs { root } => {
-                    local::put_local_blob_replace_observed(root, key, body, "put_content").await
-                }
-                BlobStoreBackend::S3(store) => {
-                    store.put_with_operation("put_content", key, body).await
-                }
-            }
-        })
-        .await
-        .map_err(|_| format!("content-addressed blob put timed out for '{key}'"))?
-    }
-
-    pub(crate) async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
-        let _permit =
-            tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
-                .await
-                .map_err(|_| "blob get queue deadline exceeded".to_string())?
-                .expect("blob semaphore closed"); // ci-ok: process-global and never closed
-        let wait_duration = queued_at.elapsed();
-        crate::runtime_metrics::record_blob_io_wait_duration(wait_duration, "get");
-        if wait_duration.as_millis() > 0 {
-            tracing::info!(path = %key, wait_ms = wait_duration.as_millis() as u64, "blob get queued");
-        }
-
-        tokio::time::timeout(BLOB_BUFFERED_OPERATION_TIMEOUT, async {
-            match &self.backend {
-                BlobStoreBackend::LocalFs { root } => get_local_blob_observed(root, key).await,
-                BlobStoreBackend::S3(store) => store.get(key).await,
-            }
-        })
-        .await
-        .map_err(|_| format!("blob get timed out for '{key}'"))?
     }
 }
 

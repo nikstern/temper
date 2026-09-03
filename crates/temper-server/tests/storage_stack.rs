@@ -199,6 +199,7 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 key_rows: Vec::new(),
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                first_event: None,
             }])
             .await
             .expect("append batch through dyn adapter"),
@@ -362,6 +363,33 @@ async fn storage_stack_from_turso_exposes_concrete_capability_handles() {
     assert!(stack.query_plane.is_some());
     assert!(stack.trajectory.is_some());
     assert!(stack.metadata.is_some());
+}
+
+#[tokio::test]
+async fn storage_stack_from_sim_consumes_retained_query_projections() {
+    let sim = temper_store_sim::SimEventStore::no_faults(82);
+    sim.upsert_query_projection(
+        "default",
+        "Ticket",
+        "t-1",
+        temper_runtime::persistence::FirstEventProjection {
+            status: "Open".to_string(),
+            fields: serde_json::json!({"title": "retained"}),
+            state: serde_json::json!({"status": "Open", "fields": {"title": "retained"}}),
+            sequence_nr: 1,
+        },
+    );
+    let stack = StorageStack::from_sim(sim, None);
+    let rows = stack
+        .query_plane
+        .expect("Sim query plane")
+        .load_entity_catalog_rows("default", "Ticket", &["t-1".to_string()])
+        .await
+        .expect("catalog query")
+        .expect("functional query plane");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].fields["title"], "retained");
+    assert_eq!(rows[0].sequence_nr, 1);
 }
 
 fn test_envelope(sequence_nr: u64) -> PersistenceEnvelope {

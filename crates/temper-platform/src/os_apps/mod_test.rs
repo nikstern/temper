@@ -834,16 +834,10 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
         .csdl
         .clone()
         .expect("project-management should have CSDL");
-    broken_csdl = broken_csdl.replace(
-        r#"        <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
-          <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>
-          <NavigationPropertyBinding Path="SubIssues" Target="Issues"/>
-          <NavigationPropertyBinding Path="Project" Target="Projects"/>
-          <NavigationPropertyBinding Path="Cycle" Target="Cycles"/>
-          <NavigationPropertyBinding Path="Comments" Target="Comments"/>
-        </EntitySet>
-"#,
-        "",
+    broken_csdl = broken_csdl.replacen(
+        "EntitySet Name=\"Issues\"",
+        "EntitySet Name=\"BrokenIssues\"",
+        1,
     );
 
     {
@@ -1286,16 +1280,10 @@ async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
 
     let bundle = get_os_app("project-management").expect("project-management app not found");
     let mut broken_csdl = bundle.csdl.expect("project-management should have CSDL");
-    broken_csdl = broken_csdl.replace(
-        r#"        <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
-          <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>
-          <NavigationPropertyBinding Path="SubIssues" Target="Issues"/>
-          <NavigationPropertyBinding Path="Project" Target="Projects"/>
-          <NavigationPropertyBinding Path="Cycle" Target="Cycles"/>
-          <NavigationPropertyBinding Path="Comments" Target="Comments"/>
-        </EntitySet>
-"#,
-        "",
+    broken_csdl = broken_csdl.replacen(
+        "EntitySet Name=\"Issues\"",
+        "EntitySet Name=\"BrokenIssues\"",
+        1,
     );
 
     {
@@ -1749,16 +1737,10 @@ async fn test_runtime_recovery_heals_missing_entity_set_map_from_matching_digest
         .csdl
         .clone()
         .expect("project-management should have CSDL");
-    broken_csdl = broken_csdl.replace(
-        r#"        <EntitySet Name="Issues" EntityType="Temper.ProjectManagement.Issue">
-          <NavigationPropertyBinding Path="ParentIssue" Target="Issues"/>
-          <NavigationPropertyBinding Path="SubIssues" Target="Issues"/>
-          <NavigationPropertyBinding Path="Project" Target="Projects"/>
-          <NavigationPropertyBinding Path="Cycle" Target="Cycles"/>
-          <NavigationPropertyBinding Path="Comments" Target="Comments"/>
-        </EntitySet>
-"#,
-        "",
+    broken_csdl = broken_csdl.replacen(
+        "EntitySet Name=\"Issues\"",
+        "EntitySet Name=\"BrokenIssues\"",
+        1,
     );
 
     {

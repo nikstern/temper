@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use sqlx::Acquire;
-use temper_runtime::persistence::{PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{FirstEventCommit, PersistenceError};
 
 use crate::PostgresEventStore;
 use crate::metrics::{
@@ -24,7 +24,7 @@ impl PostgresEventStore {
         entity_id: &str,
         status: &str,
         fields: &serde_json::Value,
-        event: &PersistenceEnvelope,
+        first_event: &FirstEventCommit,
     ) -> Result<u64, PersistenceError> {
         let state = serde_json::json!({
             "entity_type": entity_type,
@@ -46,7 +46,7 @@ impl PostgresEventStore {
             status,
             fields,
             &state,
-            event,
+            first_event,
         )
         .await
     }
@@ -64,8 +64,13 @@ impl PostgresEventStore {
         status: &str,
         fields: &serde_json::Value,
         state: &serde_json::Value,
-        event: &PersistenceEnvelope,
+        first_event: &FirstEventCommit,
     ) -> Result<u64, PersistenceError> {
+        first_event.validate()?;
+        assert_eq!(first_event.tenant, tenant);
+        assert_eq!(first_event.entity_type, entity_type);
+        assert_eq!(first_event.entity_id, entity_id);
+        let event = &first_event.event;
         assert_eq!(
             event.sequence_nr, 1,
             "native data-only create requires first event sequence"
@@ -190,6 +195,8 @@ impl PostgresEventStore {
             .await
             .map_err(storage_error)?;
         }
+
+        crate::create_or_verify::insert_contract_and_keys(&mut tx, first_event).await?;
 
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {

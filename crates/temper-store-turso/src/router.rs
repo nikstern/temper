@@ -15,7 +15,8 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 
 use temper_runtime::persistence::{
-    EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
+    CreateOrVerifyRequest, CreateOrVerifyStoreOutcome, EventStore, FirstEventCommit,
+    PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
     storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
@@ -645,6 +646,63 @@ impl TenantStoreRouter {
 
 /// `EventStore` implementation that routes by tenant extracted from `persistence_id`.
 impl EventStore for TenantStoreRouter {
+    async fn reconcile_creation_metadata(
+        &self,
+        repair: &temper_runtime::persistence::CreationMetadataRepair,
+    ) -> Result<(), PersistenceError> {
+        self.store_for_tenant(&repair.first_event.tenant)
+            .await?
+            .reconcile_creation_metadata(repair)
+            .await
+    }
+
+    async fn publish_creation_coverage(
+        &self,
+        publication: &temper_runtime::persistence::CreationCoveragePublication,
+    ) -> Result<(), PersistenceError> {
+        self.store_for_tenant(&publication.tenant)
+            .await?
+            .publish_creation_coverage(publication)
+            .await
+    }
+
+    #[instrument(skip_all, fields(
+        tenant = commit.tenant,
+        entity_type = commit.entity_type,
+        otel.name = "router.commit_first_event"
+    ))]
+    async fn commit_first_event(&self, commit: &FirstEventCommit) -> Result<u64, PersistenceError> {
+        self.store_for_tenant(&commit.tenant)
+            .await?
+            .commit_first_event(commit)
+            .await
+    }
+
+    #[instrument(skip_all, fields(
+        tenant = request.tenant,
+        entity_type = request.entity_type,
+        otel.name = "router.create_or_verify"
+    ))]
+    async fn create_or_verify(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<CreateOrVerifyStoreOutcome, PersistenceError> {
+        self.store_for_tenant(&request.tenant)
+            .await?
+            .create_or_verify(request)
+            .await
+    }
+
+    async fn acknowledge_create_or_verify_notification(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<(), PersistenceError> {
+        self.store_for_tenant(&request.tenant)
+            .await?
+            .acknowledge_create_or_verify_notification(request)
+            .await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.append"))]
     async fn append(
         &self,

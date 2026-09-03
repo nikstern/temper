@@ -1,6 +1,6 @@
 //! Backend identity and backend-neutral policy rows.
 
-use temper_runtime::persistence::{PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{FirstEventCommit, PersistenceError};
 use temper_store_postgres::PostgresPolicyRow;
 use temper_store_turso::PolicyRow as TursoPolicyRow;
 
@@ -80,8 +80,8 @@ pub struct DataOnlyCreateRecord<'a> {
     pub fields: &'a serde_json::Value,
     /// Full response state.
     pub state: &'a serde_json::Value,
-    /// First event envelope.
-    pub event: &'a PersistenceEnvelope,
+    /// Shared first-event event/contract/key payload.
+    pub first_event: &'a FirstEventCommit,
 }
 
 /// Optional native storage capability for brand-new data-only creates.

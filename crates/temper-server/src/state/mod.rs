@@ -441,12 +441,17 @@ pub struct ServerState {
     pub(crate) ots_trajectory_outbox: Arc<Mutex<Option<Arc<OtsTrajectoryOutbox>>>>,
     /// Runtime data directory for persisted local metadata (e.g. specs registry).
     pub data_dir: std::path::PathBuf,
+    #[cfg(test)]
+    pub(crate) blob_store_override: Option<crate::blob_store::BlobStore>,
     /// Agent hints learned from trajectory analysis, keyed by action name.
     pub agent_hints: Arc<RwLock<BTreeMap<TenantId, BTreeMap<String, String>>>>,
     /// Cedar ABAC authorization engine.
     pub authz: Arc<AuthzEngine>,
     /// Multi-tenant specification registry (shared, mutable for live registration).
     pub registry: Arc<RwLock<SpecRegistry>>,
+    /// Canonical creation manifests for the legacy single-tenant constructor.
+    pub(crate) legacy_creation_manifests:
+        Arc<BTreeMap<String, temper_wasm_sdk::data::ManifestEntityV1>>,
     /// Index of entity IDs per (tenant:entity_type) for collection queries.
     pub entity_index: Arc<RwLock<BTreeMap<String, BTreeSet<String>>>>,
     /// `{tenant}:{entity_type}` keys whose `entity_index` entry has been fully
@@ -978,12 +983,15 @@ impl ServerState {
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
+            #[cfg(test)]
+            blob_store_override: None,
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             // Network and tenant-scoped authorization starts fail-closed.
             // Tests/development that intentionally need a permissive tenant
             // must install that tenant policy explicitly (ARN-230).
             authz: Arc::new(AuthzEngine::empty()),
             registry: Arc::new(RwLock::new(SpecRegistry::new())),
+            legacy_creation_manifests: Arc::new(BTreeMap::new()),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),
@@ -1071,11 +1079,17 @@ impl ServerState {
         }
     }
 
-    fn push_entity_observe_event(&self, event: EntityObserveEvent) {
+    fn push_entity_observe_event(&self, event: EntityObserveEvent) -> bool {
         let key = format!("{}:{}:{}", event.tenant, event.entity_type, event.entity_id);
         {
             let mut log = self.entity_observe_log.lock().unwrap(); // ci-ok: infallible lock
             let entries = log.entry(key).or_default();
+            if entries
+                .iter()
+                .any(|prior| prior.seq == event.seq && prior.event_name == event.event_name)
+            {
+                return false;
+            }
             entries.push(event.clone());
             if entries.len() > 512 {
                 let overflow = entries.len().saturating_sub(512);
@@ -1083,6 +1097,7 @@ impl ServerState {
             }
         }
         let _ = self.entity_observe_tx.send(event);
+        true
     }
 
     pub(crate) fn next_entity_event_sequence(
@@ -1106,7 +1121,14 @@ impl ServerState {
         seq: u64,
         event_name: &str,
         data: serde_json::Value,
-    ) {
+    ) -> bool {
+        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        let mut sequences = self.entity_event_sequences.lock().unwrap(); // ci-ok: infallible lock
+        sequences
+            .entry(key)
+            .and_modify(|current| *current = (*current).max(seq))
+            .or_insert(seq);
+        drop(sequences);
         let event = EntityObserveEvent {
             tenant: tenant.to_string(),
             entity_type: entity_type.to_string(),
@@ -1115,7 +1137,7 @@ impl ServerState {
             event_name: event_name.to_string(),
             data,
         };
-        self.push_entity_observe_event(event);
+        self.push_entity_observe_event(event)
     }
 
     #[cfg(feature = "observe")]
@@ -1161,7 +1183,25 @@ impl ServerState {
         csdl_xml: String,
         ioa_sources: BTreeMap<String, String>,
     ) -> Result<Self, String> {
+        let source_refs = ioa_sources
+            .iter()
+            .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let mut manifest_registry = SpecRegistry::new();
+        manifest_registry
+            .try_register_tenant(
+                TenantId::default(),
+                csdl.clone(),
+                csdl_xml.clone(),
+                &source_refs,
+            )
+            .map_err(|error| error.to_string())?;
+        let legacy_creation_manifests = manifest_registry
+            .get_tenant(&TenantId::default())
+            .map(|config| config.creation_manifests.clone())
+            .unwrap_or_default();
         let mut state = Self::new(system, csdl, csdl_xml);
+        state.legacy_creation_manifests = Arc::new(legacy_creation_manifests);
         let mut tables = BTreeMap::new();
         for (entity_type, ioa_source) in &ioa_sources {
             let table = TransitionTable::try_from_ioa_source(ioa_source)
@@ -1244,11 +1284,14 @@ impl ServerState {
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
+            #[cfg(test)]
+            blob_store_override: None,
             agent_hints: Arc::new(RwLock::new(BTreeMap::new())),
             // Missing tenant policy state is never an implicit permit-all
             // compatibility mode (ARN-230).
             authz: Arc::new(AuthzEngine::empty()),
             registry,
+            legacy_creation_manifests: Arc::new(BTreeMap::new()),
             entity_index: Arc::new(RwLock::new(BTreeMap::new())),
             entity_index_hydrated: Arc::new(RwLock::new(BTreeSet::new())),
             key_index_backfilled: Arc::new(RwLock::new(BTreeMap::new())),

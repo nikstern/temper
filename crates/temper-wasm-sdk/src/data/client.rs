@@ -3,9 +3,14 @@
 use std::collections::BTreeMap;
 
 use super::{
-    CommitToken, DataOperationV1, DataOutcomeV1, DataRequestV1, DataResponseV1, DataResultV1,
-    FileMetadataV1, ModuleDataError, ModuleDataErrorKind, Retryability,
+    CommitToken, CreateOrVerifyResultV1, DataOperationV1, DataOutcomeV1, DataRequestV1,
+    DataResponseV1, DataResultV1, FileMetadataV1, ModuleDataError, ModuleDataErrorKind,
+    Retryability,
 };
+
+#[path = "client/create_or_verify.rs"]
+mod create_or_verify;
+pub use create_or_verify::decode_create_or_verify;
 
 /// A decoded generated entity value and the sequence it represents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +266,13 @@ impl DataClient {
             DataResultV1::Write { commit, .. }
             | DataResultV1::Action { commit, .. }
             | DataResultV1::FileCommitted { commit, .. } => self.observe_commit(commit),
+            DataResultV1::CreateOrVerify { outcome } => match outcome {
+                CreateOrVerifyResultV1::Created { commit, .. }
+                | CreateOrVerifyResultV1::AlreadyMatches { commit, .. } => {
+                    self.observe_commit(commit)
+                }
+                CreateOrVerifyResultV1::Conflict { .. } => {}
+            },
             DataResultV1::Batch { outcomes } => {
                 for outcome in outcomes {
                     if let DataOutcomeV1::Ok { result } = outcome {

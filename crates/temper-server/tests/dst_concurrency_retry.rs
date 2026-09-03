@@ -14,6 +14,15 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+fn dst_creation_contract() -> temper_runtime::persistence::CreationContract {
+    temper_runtime::persistence::CreationContract {
+        version: temper_runtime::persistence::CREATION_CONTRACT_VERSION_V1,
+        schema_digest: "dst:test-schema".into(),
+        fields: Vec::new(),
+        digest: "dst:empty-create".into(),
+    }
+}
+
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
@@ -113,6 +122,7 @@ fn spawn_order(
         store,
         BackendLabel::Sim,
     )
+    .with_creation_contract(dst_creation_contract())
     .with_tenant("default");
     system.spawn(actor, entity_id)
 }

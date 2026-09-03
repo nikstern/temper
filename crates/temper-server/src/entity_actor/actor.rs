@@ -198,10 +198,12 @@ pub struct EntityActor {
     pub(super) blob_store: Option<crate::blob_store::BlobStore>,
     /// Immutable scoped schema identity. `None` is tenant-global behavior.
     pub(super) schema_pin: Option<SchemaExecutionPin>,
+    /// Immutable sequence-1 contract compiled from the verified create schema.
+    pub(super) creation_contract: Option<temper_runtime::persistence::CreationContract>,
 }
 
 impl EntityActor {
-    pub(super) fn build_initial_state(
+    pub(crate) fn build_initial_state(
         entity_type: &str,
         entity_id: &str,
         table: &TransitionTable,
@@ -328,6 +330,7 @@ impl EntityActor {
             idempotency_cache: None,
             blob_store: None,
             schema_pin: None,
+            creation_contract: None,
         }
     }
 
@@ -355,12 +358,22 @@ impl EntityActor {
             idempotency_cache: None,
             blob_store: None,
             schema_pin: None,
+            creation_contract: None,
         }
     }
 
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Attach the verified immutable creation contract used for a sequence-1 commit.
+    pub fn with_creation_contract(
+        mut self,
+        contract: impl Into<Option<temper_runtime::persistence::CreationContract>>,
+    ) -> Self {
+        self.creation_contract = contract.into();
         self
     }
 
@@ -419,7 +432,7 @@ impl EntityActor {
         self
     }
 
-    async fn persist_overflow_blobs(
+    pub(crate) async fn persist_overflow_blobs(
         blob_store: Option<&crate::blob_store::BlobStore>,
         blobs: &[crate::blobs::OverflowBlobWrite],
     ) -> Result<(), String> {
@@ -451,7 +464,7 @@ impl EntityActor {
             .map(|execution| schema_event_pin(execution, &self.entity_type, action))
     }
 
-    fn field_sync_mode_for_backend(
+    pub(crate) fn field_sync_mode_for_backend(
         backend: Option<BackendLabel>,
         blob_store: Option<&crate::blob_store::BlobStore>,
     ) -> FieldSyncMode {
@@ -462,6 +475,117 @@ impl EntityActor {
             Some(_) if blob_store.is_some() => FieldSyncMode::blob_refs_default(),
             _ => FieldSyncMode::InlineTruncate,
         }
+    }
+
+    /// Attach every durable reaction and state-timeout intent to an event
+    /// before its journal transaction commits.
+    pub(crate) fn attach_durable_intents(
+        &self,
+        payload: &mut serde_json::Value,
+        state: &EntityState,
+        event: &EntityEvent,
+        reaction_context: Option<&crate::trigger::delivery::ReactionCommitContext>,
+        kernel_metadata: Option<&temper_runtime::persistence::KernelEventMetadata>,
+    ) -> Result<(), PersistenceError> {
+        let source_sequence = state.sequence_nr + 1;
+        let mut intents = Vec::new();
+        if let Some(context) = reaction_context {
+            intents.reserve(context.rules.len());
+            for (trigger_index, rule) in context.rules.iter().enumerate() {
+                let delivery_id = crate::trigger::delivery::stable_delivery_id(
+                    self.tenant.as_str(),
+                    &self.entity_type,
+                    &self.entity_id,
+                    &event.action,
+                    source_sequence,
+                    &rule.name,
+                    trigger_index,
+                );
+                let resolved_guard = context
+                    .resolved_guards
+                    .get(&rule.name)
+                    .cloned()
+                    .unwrap_or_default();
+                intents.push(crate::trigger::delivery::PersistedReactionIntent {
+                    kind: crate::trigger::delivery::DeliveryKind::Reaction,
+                    root_delivery_id: context
+                        .root_delivery_id
+                        .clone()
+                        .unwrap_or_else(|| delivery_id.clone()),
+                    delivery_id,
+                    tenant: self.tenant.to_string(),
+                    source_entity_type: self.entity_type.clone(),
+                    source_entity_id: self.entity_id.clone(),
+                    source_action: event.action.clone(),
+                    source_sequence,
+                    source_to_state: event.to_status.clone(),
+                    source_fields: state.fields.clone(),
+                    source_stream_descriptor: kernel_metadata
+                        .map(|metadata| metadata.stream_descriptor().clone()),
+                    guard_passed: rule.when.guard.as_ref().is_none_or(|guard| {
+                        crate::trigger::guard::evaluate_with_resolved(
+                            guard,
+                            &state.fields,
+                            &event.to_status,
+                            &resolved_guard,
+                            &rule.name,
+                        )
+                    }),
+                    target_entity_id: crate::trigger::resolver::resolve_target_id(
+                        &rule.resolve_target,
+                        &self.entity_id,
+                        &state.fields,
+                    ),
+                    trigger_name: rule.name.clone(),
+                    trigger_index,
+                    depth: context.depth,
+                    rule: serde_json::to_value(rule)
+                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
+                    authority: context.authority.clone(),
+                    created_at: event.timestamp,
+                    not_before: None,
+                    state_timeout: None,
+                    collection: context.receipt.as_ref().and_then(|receipt| {
+                        receipt.collection.clone().map(|mut collection| {
+                            collection.role = collection.role.descendant();
+                            collection.attempts = 0;
+                            collection
+                        })
+                    }),
+                    schema_pin: self.schema_event_pin(&event.action),
+                });
+            }
+            if let Some(receipt) = context.receipt.as_ref() {
+                let mut receipt = receipt.clone();
+                receipt.schema_pin = self.schema_event_pin(&event.action);
+                crate::trigger::delivery::attach_receipt(payload, &receipt)
+                    .map_err(PersistenceError::Serialization)?;
+            }
+        }
+        let timeout_intents = {
+            let table = self.table.read().expect("table lock poisoned");
+            crate::trigger::delivery::state_timeout_intents(
+                crate::trigger::delivery::StateTimeoutIntentContext {
+                    tenant: self.tenant.as_str(),
+                    entity_type: &self.entity_type,
+                    entity_id: &self.entity_id,
+                    source_sequence,
+                    event,
+                    source_fields: &state.fields,
+                    table: &table,
+                    schema_pin: self.schema_event_pin(&event.action),
+                    triggering_authority: reaction_context.map(|context| &context.authority),
+                    durable_idempotency_evidence: &state.processed_idempotency_keys,
+                },
+            )
+        }
+        .map_err(PersistenceError::Serialization)?;
+        intents.extend(timeout_intents);
+        if !intents.is_empty() {
+            crate::trigger::delivery::attach_intents(payload, &intents)
+                .map_err(PersistenceError::Serialization)?;
+        }
+        Ok(())
     }
 
     /// Persist an event to the configured event store.
@@ -550,103 +674,13 @@ impl EntityActor {
                 ));
             }
         }
-        let mut intents = Vec::new();
-        if let Some(context) = reaction_context {
-            intents.reserve(context.rules.len());
-            for (trigger_index, rule) in context.rules.iter().enumerate() {
-                let delivery_id = crate::trigger::delivery::stable_delivery_id(
-                    self.tenant.as_str(),
-                    &self.entity_type,
-                    &self.entity_id,
-                    &event.action,
-                    source_sequence,
-                    &rule.name,
-                    trigger_index,
-                );
-                let resolved_guard = context
-                    .resolved_guards
-                    .get(&rule.name)
-                    .cloned()
-                    .unwrap_or_default();
-                intents.push(crate::trigger::delivery::PersistedReactionIntent {
-                    kind: crate::trigger::delivery::DeliveryKind::Reaction,
-                    root_delivery_id: context
-                        .root_delivery_id
-                        .clone()
-                        .unwrap_or_else(|| delivery_id.clone()),
-                    delivery_id,
-                    tenant: self.tenant.to_string(),
-                    source_entity_type: self.entity_type.clone(),
-                    source_entity_id: self.entity_id.clone(),
-                    source_action: event.action.clone(),
-                    source_sequence,
-                    source_to_state: event.to_status.clone(),
-                    source_fields: state.fields.clone(),
-                    source_stream_descriptor: kernel_metadata
-                        .map(|metadata| metadata.stream_descriptor().clone()),
-                    guard_passed: rule.when.guard.as_ref().is_none_or(|guard| {
-                        crate::trigger::guard::evaluate_with_resolved(
-                            guard,
-                            &state.fields,
-                            &event.to_status,
-                            &resolved_guard,
-                            &rule.name,
-                        )
-                    }),
-                    target_entity_id: crate::trigger::resolver::resolve_target_id(
-                        &rule.resolve_target,
-                        &self.entity_id,
-                        &state.fields,
-                    ),
-                    trigger_name: rule.name.clone(),
-                    trigger_index,
-                    depth: context.depth,
-                    rule: serde_json::to_value(rule)
-                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
-                    authority: context.authority.clone(),
-                    created_at: event.timestamp,
-                    not_before: None,
-                    state_timeout: None,
-                    collection: context.receipt.as_ref().and_then(|receipt| {
-                        receipt.collection.clone().map(|mut collection| {
-                            collection.role = collection.role.descendant();
-                            collection.attempts = 0;
-                            collection
-                        })
-                    }),
-                    schema_pin: self.schema_event_pin(&event.action),
-                });
-            }
-            if let Some(receipt) = context.receipt.as_ref() {
-                let mut receipt = receipt.clone();
-                receipt.schema_pin = self.schema_event_pin(&event.action);
-                crate::trigger::delivery::attach_receipt(&mut payload, &receipt)
-                    .map_err(PersistenceError::Serialization)?;
-            }
-        }
-        let timeout_intents = {
-            let table = self.table.read().expect("table lock poisoned");
-            crate::trigger::delivery::state_timeout_intents(
-                crate::trigger::delivery::StateTimeoutIntentContext {
-                    tenant: self.tenant.as_str(),
-                    entity_type: &self.entity_type,
-                    entity_id: &self.entity_id,
-                    source_sequence,
-                    event,
-                    source_fields: &state.fields,
-                    table: &table,
-                    schema_pin: self.schema_event_pin(&event.action),
-                    triggering_authority: reaction_context.map(|context| &context.authority),
-                    durable_idempotency_evidence: &state.processed_idempotency_keys,
-                },
-            )
-        }
-        .map_err(PersistenceError::Serialization)?;
-        intents.extend(timeout_intents);
-        if !intents.is_empty() {
-            crate::trigger::delivery::attach_intents(&mut payload, &intents)
-                .map_err(PersistenceError::Serialization)?;
-        }
+        self.attach_durable_intents(
+            &mut payload,
+            state,
+            event,
+            reaction_context,
+            kernel_metadata,
+        )?;
         let envelope = PersistenceEnvelope {
             sequence_nr: state.sequence_nr + 1,
             event_type: event.action.clone(),
@@ -666,7 +700,7 @@ impl EntityActor {
         // ADR-0153/0155: derive the declared key rows AND the vector-index rows from
         // the new state and co-commit them with the journal append, so a keyed read
         // is correct without a scan and a kNN read reflects the write deterministically.
-        let (key_rows, vector_rows, reconcile_vectors) = {
+        let (mut key_rows, vector_rows, reconcile_vectors) = {
             let table = self.table.read().expect("table lock poisoned");
             // The type declares vector paths → the store reconciles this entity's
             // vector rows (delete stale + insert current) even when no row is emitted
@@ -676,9 +710,14 @@ impl EntityActor {
             let mut key_rows = Vec::new();
             let mut vector_rows = Vec::new();
             if let Some(field_map) = state.fields.as_object() {
+                let index_entity = state.status != "Deleted";
                 for key in &table.keys {
-                    if let Some(hash) =
-                        crate::key_index::canonical_key_hash(&key.name, &key.properties, field_map)
+                    if index_entity
+                        && let Some(hash) = crate::key_index::canonical_key_hash(
+                            &key.name,
+                            &key.properties,
+                            field_map,
+                        )
                     {
                         key_rows.push(temper_runtime::persistence::EntityKeyRow {
                             key_name: key.name.clone(),
@@ -690,8 +729,7 @@ impl EntityActor {
                 // vector rows, so the reconcile below PURGES any it had, even though
                 // its embedding field may still be present. Mirrors how the field-index
                 // projection removes a deleted entity.
-                let index_vectors = state.status != "Deleted";
-                for decl in table.vectors.iter().filter(|_| index_vectors) {
+                for decl in table.vectors.iter().filter(|_| index_entity) {
                     // A vector is indexed only when its property parses to `dims`
                     // floats AND its model tag is a non-empty string — otherwise the
                     // path indexes nothing for this entity (like an incomplete key).
@@ -717,7 +755,30 @@ impl EntityActor {
             }
             (key_rows, vector_rows, reconcile_vectors)
         };
+        key_rows.sort_by(|left, right| {
+            (&left.key_name, &left.key_hash).cmp(&(&right.key_name, &right.key_hash))
+        });
+        let declared_keys = self.table.read().expect("table lock poisoned").keys.clone();
         let append_start = Instant::now(); // determinism-ok: production-only event-store wait metric
+        let first_event = if state.sequence_nr == 0 && event.action == "Created" {
+            let contract = self.creation_contract.as_ref().ok_or_else(|| {
+                PersistenceError::Storage(
+                    "verified entity creation is missing its immutable creation contract"
+                        .to_string(),
+                )
+            })?;
+            Some(temper_runtime::persistence::FirstEventMetadata {
+                contract: contract.clone(),
+                contract_revision: contract.version,
+                schema_identity: contract.schema_digest.clone(),
+                declared_key_signature: crate::application_data::declared_key_signature(
+                    &declared_keys,
+                    contract,
+                ),
+            })
+        } else {
+            None
+        };
         let source_append = PersistenceAppend {
             persistence_id: persistence_id.to_string(),
             expected_sequence: state.sequence_nr,
@@ -725,7 +786,39 @@ impl EntityActor {
             key_rows: key_rows.clone(),
             vector_rows: vector_rows.clone(),
             reconcile_vectors,
+            first_event,
         };
+        if state.sequence_nr == 0
+            && event.action == "Created"
+            && let Some(contract) = self.creation_contract.clone()
+            && reaction_context
+                .and_then(|context| context.receipt.as_ref())
+                .is_none_or(|receipt| receipt.collection.is_none())
+        {
+            let (_, _, journal_entity_id) =
+                temper_runtime::tenant::parse_persistence_id_parts(persistence_id)
+                    .map_err(PersistenceError::Storage)?;
+            let declared_key_signature =
+                crate::application_data::declared_key_signature(&declared_keys, &contract);
+            let commit = temper_runtime::persistence::FirstEventCommit {
+                tenant: self.tenant.clone(),
+                entity_type: self.entity_type.clone(),
+                entity_id: journal_entity_id.to_string(),
+                persistence_id: persistence_id.to_string(),
+                event: source_append.events[0].clone(),
+                contract_revision: contract.version,
+                schema_identity: contract.schema_digest.clone(),
+                contract,
+                declared_key_signature,
+                key_rows,
+                vector_rows,
+                reconcile_vectors,
+                projection: None,
+            };
+            let sequence = store.commit_first_event(&commit).await?;
+            state.sequence_nr = sequence;
+            return Ok(sequence);
+        }
         let collection_receipt = reaction_context
             .and_then(|context| context.receipt.as_ref())
             .filter(|receipt| receipt.collection.is_some());

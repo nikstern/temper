@@ -170,7 +170,16 @@ pub(super) async fn init_storage(
             let store = RedisEventStore::new(&redis_url)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {e}"))?;
+            let legacy_writers_quiesced = std::env::var("TEMPER_REDIS_LEGACY_WRITERS_QUIESCED")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+            let migrated = store
+                .migrate_all_legacy_keys(legacy_writers_quiesced)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to migrate Redis keyspace: {e}"))?;
             println!("  Storage: redis ({})", redact_connection_url(&redis_url));
+            if migrated > 0 {
+                println!("  Redis: migrated {migrated} legacy keys across all tenants");
+            }
             Some(StorageStack::from_redis(store))
         }
     };
@@ -319,6 +328,7 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
         // field-index re-scan. No-op on backends that don't co-commit keys (those
         // never become authoritative, so a keyed miss stays scan-safe).
         for tenant_id in &all_tenants {
+            server.populate_creation_contracts(tenant_id).await;
             server.populate_key_index_from_snapshots(tenant_id).await;
         }
         // ADR-0155: backfill the declared-vector index (parse + upsert one row per

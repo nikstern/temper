@@ -1,5 +1,6 @@
 //! Atomic event-store persistence and bounded replay for the private ledger.
 
+mod model;
 mod recovery;
 mod source;
 
@@ -15,6 +16,11 @@ use super::{
     CollectionWorkflowRecordV1, CollectionWorkflowStart, collection_control_id,
 };
 use crate::storage::BoxedEventStore;
+use model::MAX_COLLECTION_WORKFLOW_EVENTS;
+pub(crate) use model::{
+    ACTIVE_COLLECTION_WORKFLOW_FIELD, COLLECTION_CONTROL_INTENTS_FIELD,
+    COLLECTION_START_INTENTS_FIELD, COLLECTION_WORKFLOW_ENTITY_TYPE, CollectionLedgerCommitOutcome,
+};
 use recovery::{SourceEvidence, commit_or_reconcile};
 pub(crate) use recovery::{
     list_collection_records_page, list_collection_workflow_ids_page, load_collection_record,
@@ -22,23 +28,6 @@ pub(crate) use recovery::{
 use source::active_workflow_append;
 pub(crate) use source::load_active_source_workflow_id;
 use source::{attach_active_workflow, ensure_source_journal};
-/// Reserved source-event field containing normalized collection starts.
-pub(crate) const COLLECTION_START_INTENTS_FIELD: &str = "_temper_collection_starts_v1";
-/// Reserved source-event field containing normalized collection controls.
-pub(crate) const COLLECTION_CONTROL_INTENTS_FIELD: &str = "_temper_collection_controls_v1";
-/// Reserved replay field retaining the active workflow identity.
-pub(crate) const ACTIVE_COLLECTION_WORKFLOW_FIELD: &str = "_temper_active_collection_workflow_v1";
-/// Private synthetic entity type used for one workflow journal.
-pub(crate) const COLLECTION_WORKFLOW_ENTITY_TYPE: &str = "_CollectionWorkflow";
-/// Maximum private workflow snapshots inspected to recover one owned intent.
-const MAX_COLLECTION_WORKFLOW_EVENTS: usize = 1_024;
-
-/// Outcome of an atomic commit whose prior result may have been ambiguous.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CollectionLedgerCommitOutcome {
-    Committed(Vec<PersistenceAppendResult>),
-    Reconciled(Vec<PersistenceAppendResult>),
-}
 
 /// Attach one normalized start intent and active workflow ID to a source event.
 pub(crate) fn attach_collection_start(
@@ -470,6 +459,7 @@ pub(crate) fn workflow_append(
         key_rows: Vec::new(),
         vector_rows: Vec::new(),
         reconcile_vectors: false,
+        first_event: None,
     })
 }
 

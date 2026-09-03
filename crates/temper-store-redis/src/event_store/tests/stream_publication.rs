@@ -165,6 +165,7 @@ async fn historical_index_and_publication_fence_are_bounded_and_atomic() {
                     key_rows: Vec::new(),
                     vector_rows: Vec::new(),
                     reconcile_vectors: false,
+                    first_event: None,
                 },
                 PersistenceAppend {
                     persistence_id: format!("{tenant}:Other:other-1"),
@@ -173,6 +174,7 @@ async fn historical_index_and_publication_fence_are_bounded_and_atomic() {
                     key_rows: Vec::new(),
                     vector_rows: Vec::new(),
                     reconcile_vectors: false,
+                    first_event: None,
                 },
             ])
             .await,

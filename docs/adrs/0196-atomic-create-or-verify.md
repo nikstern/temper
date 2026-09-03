@@ -89,12 +89,13 @@ pub enum CreateOrVerifyOutcome<T> {
 Both successful variants always carry the authoritative canonical entity value
 and its per-entity commit token. They never use the ordinary write response's
 budget-driven omission form. Before any creation can commit, the host reserves a
-conservative encoded response bound using the canonical materialized create value,
-the maximum permitted returned identity, and the fixed outcome envelope. If the
-reservation does not fit the invocation response budget, the request is rejected
-with `ResponseReservationExceeded`. Existing-owner requests use the same
-pre-lookup conservative check, preventing budget size from becoming an existence
-oracle.
+conservative encoded response bound using every response-visible property's
+effective verified inline ceiling, the maximum permitted returned identity and
+sequence, and the larger fixed success envelope. The bound covers later
+authoritative state, not only the requested sequence-1 value. If the reservation
+does not fit the invocation response budget, the request is rejected with
+`ResponseReservationExceeded`. Existing-owner requests use the same pre-lookup
+check, preventing budget size from becoming an existence oracle.
 
 The idempotency key is caller supplied, non-empty, and at most 256 UTF-8 bytes.
 Its durable scope is `(tenant, logical_module_name, entity_type,
@@ -334,6 +335,30 @@ public semantics.
 
 ## Consequences
 
+### Durable Created observation
+
+The durable sequence-one journal event is the replay source for every public
+entity SSE surface. Handlers subscribe before reading history, replay tenant- or
+entity-filtered journal events, and suppress live duplicates through per-entity
+high-water sequences. Scoped journals resolve their encoded storage coordinate
+to the public entity ID from immutable sequence-one parameters. Tenant-wide
+replay is paged and fails closed when its explicit event budget is exhausted.
+The notification reservation is acknowledged only after process-local publish;
+disconnect, lag, or restart remains recoverable from the journal independently
+of that acknowledgement.
+
+### Overflow blob/catalog crash ordering
+
+Create-or-verify commits the sequence-one event and its catalog/query projection
+before writing immutable, content-addressed overflow objects. The event retains
+the full canonical creation parameters, so a crash or partial object-store
+failure is recoverable: retry and authoritative replay regenerate the same object
+keys and bytes idempotently. Successful disclosure remains gated on completion of
+every referenced object write. This ordering prevents failed or conflicting
+pre-commit attempts from leaving permanent unreferenced objects; a transiently
+missing object after commit is repaired from the durable journal rather than
+guessed from a projection.
+
 ### Positive
 
 - Deterministic creation becomes linearizable and retry-safe without projection
@@ -365,6 +390,11 @@ public semantics.
   uniform denial tests.
 - A committed operation could lose its reply. Durable scoped idempotency makes the
   retry return `AlreadyMatches` without a second append.
+- A fresh PostgreSQL fork database could fail its first restart if the lineage
+  classifier omitted a published fork migration. Fork migrations 12 through 14
+  are therefore treated as one immutable pre-shared prefix and restart-tested.
+  Shared migration 19 also idempotently converges the fork-only migration 14
+  bootstrap tables and policies onto the legacy and fixed-upstream lineages.
 
 ### DST Compliance
 

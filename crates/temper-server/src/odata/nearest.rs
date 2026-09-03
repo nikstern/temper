@@ -190,17 +190,13 @@ pub(super) async fn handle_nearest(
             return bad_request("Temper.Nearest requires either 'to' (an entity id) or 'vector'");
         }
         (Some(reference_id), None) => {
-            let materialized = materialize_entity_set_entities(
-                state,
-                tenant,
-                &entity_type,
-                &set_name,
-                std::slice::from_ref(&reference_id.to_string()),
-                true,
-                None,
-            )
-            .await;
-            let Some(body) = materialized.entities.into_iter().next() else {
+            // The reference controls the query vector, so an eventually consistent
+            // projection cannot authoritatively establish either its existence or
+            // lifecycle. Read its journal-backed state before disclosing or using it.
+            let Ok(reference) = crate::application_data::GovernedApplicationDataService::new(state)
+                .get(tenant, &entity_type, reference_id)
+                .await
+            else {
                 return odata_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFound",
@@ -208,6 +204,7 @@ pub(super) async fn handle_nearest(
                 )
                 .into_response();
             };
+            let body = serde_json::to_value(&reference.state).unwrap_or_default();
             // A soft-deleted reference is treated as absent — a tombstone must not
             // seed a query, and `to='<deleted-id>'` returns 404.
             if is_deleted(&body) {

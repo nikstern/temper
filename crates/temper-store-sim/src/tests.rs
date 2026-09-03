@@ -1,7 +1,10 @@
 use super::*;
 use temper_runtime::persistence::{
-    EventMetadata, KernelEventMetadata, StreamDescriptorInputV1, StreamDescriptorV1,
-    StreamEntityRef, StreamMutability, StreamStorageRefV1,
+    CREATION_CONTRACT_VERSION_V1, CreateOrVerifyRequest, CreateOrVerifyStoreOutcome,
+    CreationContract, CreationContractField, CreationCoveragePublication, CreationMetadataRepair,
+    EntityKeyRow, EventMetadata, FirstEventCommit, FirstEventMetadata, FirstEventProjection,
+    KernelEventMetadata, StreamDescriptorInputV1, StreamDescriptorV1, StreamEntityRef,
+    StreamMutability, StreamStorageRefV1,
 };
 
 fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
@@ -19,6 +22,9 @@ fn test_envelope(seq: u64, event_type: &str) -> PersistenceEnvelope {
         },
     }
 }
+
+#[path = "tests/create_or_verify.rs"]
+mod create_or_verify;
 
 #[tokio::test]
 async fn append_and_read_roundtrip() {
@@ -109,6 +115,7 @@ async fn append_batch_commits_multiple_journals_atomically() {
             key_rows: Vec::new(),
             vector_rows: Vec::new(),
             reconcile_vectors: false,
+            first_event: None,
         },
         PersistenceAppend {
             persistence_id: "default:Order:ord-b".to_string(),
@@ -117,6 +124,7 @@ async fn append_batch_commits_multiple_journals_atomically() {
             key_rows: Vec::new(),
             vector_rows: Vec::new(),
             reconcile_vectors: false,
+            first_event: None,
         },
     ];
 
@@ -160,6 +168,7 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 key_rows: Vec::new(),
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                first_event: None,
             },
             PersistenceAppend {
                 persistence_id: "default:Order:ord-existing".to_string(),
@@ -168,6 +177,7 @@ async fn append_batch_conflict_leaves_all_journals_untouched() {
                 key_rows: Vec::new(),
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                first_event: None,
             },
         ])
         .await
@@ -215,6 +225,7 @@ async fn append_batch_key_conflict_aborts_every_journal_and_projection() {
                 key_rows: vec![key],
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                first_event: None,
             },
             PersistenceAppend {
                 persistence_id: "default:_CollectionWorkflow:w1".to_string(),
@@ -223,6 +234,7 @@ async fn append_batch_key_conflict_aborts_every_journal_and_projection() {
                 key_rows: Vec::new(),
                 vector_rows: Vec::new(),
                 reconcile_vectors: false,
+                first_event: None,
             },
         ])
         .await
@@ -250,6 +262,7 @@ async fn append_batch_rejects_two_new_streams_claiming_the_same_key() {
         key_rows: vec![key.clone()],
         vector_rows: Vec::new(),
         reconcile_vectors: false,
+        first_event: None,
     });
     let error = store
         .append_batch(&appends)
@@ -413,6 +426,7 @@ async fn fault_injection_produces_errors() {
         concurrency_violation_prob: 0.0,
         read_truncation_prob: 0.0,
         snapshot_failure_prob: 0.0,
+        create_or_verify_reply_loss_prob: 0.0,
     };
     let store = SimEventStore::new(42, faults);
     let pid = "default:Order:fault-1";

@@ -574,7 +574,21 @@ mod tests {
     use temper_runtime::ActorSystem;
     use temper_spec::csdl::parse_csdl;
 
-    const TICKET_CSDL: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
+    const TICKET_CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.TimeoutTest" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Ticket">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String" Nullable="false"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Tickets" EntityType="Temper.TimeoutTest.Ticket"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
 
     /// Custom Ticket IOA with a state_timeout on `Open`. Fires `AssignAgent`
     /// after 1 second; the action transitions the ticket to `InProgress`.

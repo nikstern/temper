@@ -12,8 +12,9 @@ use temper_runtime::persistence::schema_deployment::{
     split_scoped_journal_entity_id,
 };
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventMetadata, EventStore, PersistenceAppend,
-    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, pack_f32_le, unpack_f32_le,
+    CreateOrVerifyRequest, CreateOrVerifyStoreOutcome, EntityVectorCandidate, EntityVectorRow,
+    EventMetadata, EventStore, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope,
+    PersistenceError, pack_f32_le, unpack_f32_le,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -196,7 +197,7 @@ async fn lock_unscoped_publication_generation(
     Ok(())
 }
 
-async fn assert_unscoped_stream_publication_fence(
+pub(crate) async fn assert_unscoped_stream_publication_fence(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant: &str,
     entity_type: &str,
@@ -239,6 +240,41 @@ async fn assert_unscoped_stream_publication_fence(
 // ---------------------------------------------------------------------------
 
 impl EventStore for PostgresEventStore {
+    async fn reconcile_creation_metadata(
+        &self,
+        repair: &temper_runtime::persistence::CreationMetadataRepair,
+    ) -> Result<(), PersistenceError> {
+        crate::create_or_verify::reconcile_creation_metadata(self, repair).await
+    }
+
+    async fn publish_creation_coverage(
+        &self,
+        publication: &temper_runtime::persistence::CreationCoveragePublication,
+    ) -> Result<(), PersistenceError> {
+        crate::create_or_verify::publish_creation_coverage(self, publication).await
+    }
+
+    async fn commit_first_event(
+        &self,
+        commit: &temper_runtime::persistence::FirstEventCommit,
+    ) -> Result<u64, PersistenceError> {
+        crate::create_or_verify::commit_first_event(self, commit).await
+    }
+
+    async fn create_or_verify(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<CreateOrVerifyStoreOutcome, PersistenceError> {
+        crate::create_or_verify::run(self, request).await
+    }
+
+    async fn acknowledge_create_or_verify_notification(
+        &self,
+        request: &CreateOrVerifyRequest,
+    ) -> Result<(), PersistenceError> {
+        crate::create_or_verify::acknowledge_notification(self, request).await
+    }
+
     /// Append one or more events to the journal.
     ///
     /// Events are inserted with consecutive sequence numbers starting from
@@ -407,23 +443,46 @@ impl EventStore for PostgresEventStore {
                 new_seq,
             )
             .await?;
+            if let Some((revision, schema, signature)) =
+                crate::create_or_verify::touch_creation_contract(
+                    &mut tx,
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    new_seq,
+                )
+                .await?
+            {
+                crate::create_or_verify::advance_coverage_if_complete(
+                    &mut tx,
+                    crate::create_or_verify::CoverageAdvance {
+                        tenant,
+                        entity_type,
+                        cursor: entity_id,
+                        created_sequence: new_seq - expected_sequence,
+                        contract_revision: revision,
+                        schema_identity: &schema,
+                        declared_key_signature: &signature,
+                    },
+                )
+                .await?;
+            }
         }
 
-        // ADR-0153: co-commit the declared key-index rows in THIS transaction
-        // (uniqueness was validated above). Drop the entity's prior row for each
-        // key_name (the value may have changed), then claim the new key_hash.
+        // ADR-0153/0196: replace the entity's complete declared-key set in this
+        // transaction. The unconditional delete removes keys that became null,
+        // were removed from the schema, or were released by a tombstone.
+        crate::dbm::postgres_query!(
+            "DELETE FROM entity_key_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
         for key in key_rows {
-            crate::dbm::postgres_query!(
-                "DELETE FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_key_index \
                  (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
@@ -502,9 +561,6 @@ impl EventStore for PostgresEventStore {
         entity_id: &str,
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
     ) -> Result<(), PersistenceError> {
-        if key_rows.is_empty() {
-            return Ok(());
-        }
         let mut tx = self
             .pool
             .begin()
@@ -529,24 +585,23 @@ impl EventStore for PostgresEventStore {
             if let Some((existing,)) = &holder
                 && existing != entity_id
             {
-                tracing::warn!(
-                    tenant, entity_type, entity_id, existing,
-                    key_name = %key.key_name,
-                    "entity_key_index backfill: declared-key conflict; skipping"
-                );
-                continue;
+                return Err(PersistenceError::Storage(format!(
+                    "entity_key_index backfill conflict for '{}': held by {existing}",
+                    key.key_name
+                )));
             }
-            crate::dbm::postgres_query!(
-                "DELETE FROM entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        }
+        crate::dbm::postgres_query!(
+            "DELETE FROM entity_key_index \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        for key in key_rows {
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_key_index \
                  (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
@@ -913,6 +968,20 @@ impl EventStore for PostgresEventStore {
                     actual: current_seq,
                 });
             }
+            if let Some(first_event) = &append.first_event {
+                if append.expected_sequence != 0 || append.events.is_empty() {
+                    return Err(PersistenceError::Storage(
+                        "first-event metadata requires a non-empty sequence-0 append".to_string(),
+                    ));
+                }
+                if first_event.contract_revision != first_event.contract.version
+                    || first_event.schema_identity != first_event.contract.schema_digest
+                {
+                    return Err(PersistenceError::Storage(
+                        "invalid first-event metadata".to_string(),
+                    ));
+                }
+            }
             let segment_index = segments::open_segment_for_append(
                 &mut tx,
                 tenant,
@@ -981,9 +1050,59 @@ impl EventStore for PostgresEventStore {
                 sequence_nr: new_seq,
             });
         }
+        let mut coverage_changes = std::collections::BTreeMap::<
+            (String, String),
+            (
+                u64,
+                std::collections::BTreeSet<(u32, String, String)>,
+                String,
+            ),
+        >::new();
         for ((append, (tenant, entity_type, entity_id, _)), result) in
             appends.iter().zip(parsed.iter()).zip(results.iter())
         {
+            if let Some(first_event) = &append.first_event {
+                let contract_json = serde_json::to_value(&first_event.contract)
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+                crate::dbm::postgres_query!(
+                    "INSERT INTO entity_creation_contracts \
+                     (tenant, entity_type, entity_id, contract_json, contract_digest, \
+                      contract_revision, schema_identity, declared_key_signature, source_write_version) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                )
+                .bind(tenant)
+                .bind(entity_type)
+                .bind(entity_id)
+                .bind(contract_json)
+                .bind(&first_event.contract.digest)
+                .bind(i64::from(first_event.contract_revision))
+                .bind(&first_event.schema_identity)
+                .bind(&first_event.declared_key_signature)
+                .bind(i64::try_from(result.sequence_nr).map_err(|error| {
+                    PersistenceError::Storage(error.to_string())
+                })?)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            }
+            if result.sequence_nr > append.expected_sequence
+                && let Some((revision, schema, signature)) =
+                    crate::create_or_verify::touch_creation_contract(
+                        &mut tx,
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        result.sequence_nr,
+                    )
+                    .await?
+            {
+                let entry = coverage_changes
+                    .entry((tenant.clone(), entity_type.clone()))
+                    .or_insert_with(|| (0, std::collections::BTreeSet::new(), entity_id.clone()));
+                entry.0 += result.sequence_nr - append.expected_sequence;
+                entry.1.insert((revision, schema, signature));
+                entry.2 = entity_id.clone();
+            }
             for key in &append.key_rows {
                 let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
                     "SELECT entity_id FROM entity_key_index \
@@ -1002,17 +1121,18 @@ impl EventStore for PostgresEventStore {
                         key.key_name
                     )));
                 }
-                crate::dbm::postgres_query!(
-                    "DELETE FROM entity_key_index \
-                     WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(&key.key_name)
-                .bind(entity_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            }
+            crate::dbm::postgres_query!(
+                "DELETE FROM entity_key_index \
+                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            for key in &append.key_rows {
                 crate::dbm::postgres_query!(
                     "INSERT INTO entity_key_index \
                      (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
@@ -1056,6 +1176,23 @@ impl EventStore for PostgresEventStore {
                     .await
                     .map_err(|error| PersistenceError::Storage(error.to_string()))?;
                 }
+            }
+        }
+        for ((tenant, entity_type), (write_delta, signatures, cursor)) in coverage_changes {
+            for (revision, schema, signature) in signatures {
+                crate::create_or_verify::advance_coverage_if_complete(
+                    &mut tx,
+                    crate::create_or_verify::CoverageAdvance {
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        cursor: &cursor,
+                        created_sequence: write_delta,
+                        contract_revision: revision,
+                        schema_identity: &schema,
+                        declared_key_signature: &signature,
+                    },
+                )
+                .await?;
             }
         }
 
@@ -1352,6 +1489,27 @@ impl EventStore for PostgresEventStore {
         .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
         Ok(rows)
+    }
+
+    async fn list_creation_source_ids_by_type(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+    ) -> Result<Vec<String>, PersistenceError> {
+        crate::dbm::postgres_query_scalar!(
+            "SELECT entity_id FROM ( \
+               SELECT entity_id FROM events WHERE tenant=$1 AND entity_type=$2 \
+               UNION SELECT entity_id FROM snapshots WHERE tenant=$1 AND entity_type=$2 \
+               UNION SELECT entity_id FROM entity_catalog WHERE tenant=$1 AND entity_type=$2 \
+               UNION SELECT entity_id FROM entity_field_index WHERE tenant=$1 AND entity_type=$2 \
+               UNION SELECT entity_id FROM entity_key_index WHERE tenant=$1 AND entity_type=$2 \
+             ) creation_sources ORDER BY entity_id",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PersistenceError::Storage(error.to_string()))
     }
 
     async fn list_entity_ids_limited(
@@ -1887,6 +2045,10 @@ impl EventStore for PostgresEventStore {
 #[cfg(test)]
 #[path = "store_projection_test.rs"]
 mod projection_tests;
+
+#[cfg(test)]
+#[path = "create_or_verify_test.rs"]
+mod create_or_verify_tests;
 
 #[cfg(test)]
 mod tests {

@@ -28,6 +28,9 @@ fn operation_fields(
         DataOperationV1::EntityCreate { entity_type, .. } => {
             ("entity_create", Some(entity_type), None, None)
         }
+        DataOperationV1::EntityCreateOrVerify { entity_type, .. } => {
+            ("entity_create_or_verify", Some(entity_type), None, None)
+        }
         DataOperationV1::EntityPatch { entity_type, .. } => {
             ("entity_patch", Some(entity_type), None, None)
         }
@@ -56,6 +59,17 @@ pub(super) fn result_kind(response: &DataResponseV1) -> &'static str {
             DataResultV1::Entity { .. } => "entity",
             DataResultV1::Page { .. } => "page",
             DataResultV1::Write { .. } => "write",
+            DataResultV1::CreateOrVerify { outcome } => match outcome {
+                temper_wasm_sdk::data::CreateOrVerifyResultV1::Created { .. } => {
+                    "create_or_verify_created"
+                }
+                temper_wasm_sdk::data::CreateOrVerifyResultV1::AlreadyMatches { .. } => {
+                    "create_or_verify_already_matches"
+                }
+                temper_wasm_sdk::data::CreateOrVerifyResultV1::Conflict { .. } => {
+                    "create_or_verify_conflict"
+                }
+            },
             DataResultV1::Action { .. } => "action",
             DataResultV1::Batch { .. } => "batch",
             DataResultV1::FileRead { .. } => "file_read",
