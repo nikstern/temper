@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use super::{ModuleDataError, ModuleDataErrorKind, Retryability};
+use super::{FailureOutcome, FailureRetryability, ModuleDataError, ModuleDataErrorKind};
 
 /// Three-way nullable patch value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,8 +47,10 @@ pub fn encode_command_object<T: Serialize + ?Sized>(
             ModuleDataErrorKind::InvalidRequest,
             "GeneratedCommandEncodingFailed",
             error.to_string(),
-            Retryability::Never,
+            FailureRetryability::Never,
+            FailureOutcome::NotApplied,
         )
+        .expect("static generated-command failure contract must be valid")
     })?;
     match encoded {
         serde_json::Value::Object(object) => Ok(object),
@@ -56,8 +58,10 @@ pub fn encode_command_object<T: Serialize + ?Sized>(
             ModuleDataErrorKind::SchemaMismatch,
             "GeneratedCommandNotObject",
             "generated command did not encode as a JSON object",
-            Retryability::Never,
-        )),
+            FailureRetryability::Never,
+            FailureOutcome::NotApplied,
+        )
+        .expect("static generated-command failure contract must be valid")),
     }
 }
 
@@ -93,7 +97,7 @@ mod tests {
     #[test]
     fn non_object_encoding_fails_closed() {
         let error = encode_command_object("not-an-object").unwrap_err();
-        assert_eq!(error.code, "GeneratedCommandNotObject");
-        assert_eq!(error.kind, ModuleDataErrorKind::SchemaMismatch);
+        assert_eq!(error.code().as_str(), "GeneratedCommandNotObject");
+        assert_eq!(error.kind(), ModuleDataErrorKind::SchemaMismatch);
     }
 }

@@ -8,7 +8,7 @@ use temper_wasm_sdk::data::{
 };
 
 use super::{
-    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget, data_error,
+    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget, not_applied_error,
     short_type,
 };
 
@@ -36,7 +36,7 @@ impl ApplicationDataInvocation {
                 })
                 .unwrap_or(false);
             if !exact_schema_available {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "ScopedSchemaUnavailable",
                     "exact scoped schema is unavailable",
@@ -51,7 +51,7 @@ impl ApplicationDataInvocation {
         {
             return Ok(());
         }
-        Err(data_error(
+        Err(not_applied_error(
             ModuleDataErrorKind::AuthorizationDenied,
             "CapabilityDenied",
             "module data grant does not permit this operation",
@@ -64,7 +64,7 @@ impl ApplicationDataInvocation {
         file_operation: FileOperationKind,
     ) -> Result<String, ModuleDataError> {
         if !self.authority.binding.grant.operations.contains(&kind) {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::AuthorizationDenied,
                 "CapabilityDenied",
                 "module data grant does not permit this File operation",
@@ -81,7 +81,7 @@ impl ApplicationDataInvocation {
             })
             .map(|entity| entity.entity_type.clone())
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::AuthorizationDenied,
                     "FileCapabilityDenied",
                     "module data grant does not permit this File capability",
@@ -178,22 +178,24 @@ impl ApplicationDataInvocation {
 }
 
 fn module_data_authorization_error(denial: AuthzDenial) -> ModuleDataError {
-    let mut error = data_error(
+    let mut error = ModuleDataError::new(
         ModuleDataErrorKind::AuthorizationDenied,
         "AuthorizationDenied",
         "caller is not authorized for this operation",
-    );
+        temper_wasm_sdk::FailureRetryability::AfterAuthorization,
+        temper_wasm_sdk::FailureOutcome::NotApplied,
+    )
+    .expect("static authorization failure contract must be valid");
     let (denial_class, policy_ids, decision_id) = match denial {
         AuthzDenial::PolicyDenied { mut policy_ids } => {
             policy_ids.sort();
             policy_ids.dedup();
             policy_ids.truncate(16);
-            let decision_id = if policy_ids.is_empty() {
-                "cedar:policy-denied".to_string()
-            } else {
-                format!("cedar:policies:{}", policy_ids.join(","))
-            };
-            ("policy_denied", Some(policy_ids), Some(decision_id))
+            let decision_id = policy_ids
+                .first()
+                .cloned()
+                .or_else(|| Some("cedar:policy-denied".to_string()));
+            ("policy_denied", Some(policy_ids), decision_id)
         }
         AuthzDenial::NoMatchingPermit => (
             "no_matching_permit",
@@ -206,14 +208,24 @@ fn module_data_authorization_error(denial: AuthzDenial) -> ModuleDataError {
         AuthzDenial::InvalidContext(_) => ("invalid_context", None, None),
         AuthzDenial::EngineError(_) => ("engine_error", None, None),
     };
-    let mut details = serde_json::Map::from_iter([(
-        "denial_class".to_string(),
-        serde_json::Value::String(denial_class.to_string()),
-    )]);
+    error.insert_detail_or_omit(
+        temper_wasm_sdk::DetailKey::new("denial_class").expect("static detail key is valid"),
+        temper_wasm_sdk::FailureDetailValue::String(
+            temper_wasm_sdk::BoundedDetailString::new(denial_class)
+                .expect("closed denial class is bounded"),
+        ),
+    );
     if let Some(policy_ids) = policy_ids {
-        details.insert("policy_ids".to_string(), serde_json::json!(policy_ids));
+        error.insert_detail_or_omit(
+            temper_wasm_sdk::DetailKey::new("policy_count").expect("static detail key is valid"),
+            temper_wasm_sdk::FailureDetailValue::Unsigned(policy_ids.len() as u64),
+        );
+        error.mark_details_omitted();
     }
-    error.decision_id = decision_id;
-    error.details = Some(Box::new(details));
+    if let Some(decision_id) = decision_id
+        && let Ok(with_decision_id) = error.clone().with_decision_id(decision_id)
+    {
+        error = with_decision_id;
+    }
     error
 }

@@ -25,8 +25,8 @@ async fn response_reservation_uses_the_complete_schema_before_owner_lookup() {
         ),
     ] {
         let error = response_error(call(&constrained, candidate).await);
-        assert_eq!(error.kind, ModuleDataErrorKind::BudgetExceeded);
-        assert_eq!(error.code, "ResponseReservationExceeded");
+        assert_eq!(error.kind(), ModuleDataErrorKind::BudgetExceeded);
+        assert_eq!(error.code().as_str(), "ResponseReservationExceeded");
     }
     assert_eq!(
         store
@@ -68,8 +68,8 @@ async fn response_reservation_includes_large_schema_defaults() {
     );
     let id = "018f1f80-7b2d-7000-8000-000000000090";
     let error = response_error(call(&constrained, operation(id, "request-90", "Ada")).await);
-    assert_eq!(error.kind, ModuleDataErrorKind::BudgetExceeded);
-    assert_eq!(error.code, "ResponseReservationExceeded");
+    assert_eq!(error.kind(), ModuleDataErrorKind::BudgetExceeded);
+    assert_eq!(error.code().as_str(), "ResponseReservationExceeded");
     assert!(
         store
             .dump_journal(&format!("default:Customer:{id}"))

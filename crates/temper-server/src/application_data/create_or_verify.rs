@@ -18,7 +18,8 @@ use crate::entity_actor::{EntityActor, EntityEvent, SCHEMA_PIN_FIELD, schema_eve
 
 use super::{
     ApplicationDataInvocation, EntityWriteOperation, ModuleDataTarget, compile_creation_contract,
-    data_error, extract_id, internal_error, short_type,
+    extract_id, mark_applied, not_applied_error, not_applied_internal_error, short_type,
+    unknown_internal_error,
 };
 
 impl ApplicationDataInvocation {
@@ -112,8 +113,8 @@ impl ApplicationDataInvocation {
             params: serde_json::Value::Object(value.clone()),
             idempotency_key: None,
         };
-        let mut payload =
-            serde_json::to_value(&created).map_err(|error| internal_error(error.to_string()))?;
+        let mut payload = serde_json::to_value(&created)
+            .map_err(|error| not_applied_internal_error(error.to_string()))?;
         if let Some(pin) = self.authority.target.schema_pin() {
             payload
                 .as_object_mut()
@@ -121,7 +122,7 @@ impl ApplicationDataInvocation {
                 .insert(
                     SCHEMA_PIN_FIELD.to_string(),
                     serde_json::to_value(schema_event_pin(pin, runtime_type, "Created"))
-                        .map_err(|error| internal_error(error.to_string()))?,
+                        .map_err(|error| not_applied_internal_error(error.to_string()))?,
                 );
         }
         let table = self.initial_table(runtime_type)?;
@@ -137,7 +138,7 @@ impl ApplicationDataInvocation {
                 serde_json::Value::String(entity_id.clone()),
             );
         let Some((store, backend)) = self.state.event_journal() else {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "AtomicCreateOrVerifyUnavailable",
                 "atomic create-or-verify requires a durable event journal",
@@ -174,7 +175,7 @@ impl ApplicationDataInvocation {
                 reaction_context.as_ref(),
                 None,
             )
-            .map_err(|error| internal_error(error.to_string()))?;
+            .map_err(|error| not_applied_internal_error(error.to_string()))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: 1,
             event_type: "Created".to_string(),
@@ -223,18 +224,33 @@ impl ApplicationDataInvocation {
         request
             .first_event
             .validate()
-            .map_err(|error| internal_error(error.to_string()))?;
-        let outcome = store
-            .create_or_verify(&request)
-            .await
-            .map_err(|error| internal_error(error.to_string()))?;
+            .map_err(|error| not_applied_internal_error(error.to_string()))?;
+        let outcome = store.create_or_verify(&request).await.map_err(|error| {
+            use temper_runtime::persistence::PersistenceError;
+            match error {
+                PersistenceError::PreCommit(diagnostic)
+                | PersistenceError::Serialization(diagnostic) => {
+                    not_applied_internal_error(diagnostic)
+                }
+                PersistenceError::ConcurrencyViolation { expected, actual } => {
+                    not_applied_internal_error(format!(
+                        "optimistic concurrency violation: expected {expected}, got {actual}"
+                    ))
+                }
+                PersistenceError::PostCommit(diagnostic) => {
+                    mark_applied(not_applied_internal_error(diagnostic))
+                }
+                PersistenceError::AcknowledgementUnknown(diagnostic)
+                | PersistenceError::Storage(diagnostic) => unknown_internal_error(diagnostic),
+            }
+        })?;
 
         match outcome {
             CreateOrVerifyStoreOutcome::Created {
                 entity_id: winning_id,
                 sequence_nr,
-            } => {
-                self.successful_create_or_verify(
+            } => self
+                .successful_create_or_verify(
                     entity_type,
                     &winning_id,
                     sequence_nr,
@@ -243,13 +259,13 @@ impl ApplicationDataInvocation {
                     &request,
                 )
                 .await
-            }
+                .map_err(mark_applied),
             CreateOrVerifyStoreOutcome::AlreadyMatches {
                 entity_id: winning_id,
                 sequence_nr,
                 notification_pending,
-            } => {
-                self.successful_create_or_verify(
+            } => self
+                .successful_create_or_verify(
                     entity_type,
                     &winning_id,
                     sequence_nr,
@@ -258,7 +274,7 @@ impl ApplicationDataInvocation {
                     &request,
                 )
                 .await
-            }
+                .map_err(mark_applied),
             CreateOrVerifyStoreOutcome::Conflict { fields, truncated } => {
                 if let Ok(response) = self
                     .get_durable_target_entity(entity_type, &request.entity_id)
@@ -276,11 +292,13 @@ impl ApplicationDataInvocation {
                     outcome: CreateOrVerifyResultV1::Conflict { fields, truncated },
                 })
             }
-            CreateOrVerifyStoreOutcome::CreationContractMigrationRequired => Err(data_error(
-                ModuleDataErrorKind::SchemaMismatch,
-                "CreationContractMigrationRequired",
-                "the stored creation contract requires an explicit schema migration",
-            )),
+            CreateOrVerifyStoreOutcome::CreationContractMigrationRequired => {
+                Err(not_applied_error(
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "CreationContractMigrationRequired",
+                    "the stored creation contract requires an explicit schema migration",
+                ))
+            }
         }
     }
 
@@ -298,7 +316,7 @@ impl ApplicationDataInvocation {
             .get_durable_target_entity(entity_type, winning_journal_id)
             .await?;
         if response.state.sequence_nr < sequence_nr {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "ConsistencyUnavailable",
                 "authoritative actor state has not reached the committed sequence",
@@ -313,7 +331,7 @@ impl ApplicationDataInvocation {
             });
         }
         let Some((store, backend)) = self.state.event_journal() else {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "AtomicCreateOrVerifyUnavailable",
                 "atomic create-or-verify requires a durable event journal",
@@ -328,12 +346,12 @@ impl ApplicationDataInvocation {
             store
                 .acknowledge_create_or_verify_notification(request)
                 .await
-                .map_err(|error| internal_error(error.to_string()))?;
+                .map_err(|error| not_applied_internal_error(error.to_string()))?;
         }
         match store
             .create_or_verify(request)
             .await
-            .map_err(|error| internal_error(error.to_string()))?
+            .map_err(|error| not_applied_internal_error(error.to_string()))?
         {
             CreateOrVerifyStoreOutcome::AlreadyMatches {
                 entity_id: verified_id,
@@ -342,7 +360,7 @@ impl ApplicationDataInvocation {
             } if verified_id == winning_journal_id
                 && verified_sequence <= response.state.sequence_nr => {}
             _ => {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::ConsistencyUnavailable,
                     "CreationContractRevalidationFailed",
                     "authoritative state no longer agrees with its immutable creation contract",
@@ -352,7 +370,7 @@ impl ApplicationDataInvocation {
         let table = self.initial_table(short_type(entity_type))?;
         let creation_event: EntityEvent =
             serde_json::from_value(request.first_event.event.payload.clone())
-                .map_err(|error| internal_error(error.to_string()))?;
+                .map_err(|error| not_applied_internal_error(error.to_string()))?;
         let mut blob_repair_state = EntityActor::build_initial_state(
             short_type(entity_type),
             &entity_id,
@@ -372,7 +390,7 @@ impl ApplicationDataInvocation {
         if !overflow_blobs.is_empty() {
             EntityActor::persist_overflow_blobs(blob_store.as_ref(), &overflow_blobs)
                 .await
-                .map_err(internal_error)?;
+                .map_err(not_applied_internal_error)?;
         }
         let mut bounded_state = response.state.clone();
         crate::blobs::hydrate_blob_refs_for_tenant(
@@ -393,10 +411,13 @@ impl ApplicationDataInvocation {
             CreateOrVerifyResultV1::AlreadyMatches { commit, value }
         };
         let result = DataResultV1::CreateOrVerify { outcome };
-        let encoded = serde_json::to_vec(&DataResponseV1::ok(result.clone()))
-            .map_err(|error| internal_error(error.to_string()))?;
+        let encoded = super::encode_response(
+            self.authority.binding.abi,
+            &DataResponseV1::ok(result.clone()),
+        )
+        .map_err(|error| not_applied_internal_error(error.to_string()))?;
         if encoded.len() > self.authority.binding.grant.budgets.max_response_bytes as usize {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::Internal,
                 "CreateOrVerifyResponseReservationInvariant",
                 "reserved create-or-verify response exceeded its pre-commit bound",
@@ -414,7 +435,9 @@ impl ApplicationDataInvocation {
             .state
             .reaction_dispatcher
             .read()
-            .map_err(|_| internal_error("reaction dispatcher lock poisoned".to_string()))?
+            .map_err(|_| {
+                not_applied_internal_error("reaction dispatcher lock poisoned".to_string())
+            })?
             .clone();
         let Some(dispatcher) = dispatcher else {
             return Ok(None);
@@ -427,7 +450,9 @@ impl ApplicationDataInvocation {
                 .state
                 .registry
                 .read()
-                .map_err(|_| internal_error("schema registry lock poisoned".to_string()))?
+                .map_err(|_| {
+                    not_applied_internal_error("schema registry lock poisoned".to_string())
+                })?
                 .scoped_reaction_candidates_at_digest(
                     &self.authority.tenant,
                     &pin.scope,
@@ -447,7 +472,7 @@ impl ApplicationDataInvocation {
         Ok(Some(crate::trigger::delivery::ReactionCommitContext {
             rules,
             authority: serde_json::to_value(&self.authority.security)
-                .map_err(|error| internal_error(error.to_string()))?,
+                .map_err(|error| not_applied_internal_error(error.to_string()))?,
             depth: 0,
             root_delivery_id: None,
             expected_source_sequence: 0,

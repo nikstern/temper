@@ -29,7 +29,7 @@ pub(crate) async fn run(
         .await
         .map_err(storage)?;
         if type_has_events {
-            tx.commit().await.map_err(storage)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
         }
     }
@@ -55,7 +55,7 @@ pub(crate) async fn run(
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
         let notification_pending: bool = row.try_get("notification_pending").map_err(storage)?;
         if requested_entity_id != request.entity_id {
-            tx.commit().await.map_err(storage)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::Conflict {
                 fields: vec!["Id".to_string()],
                 truncated: false,
@@ -64,16 +64,16 @@ pub(crate) async fn run(
         match compare_creation_contracts(&original, &request.contract) {
             CreationContractComparison::Matches => {}
             CreationContractComparison::Conflict { fields, truncated } => {
-                tx.commit().await.map_err(storage)?;
+                tx.commit().await.map_err(acknowledgement_unknown)?;
                 return Ok(CreateOrVerifyStoreOutcome::Conflict { fields, truncated });
             }
             CreationContractComparison::MigrationRequired => {
-                tx.commit().await.map_err(storage)?;
+                tx.commit().await.map_err(acknowledgement_unknown)?;
                 return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
             }
         }
         let Some(stored) = load_contract(&mut tx, request, &entity_id).await? else {
-            tx.commit().await.map_err(storage)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
         };
         let mut outcome = compare_existing(
@@ -91,7 +91,7 @@ pub(crate) async fn run(
         {
             *pending = notification_pending;
         }
-        tx.commit().await.map_err(storage)?;
+        tx.commit().await.map_err(acknowledgement_unknown)?;
         return Ok(outcome);
     }
 
@@ -133,12 +133,12 @@ pub(crate) async fn run(
     }
     if owners.len() > 1 {
         let outcome = owner_conflict(&owners);
-        tx.commit().await.map_err(storage)?;
+        tx.commit().await.map_err(acknowledgement_unknown)?;
         return Ok(outcome);
     }
     if let Some((entity_id, _)) = owners.first_key_value() {
         let Some(stored) = load_contract(&mut tx, request, entity_id).await? else {
-            tx.commit().await.map_err(storage)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
         };
         let alternate_owner = !owners
@@ -149,13 +149,13 @@ pub(crate) async fn run(
         if matches!(outcome, CreateOrVerifyStoreOutcome::AlreadyMatches { .. }) {
             insert_idempotency(&mut tx, request, entity_id, false).await?;
         }
-        tx.commit().await.map_err(storage)?;
+        tx.commit().await.map_err(acknowledgement_unknown)?;
         return Ok(outcome);
     }
 
     insert_first_event(&mut tx, &request.first_event).await?;
     insert_idempotency(&mut tx, request, &request.entity_id, true).await?;
-    tx.commit().await.map_err(storage)?;
+    tx.commit().await.map_err(acknowledgement_unknown)?;
     Ok(CreateOrVerifyStoreOutcome::Created {
         entity_id: request.entity_id.clone(),
         sequence_nr: 1,
@@ -187,7 +187,7 @@ pub(crate) async fn commit_first_event(
         });
     }
     insert_first_event(&mut tx, commit).await?;
-    tx.commit().await.map_err(storage)?;
+    tx.commit().await.map_err(acknowledgement_unknown)?;
     Ok(1)
 }
 

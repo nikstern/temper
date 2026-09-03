@@ -34,16 +34,16 @@ impl RedisEventStore {
         let mut tenant_name: Option<&str> = None;
         for append in appends {
             if !seen.insert(append.persistence_id.as_str()) {
-                return Err(PersistenceError::Storage(format!(
+                return Err(PersistenceError::PreCommit(format!(
                     "duplicate persistence_id '{}' in append_batch",
                     append.persistence_id
                 )));
             }
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
-                    .map_err(PersistenceError::Storage)?;
+                    .map_err(PersistenceError::PreCommit)?;
             if tenant_name.is_some_and(|expected| expected != tenant) {
-                return Err(PersistenceError::Storage(
+                return Err(PersistenceError::PreCommit(
                     "append_batch cannot span Redis tenant indexes".to_string(),
                 ));
             }
@@ -161,7 +161,7 @@ impl RedisEventStore {
             let first_metadata = match &append.first_event {
                 Some(first_event) => {
                     if append.expected_sequence != 0 || append.events.is_empty() {
-                        return Err(PersistenceError::Storage(
+                        return Err(redis_pre_commit(
                             "first-event metadata requires a non-empty sequence-0 append"
                                 .to_string(),
                         ));
@@ -169,9 +169,7 @@ impl RedisEventStore {
                     if first_event.contract_revision != first_event.contract.version
                         || first_event.schema_identity != first_event.contract.schema_digest
                     {
-                        return Err(PersistenceError::Storage(
-                            "invalid first-event metadata".to_string(),
-                        ));
+                        return Err(redis_pre_commit("invalid first-event metadata"));
                     }
                     serde_json::to_string(&BatchFirstEvent {
                         contract: &first_event.contract,
@@ -224,25 +222,25 @@ impl RedisEventStore {
             .append_batch_script
             .evalsha_with_reload(&self.client, keys, args)
             .await
-            .map_err(storage_error)?;
+            .map_err(redis_acknowledgement_unknown)?;
         if result.first() == Some(&-1) {
-            return Err(PersistenceError::Storage(
+            return Err(PersistenceError::PreCommit(
                 "stream descriptor publication fence".into(),
             ));
         }
         if result.first() == Some(&-2) {
-            return Err(PersistenceError::Storage(
+            return Err(PersistenceError::PreCommit(
                 "duplicate declared key in append_batch".to_string(),
             ));
         }
         if result.first() == Some(&-3) {
-            return Err(PersistenceError::Storage(
+            return Err(PersistenceError::PreCommit(
                 "invalid first-event metadata in append_batch".to_string(),
             ));
         }
         if result.first() == Some(&0) {
             let [_, append_index, actual] = result.as_slice() else {
-                return Err(PersistenceError::Storage(format!(
+                return Err(PersistenceError::PreCommit(format!(
                     "unexpected Redis append_batch conflict result: {result:?}"
                 )));
             };
@@ -251,19 +249,21 @@ impl RedisEventStore {
                 .and_then(|index| index.checked_sub(1))
                 .filter(|index| *index < appends.len())
                 .ok_or_else(|| {
-                    PersistenceError::Storage(
+                    PersistenceError::PreCommit(
                         "Redis append_batch returned an invalid conflict index".to_string(),
                     )
                 })?;
             return Err(PersistenceError::ConcurrencyViolation {
                 expected: appends[index].expected_sequence,
-                actual: *actual as u64,
+                actual: u64::try_from(*actual).map_err(redis_pre_commit)?,
             });
         }
         if result.len() != appends.len() + 1 || result.first() != Some(&1) {
-            return Err(PersistenceError::Storage(format!(
-                "unexpected Redis append_batch result: {result:?}"
-            )));
+            return Err(redis_malformed_result(
+                &result,
+                &[0, -1, -2, -3],
+                "append_batch",
+            ));
         }
 
         let mut results = Vec::with_capacity(appends.len());
@@ -274,7 +274,7 @@ impl RedisEventStore {
             .zip(0..appends.len())
         {
             let new_sequence = u64::try_from(*new_sequence).map_err(|_| {
-                PersistenceError::Storage(format!(
+                PersistenceError::PostCommit(format!(
                     "Redis append_batch returned a negative sequence at index {result_index}"
                 ))
             })?;
@@ -285,7 +285,8 @@ impl RedisEventStore {
                 append.expected_sequence,
                 new_sequence,
             )
-            .await?;
+            .await
+            .map_err(redis_post_commit)?;
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_sequence,

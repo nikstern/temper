@@ -4,10 +4,18 @@ use libsql::{TransactionBehavior, Value, params, params_from_iter};
 use temper_runtime::persistence::{
     CREATE_OR_VERIFY_CONFLICT_FIELD_BUDGET, CreateOrVerifyRequest, CreateOrVerifyStoreOutcome,
     CreationContract, CreationContractComparison, FirstEventCommit, PersistenceError,
-    compare_creation_contracts, compare_creation_contracts_for_alternate_owner, storage_error,
+    compare_creation_contracts, compare_creation_contracts_for_alternate_owner,
 };
 
 use super::TursoEventStore;
+
+fn storage_error(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::PreCommit(error.to_string())
+}
+
+fn acknowledgement_unknown(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::AcknowledgementUnknown(error.to_string())
+}
 
 pub(super) async fn run(
     store: &TursoEventStore,
@@ -36,7 +44,7 @@ pub(super) async fn run(
             .map_err(storage_error)?;
         if rows.next().await.map_err(storage_error)?.is_some() {
             drop(rows);
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
         }
     }
@@ -65,22 +73,22 @@ pub(super) async fn run(
         let notification_pending = row.get::<i64>(3).map_err(storage_error)? != 0;
         drop(replay_rows);
         if requested_entity_id != request.entity_id {
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(bounded_conflict(["Id".to_string()]));
         }
         match compare_creation_contracts(&original, &request.contract) {
             CreationContractComparison::Matches => {}
             CreationContractComparison::Conflict { fields, truncated } => {
-                tx.commit().await.map_err(storage_error)?;
+                tx.commit().await.map_err(acknowledgement_unknown)?;
                 return Ok(CreateOrVerifyStoreOutcome::Conflict { fields, truncated });
             }
             CreationContractComparison::MigrationRequired => {
-                tx.commit().await.map_err(storage_error)?;
+                tx.commit().await.map_err(acknowledgement_unknown)?;
                 return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
             }
         }
         let Some(stored) = load_contract(&tx, request, &entity_id).await? else {
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
         };
         let mut outcome = compare_existing(
@@ -98,7 +106,7 @@ pub(super) async fn run(
         {
             *pending = notification_pending;
         }
-        tx.commit().await.map_err(storage_error)?;
+        tx.commit().await.map_err(acknowledgement_unknown)?;
         return Ok(outcome);
     }
     drop(replay_rows);
@@ -148,12 +156,12 @@ pub(super) async fn run(
 
     if owners.len() > 1 {
         let outcome = owner_conflict(&owners);
-        tx.commit().await.map_err(storage_error)?;
+        tx.commit().await.map_err(acknowledgement_unknown)?;
         return Ok(outcome);
     }
     if let Some((entity_id, _)) = owners.first_key_value() {
         let Some(stored) = load_contract(&tx, request, entity_id).await? else {
-            tx.commit().await.map_err(storage_error)?;
+            tx.commit().await.map_err(acknowledgement_unknown)?;
             return Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired);
         };
         let alternate_owner = !owners
@@ -163,13 +171,13 @@ pub(super) async fn run(
         if matches!(outcome, CreateOrVerifyStoreOutcome::AlreadyMatches { .. }) {
             insert_idempotency(&tx, request, entity_id, false).await?;
         }
-        tx.commit().await.map_err(storage_error)?;
+        tx.commit().await.map_err(acknowledgement_unknown)?;
         return Ok(outcome);
     }
 
     insert_first_event(&tx, &request.first_event).await?;
     insert_idempotency(&tx, request, &request.entity_id, true).await?;
-    tx.commit().await.map_err(storage_error)?;
+    tx.commit().await.map_err(acknowledgement_unknown)?;
     Ok(CreateOrVerifyStoreOutcome::Created {
         entity_id: request.entity_id.clone(),
         sequence_nr: 1,
@@ -219,7 +227,7 @@ pub(super) async fn commit_first_event(
         });
     }
     insert_first_event(&tx, commit).await?;
-    tx.commit().await.map_err(storage_error)?;
+    tx.commit().await.map_err(acknowledgement_unknown)?;
     Ok(1)
 }
 

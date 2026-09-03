@@ -11,7 +11,7 @@ use crate::action_input_contract::{
 };
 use crate::entity_actor::EntityState;
 
-use super::{ApplicationDataInvocation, ModuleDataTarget, data_error, short_type};
+use super::{ApplicationDataInvocation, ModuleDataTarget, not_applied_error, short_type};
 
 /// Entity write operation whose property admission is being validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ impl ApplicationDataInvocation {
             .iter()
             .find(|entity| entity.entity_type == entity_type)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "UnknownEntityType",
                     "entity type is absent from the bound schema",
@@ -121,7 +121,7 @@ impl ApplicationDataInvocation {
             .iter()
             .find(|entity| entity.entity_type == entity_type)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "UnknownEntityType",
                     "entity type is absent from the bound schema",
@@ -160,13 +160,13 @@ impl ApplicationDataInvocation {
         .await
         .map_err(|response| {
             if response.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::BudgetExceeded,
                     "RateLimitExceeded",
                     "governed write rate limit rejected the operation",
                 )
             } else {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::Internal,
                     "RateLimitUnavailable",
                     "governed write rate limit is unavailable",
@@ -195,7 +195,7 @@ impl ApplicationDataInvocation {
                 .unwrap_or(false),
         };
         if !schema_available {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::VerificationFailed,
                 "VerificationGateRejected",
                 "entity specification is not verified",
@@ -212,7 +212,7 @@ impl ApplicationDataInvocation {
         )
         .await
         .map_err(|_| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::RelationViolation,
                 "WritePrecheckRejected",
                 "governed write precheck rejected the operation",
@@ -226,7 +226,7 @@ impl ApplicationDataInvocation {
             )
             .await
             .map_err(|_| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::AuthorizationDenied,
                     "AccountVerificationRequired",
                     "commons account verification rejected the operation",
@@ -242,7 +242,7 @@ impl ApplicationDataInvocation {
                 )
                 .await
                 .map_err(|_| {
-                    data_error(
+                    not_applied_error(
                         ModuleDataErrorKind::AlreadyExists,
                         "UniqueConstraintViolation",
                         "governed uniqueness check rejected the operation",
@@ -259,7 +259,7 @@ impl ApplicationDataInvocation {
             )
             .await
             .map_err(|_| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::BudgetExceeded,
                     "StorageCapExceeded",
                     "governed storage cap rejected the operation",
@@ -280,7 +280,7 @@ pub(crate) fn validate_manifest_entity_object(
             .iter()
             .find(|property| property.canonical_name == *name)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "UnknownProperty",
                     "property is absent from the bound schema",
@@ -302,14 +302,14 @@ pub(crate) fn validate_manifest_entity_object(
                     "property is not caller-writable during entity patching",
                 ),
             };
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 code,
                 message,
             ));
         }
         if !property_accepts(property, field_value) {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "PropertyTypeMismatch",
                 "property value does not match the bound schema",
@@ -322,7 +322,7 @@ pub(crate) fn validate_manifest_entity_object(
                 && !value.contains_key(&property.canonical_name)
         })
     {
-        return Err(data_error(
+        return Err(not_applied_error(
             ModuleDataErrorKind::SchemaMismatch,
             "MissingRequiredProperty",
             "required property is absent",
@@ -368,7 +368,7 @@ pub(crate) fn validate_manifest_action_params(
         .iter()
         .find(|candidate| candidate.canonical_name == action)
         .ok_or_else(|| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "UnknownAction",
                 "action is absent from the bound schema",
@@ -382,12 +382,12 @@ pub(crate) fn validate_manifest_action_params(
             .map(|parameter| (parameter.canonical_name.as_str(), parameter.nullable)),
     )
     .map_err(|error| match error {
-        ActionInputShapeError::Missing { .. } => data_error(
+        ActionInputShapeError::Missing { .. } => not_applied_error(
             ModuleDataErrorKind::SchemaMismatch,
             "MissingActionParameter",
             "required action parameter is absent or null",
         ),
-        ActionInputShapeError::Mismatch { .. } => data_error(
+        ActionInputShapeError::Mismatch { .. } => not_applied_error(
             ModuleDataErrorKind::SchemaMismatch,
             "ActionParameterTypeMismatch",
             "action parameter name is absent or ambiguous in the bound schema",
@@ -397,7 +397,7 @@ pub(crate) fn validate_manifest_action_params(
         if let Some(value) = values.get(parameter.canonical_name.as_str())
             && !action_parameter_accepts(csdl, parameter, value)
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "ActionParameterTypeMismatch",
                 "action parameter does not match the bound schema",
@@ -442,7 +442,7 @@ pub(crate) fn canonical_manifest_entity_value_from_parts(
                 Some(serde_json::Value::String(status.to_string()))
             }
             ManifestValueSourceV1::Input => {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "InvalidEntityPropertySource",
                     "entity property has an input-only manifest source",
@@ -453,14 +453,14 @@ pub(crate) fn canonical_manifest_entity_value_from_parts(
             if property.nullable {
                 continue;
             }
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "MissingRequiredProperty",
                 "required property is absent and has no declared default",
             ));
         };
         if !property_accepts(property, &value) {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "PropertyTypeMismatch",
                 "entity property value does not match the bound schema",

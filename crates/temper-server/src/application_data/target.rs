@@ -5,8 +5,8 @@ use temper_wasm_sdk::data::ModuleDataError;
 use crate::request_context::AgentContext;
 
 use super::{
-    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget, internal_error,
-    short_type,
+    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget,
+    not_applied_internal_error, read_service_error, short_type,
 };
 
 impl ApplicationDataInvocation {
@@ -25,7 +25,7 @@ impl ApplicationDataInvocation {
                 journal_entity_id,
             ) {
             service
-                .get_scoped(
+                .get_scoped_typed(
                     &self.authority.tenant,
                     short_type(entity_type),
                     entity_id,
@@ -34,14 +34,14 @@ impl ApplicationDataInvocation {
                 .await
         } else {
             service
-                .get(
+                .get_typed(
                     &self.authority.tenant,
                     short_type(entity_type),
                     journal_entity_id,
                 )
                 .await
         };
-        result.map_err(internal_error)
+        result.map_err(read_service_error)
     }
 
     pub(super) async fn get_target_entity(
@@ -53,12 +53,12 @@ impl ApplicationDataInvocation {
         match &self.authority.target {
             ModuleDataTarget::TenantGlobal => {
                 service
-                    .get(&self.authority.tenant, short_type(entity_type), entity_id)
+                    .get_typed(&self.authority.tenant, short_type(entity_type), entity_id)
                     .await
             }
             ModuleDataTarget::Scoped(pin) => {
                 service
-                    .get_scoped(
+                    .get_scoped_typed(
                         &self.authority.tenant,
                         short_type(entity_type),
                         entity_id,
@@ -67,7 +67,7 @@ impl ApplicationDataInvocation {
                     .await
             }
         }
-        .map_err(internal_error)
+        .map_err(read_service_error)
     }
 
     pub(super) async fn target_entity_exists(
@@ -89,7 +89,7 @@ impl ApplicationDataInvocation {
                     pin,
                 )
                 .await
-                .map_err(internal_error),
+                .map_err(not_applied_internal_error),
         }
     }
 

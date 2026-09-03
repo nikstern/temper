@@ -113,7 +113,7 @@ async fn sdk_and_odata_share_authoritative_semantics() {
     )
     .await;
     assert_eq!(
-        response_error(guard).kind,
+        response_error(guard).kind(),
         ModuleDataErrorKind::GuardRejected
     );
     let odata_guard = authenticated_router(invocation.state.clone(), SecurityContext::system())

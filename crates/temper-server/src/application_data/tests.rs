@@ -7,9 +7,10 @@ use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::{ActorSystem, tenant::TenantId};
 use temper_spec::csdl::parse_csdl;
 use temper_wasm_sdk::data::{
-    DataOperationKind, DataOperationV1, DataOutcomeV1, DataRequestV1, DataResponseV1,
-    EntityDataGrant, FileOperationKind, ManifestActionV1, ManifestEntityV1, ManifestPropertyV1,
-    ModuleDataErrorKind, ModuleDataGrant, ModuleSdkManifest, ModuleSdkMetadataDigests,
+    DATA_ABI_VERSION_V1, DataOperationKind, DataOperationV1, DataOutcomeV1, DataOutcomeV2,
+    DataRequestV1, DataRequestV2, DataResponseV1, DataResponseV2, EntityDataGrant,
+    FileOperationKind, ManifestActionV1, ManifestEntityV1, ManifestPropertyV1, ModuleDataErrorKind,
+    ModuleDataGrant, ModuleSdkManifest, ModuleSdkMetadataDigests,
 };
 use tower::ServiceExt;
 
@@ -71,6 +72,8 @@ fn manifest_property(
 }
 
 mod file_capability_tests;
+#[path = "tests/structured_failures.rs"]
+mod structured_failures;
 mod write_role_tests;
 
 pub(super) fn authenticated_router(state: ServerState, security: SecurityContext) -> Router {
@@ -236,12 +239,13 @@ pub(super) async fn call(
     invocation: &ApplicationDataInvocation,
     operation: DataOperationV1,
 ) -> DataResponseV1 {
-    let request = serde_json::to_vec(&DataRequestV1::new(operation)).expect("request encodes");
+    let request = serde_json::to_vec(&DataRequestV2::new(operation)).expect("request encodes");
     let response = invocation
         .call_encoded(&request)
         .await
         .expect("host response");
-    serde_json::from_slice(&response).expect("response decodes")
+    let response: DataResponseV2 = serde_json::from_slice(&response).expect("response decodes");
+    response.into()
 }
 
 pub(super) fn response_error(response: DataResponseV1) -> temper_wasm_sdk::data::ModuleDataError {
@@ -249,6 +253,72 @@ pub(super) fn response_error(response: DataResponseV1) -> temper_wasm_sdk::data:
         panic!("expected structured error")
     };
     error
+}
+
+#[tokio::test]
+async fn artifact_binding_selects_one_exact_data_abi() {
+    let current = invocation(
+        BTreeSet::from([DataOperationKind::EntityGet]),
+        SecurityContext::system(),
+    );
+    let mut legacy_binding = current.authority.binding.clone();
+    legacy_binding.abi = DATA_ABI_VERSION_V1;
+    let legacy = ApplicationDataInvocation::new(
+        current.state.clone(),
+        ModuleInvocationAuthority::new(
+            current.authority.tenant.clone(),
+            current.authority.module_name.clone(),
+            current.authority.artifact_digest.clone(),
+            current.authority.trigger.clone(),
+            current.authority.triggering_entity_type.clone(),
+            current.authority.security.clone(),
+            legacy_binding,
+            current.authority.target.clone(),
+        ),
+    );
+    let operation = DataOperationV1::EntityGet {
+        entity_type: "Temper.Example.Customer".into(),
+        entity_id: "018f1f80-7b2d-7000-8000-000000000099".into(),
+        at_least_sequence: None,
+    };
+    let request =
+        serde_json::to_vec(&DataRequestV1::new(operation.clone())).expect("encode legacy request");
+    let encoded = legacy
+        .call_encoded(&request)
+        .await
+        .expect("legacy response");
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).expect("legacy response JSON");
+    assert_eq!(wire["abi"], 1);
+    assert_eq!(
+        wire["outcome"]["error"]["message"],
+        "application-data operation failed"
+    );
+    assert!(wire["outcome"]["error"].get("outcome").is_none());
+
+    let wrong_request =
+        serde_json::to_vec(&DataRequestV2::new(operation.clone())).expect("encode v2 request");
+    let wrong_encoded = legacy
+        .call_encoded(&wrong_request)
+        .await
+        .expect("legacy mismatch response");
+    let mismatch: DataResponseV1 =
+        serde_json::from_slice(&wrong_encoded).expect("decode legacy mismatch");
+    assert_eq!(response_error(mismatch).code().as_str(), "AbiMismatch");
+
+    let old_request =
+        serde_json::to_vec(&DataRequestV1::new(operation)).expect("encode v1 request");
+    let new_encoded = current
+        .call_encoded(&old_request)
+        .await
+        .expect("v2 mismatch response");
+    let mismatch: DataResponseV2 =
+        serde_json::from_slice(&new_encoded).expect("decode v2 mismatch");
+    assert_eq!(mismatch.abi, 2);
+    let DataOutcomeV2::Error { error } = mismatch.outcome else {
+        panic!("expected v2 mismatch error")
+    };
+    assert_eq!(error.code().as_str(), "AbiMismatch");
+    assert_eq!(error.outcome(), temper_wasm_sdk::FailureOutcome::NotApplied);
 }
 
 #[tokio::test]
@@ -266,7 +336,7 @@ async fn capability_denies_before_system_cedar_authority() {
     )
     .await;
     assert_eq!(
-        response_error(response).kind,
+        response_error(response).kind(),
         ModuleDataErrorKind::AuthorizationDenied
     );
 }
@@ -329,7 +399,7 @@ async fn successful_create_and_read_share_governed_service() {
     )
     .await;
     assert_eq!(
-        response_error(impossible).kind,
+        response_error(impossible).kind(),
         ModuleDataErrorKind::ConsistencyUnavailable
     );
     let page = call(
@@ -403,7 +473,7 @@ async fn cedar_still_denies_after_capability_and_schema_accept() {
     .await;
     let error = response_error(response);
     assert_eq!(
-        error.kind,
+        error.kind(),
         ModuleDataErrorKind::AuthorizationDenied,
         "{error:?}"
     );
@@ -419,82 +489,4 @@ async fn cedar_still_denies_after_capability_and_schema_accept() {
         .await
         .unwrap();
     assert_eq!(odata.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn not_found_conflict_and_batch_partial_failure_are_structured() {
-    let invocation = invocation(
-        BTreeSet::from([
-            DataOperationKind::EntityCreate,
-            DataOperationKind::EntityGet,
-            DataOperationKind::EntityPatch,
-            DataOperationKind::ActionInvoke,
-            DataOperationKind::Batch,
-        ]),
-        SecurityContext::system(),
-    );
-    let missing = call(
-        &invocation,
-        DataOperationV1::EntityGet {
-            entity_type: "Temper.Example.Customer".into(),
-            entity_id: "018f1f80-7b2d-7000-8000-000000000099".into(),
-            at_least_sequence: None,
-        },
-    )
-    .await;
-    assert_eq!(response_error(missing).kind, ModuleDataErrorKind::NotFound);
-
-    let id = "018f1f80-7b2d-7000-8000-000000000001";
-    let _ = call(
-        &invocation,
-        DataOperationV1::EntityCreate {
-            entity_type: "Temper.Example.Customer".into(),
-            value: serde_json::json!({"Id": id, "Name": "Ada"})
-                .as_object()
-                .cloned()
-                .unwrap(),
-        },
-    )
-    .await;
-    let conflict = call(
-        &invocation,
-        DataOperationV1::EntityPatch {
-            entity_type: "Temper.Example.Customer".into(),
-            entity_id: id.into(),
-            expected_sequence: Some(99),
-            value: serde_json::json!({"Name": "Grace"})
-                .as_object()
-                .cloned()
-                .unwrap(),
-        },
-    )
-    .await;
-    assert_eq!(response_error(conflict).kind, ModuleDataErrorKind::Conflict);
-
-    let batch = call(
-        &invocation,
-        DataOperationV1::Batch {
-            items: vec![
-                temper_wasm_sdk::data::BatchItemV1::EntityGet {
-                    entity_type: "Temper.Example.Customer".into(),
-                    entity_id: id.into(),
-                    at_least_sequence: None,
-                },
-                temper_wasm_sdk::data::BatchItemV1::EntityGet {
-                    entity_type: "Temper.Example.Customer".into(),
-                    entity_id: "018f1f80-7b2d-7000-8000-000000000099".into(),
-                    at_least_sequence: None,
-                },
-            ],
-        },
-    )
-    .await;
-    let DataOutcomeV1::Ok {
-        result: temper_wasm_sdk::data::DataResultV1::Batch { outcomes },
-    } = batch.outcome
-    else {
-        panic!("batch should return per-item outcomes")
-    };
-    assert!(matches!(outcomes[0], DataOutcomeV1::Ok { .. }));
-    assert!(matches!(outcomes[1], DataOutcomeV1::Error { .. }));
 }

@@ -167,5 +167,5 @@ fn odata_entity_decoder_requires_exact_csdl_property_names() {
         sequence: 7,
     })
     .expect_err("snake_case OData properties must not decode as CSDL properties");
-    assert_eq!(error.code, "GeneratedResultTypeMismatch");
+    assert_eq!(error.code().as_str(), "GeneratedResultTypeMismatch");
 }

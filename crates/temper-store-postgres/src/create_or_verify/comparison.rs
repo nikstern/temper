@@ -140,6 +140,12 @@ pub(crate) async fn acknowledge_notification(
     Ok(())
 }
 
+/// Classify a database failure before transaction commit as not applied.
 pub(crate) fn storage(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(error.to_string())
+    PersistenceError::PreCommit(error.to_string())
+}
+
+/// Classify a failed commit acknowledgement conservatively.
+pub(crate) fn acknowledgement_unknown(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::AcknowledgementUnknown(error.to_string())
 }

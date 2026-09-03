@@ -7,6 +7,7 @@ use temper_runtime::persistence::{
     CreateOrVerifyRequest, CreateOrVerifyStoreOutcome, PersistenceError, storage_error,
 };
 
+use super::create_or_verify_result::decode_create_or_verify_result;
 use super::{EntityRef, RedisEventStore, SegmentRecord, contract_record_json};
 use crate::keys::encode_lex_component;
 
@@ -179,6 +180,8 @@ if winning_owner then
     end
     local result = compare(winning_owner, alternate_owner)
     if result[1] ~= 'match' then return result end
+    local creation_seq = creation_sequence(winning_owner)
+    if not creation_seq then return {'migration_required'} end
     redis.call('HSET', KEYS[8], idempotency_key,
         cjson.encode({
             entity_id=winning_owner,
@@ -187,8 +190,6 @@ if winning_owner then
             digest=requested_digest,
             notification_pending=false
         }))
-    local creation_seq = creation_sequence(winning_owner)
-    if not creation_seq then return {'migration_required'} end
     return {'already_matches', winning_owner, creation_seq, '0'}
 end
 
@@ -363,38 +364,8 @@ impl RedisEventStore {
             .create_or_verify_script
             .evalsha_with_reload(&self.client, keys, args)
             .await
-            .map_err(storage_error)?;
-        match result.as_slice() {
-            [status, entity_id, sequence] if status == "created" => {
-                Ok(CreateOrVerifyStoreOutcome::Created {
-                    entity_id: entity_id.clone(),
-                    sequence_nr: sequence.parse().map_err(storage_error)?,
-                })
-            }
-            [status, entity_id, sequence, pending] if status == "already_matches" => {
-                Ok(CreateOrVerifyStoreOutcome::AlreadyMatches {
-                    entity_id: entity_id.clone(),
-                    sequence_nr: sequence.parse().map_err(storage_error)?,
-                    notification_pending: pending == "1",
-                })
-            }
-            [status, fields, truncated] if status == "conflict" => {
-                Ok(CreateOrVerifyStoreOutcome::Conflict {
-                    fields: serde_json::from_str(fields)
-                        .map_err(|error| PersistenceError::Serialization(error.to_string()))?,
-                    truncated: truncated == "1",
-                })
-            }
-            [status] if status == "migration_required" => {
-                Ok(CreateOrVerifyStoreOutcome::CreationContractMigrationRequired)
-            }
-            [status] if status == "publication_fenced" => Err(PersistenceError::Storage(
-                "stream descriptor publication fence".to_string(),
-            )),
-            other => Err(PersistenceError::Storage(format!(
-                "unexpected create-or-verify Lua result: {other:?}"
-            ))),
-        }
+            .map_err(|error| PersistenceError::AcknowledgementUnknown(error.to_string()))?;
+        decode_create_or_verify_result(&result)
     }
 
     pub(super) async fn acknowledge_notification_inner(

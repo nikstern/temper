@@ -337,5 +337,26 @@ fn file_stream_content_error_response(error: FileStreamContentError) -> axum::re
             &error,
         )
         .into_response(),
+        FileStreamContentError::DispatchUnknown(error) => odata_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "FileDispatchUnknown",
+            &error,
+        )
+        .into_response(),
+        FileStreamContentError::PersistenceNotApplied(error) => {
+            odata_error(StatusCode::CONFLICT, "FilePersistenceNotApplied", &error).into_response()
+        }
+        FileStreamContentError::PersistenceApplied(error) => odata_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "FilePersistenceApplied",
+            &error,
+        )
+        .into_response(),
+        FileStreamContentError::PersistenceUnknown(error) => odata_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "FilePersistenceUnknown",
+            &error,
+        )
+        .into_response(),
     }
 }

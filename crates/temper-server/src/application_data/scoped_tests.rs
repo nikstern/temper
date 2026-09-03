@@ -8,12 +8,13 @@ use temper_runtime::persistence::schema_deployment::{
 use temper_spec::{IoaSourceInput, ScopedBundleBudgets, ScopedSpecBundle, ScopedSpecBundleInput};
 use temper_wasm_sdk::data::{
     DataOperationKind, DataOperationV1, DataOutcomeV1, DataResultV1, EntityDataGrant,
-    FileOperationKind, ModuleDataErrorKind, ModuleDataGrant, PageV1, Retryability,
+    FileOperationKind, ModuleDataErrorKind, ModuleDataGrant, PageV1,
 };
 use temper_wasm_sdk::schema_deployment::{
     ActivateSchemaBundleRequestV1, SchemaBundleBudgetsV1, SchemaIoaSourceV1, SchemaScopeV1,
     SubmitSchemaBundleRequestV1,
 };
+use temper_wasm_sdk::{FailureDetailValue, FailureRetryability};
 
 use super::tests::{CSDL, IOA, call, invocation, response_error};
 use super::{ApplicationDataInvocation, ModuleDataTarget, ModuleInvocationAuthority};

@@ -23,11 +23,24 @@ use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 /// Attempts allowed after the first, matching the `Action` arm's ADR-0046 budget.
 const MAX_RETRIES: u32 = 2;
 
+pub(super) struct FieldUpdateError {
+    pub(super) diagnostic: String,
+    pub(super) outcome: temper_failure::FailureOutcome,
+}
+
+impl From<String> for FieldUpdateError {
+    fn from(diagnostic: String) -> Self {
+        Self {
+            diagnostic,
+            outcome: temper_failure::FailureOutcome::NotApplied,
+        }
+    }
+}
+
 /// Apply a field update and make it durable, or refuse it.
 ///
-/// `Ok(())` means the update is in the journal. `Err(reason)` means it is not,
-/// and `state` has been restored — a refusal never leaves a partial write. The
-/// caller replies with the reason verbatim.
+/// `Ok(())` means the update is in the journal. An error retains the causal
+/// commit outcome supplied by persistence.
 pub(super) async fn commit_field_update(
     actor: &EntityActor,
     state: &mut EntityState,
@@ -36,18 +49,20 @@ pub(super) async fn commit_field_update(
     reference_evidence: BTreeMap<String, bool>,
     expected_sequence: Option<u64>,
     expected_precondition: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), FieldUpdateError> {
     let has_precondition = expected_precondition.is_some();
     if expected_sequence.is_some_and(|expected| expected != state.sequence_nr) {
-        return Err("SequenceConflict".to_string());
+        return Err("SequenceConflict".to_string().into());
     }
     if let Some(expected) = expected_precondition
         && effects::entity_authorization_precondition(state) != expected
     {
-        return Err(STALE_AUTHORIZATION.to_string());
+        return Err(STALE_AUTHORIZATION.to_string().into());
     }
     if state.status == "Deleted" {
-        return Err("cannot update fields after entity deletion".to_string());
+        return Err("cannot update fields after entity deletion"
+            .to_string()
+            .into());
     }
     // `parse_json_body_or_400` accepts any valid JSON, so a `PUT` body of
     // `[1,2,3]` reaches here. With `replace`, `apply_field_update` would set
@@ -57,14 +72,16 @@ pub(super) async fn commit_field_update(
     // journaled that corruption was in-memory and healed on restart; persisting
     // it would make it permanent.
     if !fields.is_object() {
-        return Err("entity field update must be a JSON object".to_string());
+        return Err("entity field update must be a JSON object"
+            .to_string()
+            .into());
     }
     // The same budget that gates spec actions. Field updates append journal
     // events too, so ungated they could grow the snapshot replay tail past
     // `MAX_EVENTS_SINCE_SNAPSHOT` while the snapshot path is stalled, after which
     // the entity can never rehydrate. Rejected before mutating.
     if let Some(reason) = budget_refusal(actor, state, replace) {
-        return Err(reason);
+        return Err(reason.into());
     }
 
     // Sanitize once and use the same value for state and journal.
@@ -96,7 +113,7 @@ pub(super) async fn commit_field_update(
         validate_reference_contract(actor, &previous_state, state, &reference_evidence)
     {
         *state = previous_state;
-        return Err(error);
+        return Err(error.into());
     }
     let mut event = field_event(action, state, &fields);
 
@@ -135,7 +152,8 @@ pub(super) async fn commit_field_update(
                     "SequenceConflict".to_string()
                 } else {
                     STALE_AUTHORIZATION.to_string()
-                });
+                }
+                .into());
             }
             Err(PersistenceError::ConcurrencyViolation { actual, .. }) if attempt < MAX_RETRIES => {
                 attempt += 1;
@@ -143,11 +161,11 @@ pub(super) async fn commit_field_update(
                     Ok(()) => {}
                     Err(reason) => {
                         *state = previous_state;
-                        return Err(reason);
+                        return Err(reason.into());
                     }
                 }
                 if let Some(reason) = post_replay_refusal(actor, state, replace) {
-                    return Err(reason);
+                    return Err(reason.into());
                 }
                 // Re-apply onto the caught-up state and rebuild the event against
                 // its (possibly new) status.
@@ -162,13 +180,24 @@ pub(super) async fn commit_field_update(
                     validate_reference_contract(actor, &previous_state, state, &reference_evidence)
                 {
                     *state = previous_state;
-                    return Err(error);
+                    return Err(error.into());
                 }
                 event = field_event(action, state, &fields);
             }
             Err(e) => {
-                *state = previous_state;
-                return Err(format!("persistence failed: {e}"));
+                let outcome = super::actor::persistence_failure_outcome(&e);
+                if outcome == temper_failure::FailureOutcome::Applied {
+                    let committed_sequence = state
+                        .sequence_nr
+                        .max(previous_state.sequence_nr.saturating_add(1));
+                    state.record_committed_event(event.clone(), committed_sequence);
+                } else if reconcile_from_store(actor, state).await.is_err() {
+                    *state = previous_state;
+                }
+                return Err(FieldUpdateError {
+                    diagnostic: format!("persistence failed: {e}"),
+                    outcome,
+                });
             }
         }
     }
@@ -303,6 +332,20 @@ async fn catch_up(
         "field update hit optimistic-concurrency violation; replaying and retrying"
     );
 
+    reconcile_from_store(actor, state).await?;
+    debug_assert!(
+        state.sequence_nr >= actual,
+        "POSTCONDITION: field-update replay under-reached the authoritative sequence \
+         (sequence_nr={} < actual={actual})",
+        state.sequence_nr
+    );
+    Ok(())
+}
+
+pub(super) async fn reconcile_from_store(
+    actor: &EntityActor,
+    state: &mut EntityState,
+) -> Result<(), String> {
     let (Some(store), Some(backend)) = (actor.event_journal.as_ref(), actor.event_backend) else {
         return Err("persistence unavailable during conflict recovery".to_string());
     };
@@ -329,12 +372,6 @@ async fn catch_up(
     )
     .await
     .map_err(|e| format!("conflict recovery replay failed: {e}"))?;
-    debug_assert!(
-        caught_up.sequence_nr >= actual,
-        "POSTCONDITION: field-update replay under-reached the authoritative sequence \
-         (sequence_nr={} < actual={actual})",
-        caught_up.sequence_nr
-    );
     *state = caught_up;
     Ok(())
 }

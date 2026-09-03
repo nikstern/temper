@@ -40,26 +40,31 @@ async fn scoped_cedar_denial_preserves_stable_error_fields() {
     )
     .await;
     let error = response_error(denied);
-    assert_eq!(error.kind, ModuleDataErrorKind::AuthorizationDenied);
-    assert_eq!(error.code, "AuthorizationDenied");
-    assert_eq!(error.message, "caller is not authorized for this operation");
-    assert_eq!(error.retryability, Retryability::Never);
+    assert_eq!(error.kind(), ModuleDataErrorKind::AuthorizationDenied);
+    assert_eq!(error.code().as_str(), "AuthorizationDenied");
+    assert_eq!(
+        error.diagnostic().map(|value| value.as_str()),
+        Some("caller is not authorized for this operation")
+    );
+    assert_eq!(
+        error.retryability(),
+        FailureRetryability::AfterAuthorization
+    );
     assert!(
         error
-            .decision_id
-            .as_deref()
-            .is_some_and(|id| id.contains("decision:block-scoped-create"))
+            .decision_id()
+            .is_some_and(|id| id.as_str().contains("decision:block-scoped-create"))
     );
-    let details = error.details.expect("Cedar denial details survive the ABI");
-    assert_eq!(details["denial_class"], "policy_denied");
-    assert!(
-        details["policy_ids"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| {
-                id.as_str()
-                    .is_some_and(|id| id.contains("decision:block-scoped-create"))
-            }))
-    );
+    let details = error.details().values();
+    assert!(matches!(
+        details.get(&temper_wasm_sdk::DetailKey::new("denial_class").expect("valid key")),
+        Some(FailureDetailValue::String(value)) if value.as_str() == "policy_denied"
+    ));
+    assert!(matches!(
+        details.get(&temper_wasm_sdk::DetailKey::new("policy_count").expect("valid key")),
+        Some(FailureDetailValue::Unsigned(1))
+    ));
+    assert!(error.details_omitted());
 }
 
 #[tokio::test]
@@ -116,9 +121,9 @@ async fn scoped_call_budget_is_enforced_without_losing_error_shape() {
     )
     .await;
     let error = response_error(exhausted);
-    assert_eq!(error.kind, ModuleDataErrorKind::BudgetExceeded);
-    assert_eq!(error.code, "CallBudgetExceeded");
-    assert_eq!(error.retryability, Retryability::Never);
+    assert_eq!(error.kind(), ModuleDataErrorKind::BudgetExceeded);
+    assert_eq!(error.code().as_str(), "CallBudgetExceeded");
+    assert_eq!(error.retryability(), FailureRetryability::Never);
 }
 
 #[tokio::test]
@@ -186,8 +191,8 @@ async fn scoped_query_rejects_an_authoritative_set_larger_than_its_scan_budget()
     )
     .await;
     let error = response_error(response);
-    assert_eq!(error.kind, ModuleDataErrorKind::BudgetExceeded);
-    assert_eq!(error.code, "QueryFallbackBudgetExceeded");
+    assert_eq!(error.kind(), ModuleDataErrorKind::BudgetExceeded);
+    assert_eq!(error.code().as_str(), "QueryFallbackBudgetExceeded");
 }
 
 #[tokio::test]
@@ -227,6 +232,6 @@ async fn scoped_binding_cannot_cross_tenant_even_with_the_same_pin() {
     )
     .await;
     let error = response_error(denied);
-    assert_eq!(error.kind, ModuleDataErrorKind::SchemaMismatch);
-    assert_eq!(error.code, "ScopedSchemaUnavailable");
+    assert_eq!(error.kind(), ModuleDataErrorKind::SchemaMismatch);
+    assert_eq!(error.code().as_str(), "ScopedSchemaUnavailable");
 }

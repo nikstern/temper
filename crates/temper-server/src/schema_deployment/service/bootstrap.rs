@@ -367,7 +367,13 @@ impl GovernedSchemaDeploymentService<'_> {
                         })
                         .transpose()
                         .map_err(|error| {
-                            ServiceError::new("bootstrap_action_pending", error.message, true)
+                            ServiceError::new(
+                                "bootstrap_action_pending",
+                                error
+                                    .diagnostic()
+                                    .map_or_else(|| error.code().as_str(), |value| value.as_str()),
+                                true,
+                            )
                         })?
                         .map(serde_json::Value::Object)
                         .unwrap_or(outcome.fields);

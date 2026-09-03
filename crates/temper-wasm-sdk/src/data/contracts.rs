@@ -16,8 +16,17 @@ use serde_json::{Map, Value};
 use super::DataOutcomeV1;
 use super::{OrderV1, PageV1};
 
-/// The only application-data ABI version understood by this SDK release.
+#[path = "contracts/module_data_error.rs"]
+mod module_data_error;
+pub use module_data_error::{ModuleDataError, ModuleDataErrorKind, ModuleDataErrorV1};
+#[cfg(test)]
+#[path = "contracts/module_data_error_tests.rs"]
+mod module_data_error_tests;
+
+/// Historical application-data ABI version retained for old artifacts.
 pub const DATA_ABI_VERSION_V1: u32 = 1;
+/// The sound application-data ABI with host-owned failure outcomes.
+pub const DATA_ABI_VERSION_V2: u32 = 2;
 
 /// A JSON object used for entity values, patches, and action parameters.
 pub type DataObject = Map<String, Value>;
@@ -37,6 +46,26 @@ impl DataRequestV1 {
     pub const fn new(operation: DataOperationV1) -> Self {
         Self {
             abi: DATA_ABI_VERSION_V1,
+            operation,
+        }
+    }
+}
+
+/// One v2 request to the governed application-data host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataRequestV2 {
+    /// ABI version. Must be [`DATA_ABI_VERSION_V2`].
+    pub abi: u32,
+    /// Requested operation.
+    pub operation: DataOperationV1,
+}
+
+impl DataRequestV2 {
+    /// Construct a v2 request.
+    pub const fn new(operation: DataOperationV1) -> Self {
+        Self {
+            abi: DATA_ABI_VERSION_V2,
             operation,
         }
     }
@@ -408,85 +437,6 @@ pub struct FileMetadataV1 {
     /// Canonical content hash when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-}
-
-/// Structured error returned before any HTTP mapping.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModuleDataError {
-    /// Closed low-cardinality category.
-    pub kind: ModuleDataErrorKind,
-    /// Stable machine-readable code.
-    pub code: String,
-    /// Bounded safe explanation.
-    pub message: String,
-    /// Stable retry guidance.
-    pub retryability: Retryability,
-    /// Optional governance decision identifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_id: Option<String>,
-    /// Optional bounded typed metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Box<DataObject>>,
-}
-
-impl ModuleDataError {
-    /// Construct a stable structured error.
-    pub fn new(
-        kind: ModuleDataErrorKind,
-        code: impl Into<String>,
-        message: impl Into<String>,
-        retryability: Retryability,
-    ) -> Self {
-        Self {
-            kind,
-            code: code.into(),
-            message: message.into(),
-            retryability,
-            decision_id: None,
-            details: None,
-        }
-    }
-}
-
-impl core::fmt::Display for ModuleDataError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for ModuleDataError {}
-
-/// Closed v1 error taxonomy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModuleDataErrorKind {
-    /// Malformed or unsupported caller input.
-    InvalidRequest,
-    /// Input or binding differs from the verified schema.
-    SchemaMismatch,
-    /// Requested resource does not exist.
-    NotFound,
-    /// Resource already exists.
-    AlreadyExists,
-    /// Capability or Cedar authorization denied the operation.
-    AuthorizationDenied,
-    /// An IOA guard rejected the action.
-    GuardRejected,
-    /// A declared relation rejected the mutation.
-    RelationViolation,
-    /// Verification state does not permit the operation.
-    VerificationFailed,
-    /// Exact-sequence or other concurrency conflict.
-    Conflict,
-    /// Requested committed state cannot be observed within the bounded path.
-    ConsistencyUnavailable,
-    /// A declared operation or byte budget was exhausted.
-    BudgetExceeded,
-    /// A transient dependency is unavailable.
-    TransientUnavailable,
-    /// Safe internal failure without sensitive details.
-    Internal,
 }
 
 #[cfg(test)]

@@ -78,8 +78,8 @@ fn module_action_missing_and_null_required_values_share_the_stable_code() {
         let error =
             validate_manifest_action_params(&csdl(), &entity, "Close", params.as_object().unwrap())
                 .unwrap_err();
-        assert_eq!(error.kind, ModuleDataErrorKind::SchemaMismatch);
-        assert_eq!(error.code, "MissingActionParameter");
+        assert_eq!(error.kind(), ModuleDataErrorKind::SchemaMismatch);
+        assert_eq!(error.code().as_str(), "MissingActionParameter");
     }
 }
 
@@ -104,7 +104,7 @@ fn module_action_aliases_are_accepted_and_extras_use_type_mismatch() {
             .unwrap(),
     )
     .unwrap_err();
-    assert_eq!(error.code, "ActionParameterTypeMismatch");
+    assert_eq!(error.code().as_str(), "ActionParameterTypeMismatch");
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn module_action_rejects_unknown_enum_and_wrong_reference_shape() {
             Ok(()) => panic!("invalid params unexpectedly accepted: {params}"),
             Err(error) => error,
         };
-        assert_eq!(error.code, "ActionParameterTypeMismatch");
+        assert_eq!(error.code().as_str(), "ActionParameterTypeMismatch");
     }
     validate_manifest_action_params(
         &csdl(),

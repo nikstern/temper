@@ -1,14 +1,60 @@
 //! Shared transport-neutral entity mutation service.
 
+mod mutations;
+
 use std::collections::BTreeMap;
 
 use temper_authz::{AuthzDenial, SecurityContext};
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::EntityResponse;
-use crate::request_context::AgentContext;
-use crate::state::{DispatchError, DispatchExtOptions, ServerState};
+use crate::state::ServerState;
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexPage};
+
+/// Structured read failure at the application-data service boundary.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ApplicationDataReadError {
+    /// The authoritative entity does not exist.
+    #[error("entity not found")]
+    NotFound,
+    /// The entity may exist, but its state could not be observed.
+    #[error("application-data read failed: {0}")]
+    Internal(String),
+}
+
+/// Typed reason for a write rejected before a commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApplicationDataRejection {
+    /// An optimistic concurrency precondition failed.
+    Conflict,
+    /// Authorization rejected the operation.
+    AuthorizationDenied,
+    /// A bounded resource budget rejected the operation.
+    BudgetExceeded,
+    /// The requested entity or action is not governed by the active schema.
+    SchemaMismatch,
+    /// Another internal pre-commit check rejected the operation.
+    Internal,
+}
+
+/// Commit-phase-preserving write failure for application-data callers.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ApplicationDataWriteError {
+    /// Structural evidence proves that no commit occurred.
+    #[error("application-data write was not applied: {diagnostic}")]
+    NotApplied {
+        /// Stable rejection class independent of the diagnostic.
+        reason: ApplicationDataRejection,
+        /// Diagnostic retained only for logs.
+        diagnostic: String,
+    },
+    /// Structural evidence proves that the commit occurred.
+    #[error("application-data write committed before failure: {0}")]
+    Applied(String),
+    /// Available evidence cannot prove whether the commit occurred.
+    #[error("application-data write acknowledgement is unknown: {0}")]
+    Unknown(String),
+}
 
 /// Governed entity data substrate shared by OData adapters and module invocations.
 pub(crate) struct GovernedApplicationDataService<'a> {
@@ -61,6 +107,7 @@ impl<'a> GovernedApplicationDataService<'a> {
     }
 
     /// Read one canonical actor state through an exact immutable scoped pin.
+    #[allow(dead_code, reason = "retained for the legacy scoped-data adapter")]
     pub(crate) async fn get_scoped(
         &self,
         tenant: &TenantId,
@@ -71,6 +118,49 @@ impl<'a> GovernedApplicationDataService<'a> {
         self.state
             .get_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
             .await
+    }
+
+    /// Read one entity with a typed missing-versus-internal distinction.
+    pub(super) async fn get_typed(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<EntityResponse, ApplicationDataReadError> {
+        if !self.state.entity_exists(tenant, entity_type, entity_id)
+            && !self
+                .state
+                .ensure_entity_loaded(tenant, entity_type, entity_id)
+                .await
+        {
+            return Err(ApplicationDataReadError::NotFound);
+        }
+        self.state
+            .get_tenant_entity_state(tenant, entity_type, entity_id)
+            .await
+            .map_err(ApplicationDataReadError::Internal)
+    }
+
+    /// Read one scoped entity with a typed missing-versus-internal distinction.
+    pub(super) async fn get_scoped_typed(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
+    ) -> Result<EntityResponse, ApplicationDataReadError> {
+        if !self
+            .state
+            .scoped_entity_exists(tenant, entity_type, entity_id, &schema_pin)
+            .await
+            .map_err(ApplicationDataReadError::Internal)?
+        {
+            return Err(ApplicationDataReadError::NotFound);
+        }
+        self.state
+            .get_scoped_entity_state(tenant, entity_type, entity_id, schema_pin)
+            .await
+            .map_err(ApplicationDataReadError::Internal)
     }
 
     /// Whether an exact scoped entity already exists under the supplied pin.
@@ -182,211 +272,5 @@ impl<'a> GovernedApplicationDataService<'a> {
     /// Read the currently indexed IDs for bounded projection-coverage repair.
     pub(crate) fn indexed_candidates(&self, tenant: &TenantId, entity_type: &str) -> Vec<String> {
         self.state.list_entity_ids(tenant, entity_type)
-    }
-
-    /// Create through the common durable actor/data-only path.
-    #[tracing::instrument(skip_all, fields(otel.name = "application_data.service.create", entity_type))]
-    pub(crate) async fn create(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-    ) -> Result<EntityResponse, String> {
-        if let Some(response) = self
-            .state
-            .try_create_data_only_tenant_entity(tenant, entity_type, entity_id, fields.clone())
-            .await?
-        {
-            return Ok(response);
-        }
-        self.state
-            .get_or_create_tenant_entity(tenant, entity_type, entity_id, fields)
-            .await
-    }
-
-    /// Create through the immutable task-scoped actor path.
-    pub(crate) async fn create_scoped(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
-    ) -> Result<EntityResponse, String> {
-        self.state
-            .get_or_create_scoped_entity(tenant, entity_type, entity_id, fields, schema_pin)
-            .await
-    }
-
-    /// Patch through the common exact-sequence actor path.
-    #[tracing::instrument(skip_all, fields(otel.name = "application_data.service.patch", entity_type))]
-    pub(crate) async fn patch(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        expected_sequence: Option<u64>,
-    ) -> Result<EntityResponse, String> {
-        self.write_fields(
-            tenant,
-            entity_type,
-            entity_id,
-            fields,
-            false,
-            expected_sequence,
-        )
-        .await
-    }
-
-    /// Patch through one immutable task-scoped actor.
-    pub(crate) async fn patch_scoped(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        expected_sequence: Option<u64>,
-        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
-    ) -> Result<EntityResponse, String> {
-        self.state
-            .update_scoped_entity_fields_if_sequence(
-                tenant,
-                entity_type,
-                entity_id,
-                fields,
-                false,
-                expected_sequence,
-                schema_pin,
-            )
-            .await
-    }
-
-    /// Replace through the common actor path used by the OData adapter.
-    #[expect(dead_code, reason = "reserved for the typed module-data adapter")]
-    pub(crate) async fn replace(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-    ) -> Result<EntityResponse, String> {
-        self.write_fields(tenant, entity_type, entity_id, fields, true, None)
-            .await
-    }
-
-    /// Replace through one immutable task-scoped actor.
-    #[expect(dead_code, reason = "reserved for the typed scoped-data adapter")]
-    pub(crate) async fn replace_scoped(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        schema_pin: temper_runtime::persistence::schema_deployment::SchemaExecutionPin,
-    ) -> Result<EntityResponse, String> {
-        self.state
-            .update_scoped_entity_fields_if_sequence(
-                tenant,
-                entity_type,
-                entity_id,
-                fields,
-                true,
-                None,
-                schema_pin,
-            )
-            .await
-    }
-
-    async fn write_fields(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-        expected_sequence: Option<u64>,
-    ) -> Result<EntityResponse, String> {
-        self.state
-            .update_tenant_entity_fields_if_sequence(
-                tenant,
-                entity_type,
-                entity_id,
-                fields,
-                replace,
-                expected_sequence,
-            )
-            .await
-    }
-
-    /// Invoke an action through the common actor dispatch path.
-    #[tracing::instrument(skip_all, fields(otel.name = "application_data.service.action", entity_type, action))]
-    pub(crate) async fn action(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: serde_json::Value,
-        agent: &AgentContext,
-    ) -> Result<EntityResponse, String> {
-        if agent.idempotency_key.as_deref().is_some_and(|key| {
-            key.starts_with(crate::entity_actor::SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX)
-        }) {
-            return Err("reserved schema-bootstrap idempotency identity".into());
-        }
-        self.action_with_options(tenant, entity_type, entity_id, action, params, agent, true)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    /// Invoke the initial action through the host-only schema-bootstrap path.
-    pub(crate) async fn action_for_schema_bootstrap(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: serde_json::Value,
-        agent: &AgentContext,
-    ) -> Result<EntityResponse, String> {
-        debug_assert!(agent.idempotency_key.as_deref().is_some_and(|key| {
-            key.starts_with(crate::entity_actor::SCHEMA_BOOTSTRAP_ACTION_IDEMPOTENCY_PREFIX)
-        }));
-        self.action_with_options(tenant, entity_type, entity_id, action, params, agent, true)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    /// Invoke an action with the adapter's integration-wait preference.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the action boundary preserves the actor dispatch contract explicitly"
-    )]
-    pub(crate) async fn action_with_options(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: serde_json::Value,
-        agent: &AgentContext,
-        await_integration: bool,
-    ) -> Result<EntityResponse, DispatchError> {
-        self.state
-            .dispatch_tenant_action_ext_typed(
-                tenant,
-                entity_type,
-                entity_id,
-                action,
-                params,
-                DispatchExtOptions {
-                    agent_ctx: agent,
-                    await_integration,
-                    await_reactions: true,
-                },
-            )
-            .await
     }
 }

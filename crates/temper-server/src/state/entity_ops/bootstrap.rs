@@ -44,7 +44,8 @@ impl ServerState {
                 Some(schema_pin.clone()),
                 Some(creation_idempotency_key.clone()),
             )
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
         let creation_sequence = if let Some((store, _)) = self.event_journal() {
             let persistence_id = format!(
                 "{tenant}:{entity_type}:{}",

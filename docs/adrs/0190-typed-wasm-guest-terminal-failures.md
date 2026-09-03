@@ -1,6 +1,6 @@
 # ADR-0190: Typed WASM Guest Terminal Failures
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-26
 - Deciders: Temper core maintainers
 - Related:

@@ -21,6 +21,18 @@ pub enum FailureDetailValue {
     Bool(bool),
 }
 
+impl FailureDetailValue {
+    /// Project the bounded value to its untagged JSON scalar representation.
+    pub fn to_json_scalar(&self) -> serde_json::Value {
+        match self {
+            Self::String(value) => serde_json::Value::String(value.as_str().to_string()),
+            Self::Signed(value) => serde_json::Value::from(*value),
+            Self::Unsigned(value) => serde_json::Value::from(*value),
+            Self::Bool(value) => serde_json::Value::from(*value),
+        }
+    }
+}
+
 /// A deterministically ordered map of bounded, safe scalar details.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]

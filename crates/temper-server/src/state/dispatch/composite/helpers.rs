@@ -374,7 +374,11 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
         PersistenceError::ConcurrencyViolation { .. } => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
-        PersistenceError::Serialization(_) | PersistenceError::Storage(_) => {
+        PersistenceError::PreCommit(_)
+        | PersistenceError::PostCommit(_)
+        | PersistenceError::AcknowledgementUnknown(_)
+        | PersistenceError::Serialization(_)
+        | PersistenceError::Storage(_) => {
             DispatchError::Internal(format!("composite batch persistence failed: {error}"))
         }
     }

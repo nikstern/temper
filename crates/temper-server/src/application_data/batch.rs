@@ -5,7 +5,7 @@ use temper_wasm_sdk::data::{
     ModuleDataErrorKind,
 };
 
-use super::{ApplicationDataInvocation, data_error};
+use super::{ApplicationDataInvocation, not_applied_error};
 
 impl ApplicationDataInvocation {
     pub(super) async fn check_sequence(
@@ -17,7 +17,7 @@ impl ApplicationDataInvocation {
         if let Some(expected) = expected {
             let current = self.get_target_entity(entity_type, entity_id).await?;
             if current.state.sequence_nr != expected {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::Conflict,
                     "SequenceConflict",
                     "entity sequence does not match expected_sequence",
@@ -38,14 +38,14 @@ impl ApplicationDataInvocation {
             .operations
             .contains(&DataOperationKind::Batch)
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::AuthorizationDenied,
                 "CapabilityDenied",
                 "module data grant does not permit batch operations",
             ));
         }
         if items.len() > self.authority.binding.grant.budgets.max_batch_items as usize {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "BatchBudgetExceeded",
                 "batch item budget exceeded",
@@ -55,7 +55,7 @@ impl ApplicationDataInvocation {
         if acknowledgement_reservation
             > self.authority.binding.grant.budgets.max_response_bytes as usize
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "BatchResponseReservationExceeded",
                 "batch compact acknowledgement exceeds the response budget",

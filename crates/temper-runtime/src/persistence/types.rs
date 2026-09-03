@@ -474,21 +474,9 @@ pub struct PersistenceAppendResult {
     pub sequence_nr: u64,
 }
 
-/// Errors that can occur during event persistence operations.
-#[derive(Debug, thiserror::Error)]
-pub enum PersistenceError {
-    #[error("optimistic concurrency violation: expected sequence {expected}, got {actual}")]
-    ConcurrencyViolation { expected: u64, actual: u64 },
-    #[error("serialization error: {0}")]
-    Serialization(String),
-    #[error("storage error: {0}")]
-    Storage(String),
-}
-
-/// Convert backend-specific errors into [`PersistenceError::Storage`].
-pub fn storage_error(err: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Storage(err.to_string())
-}
+#[path = "types/errors.rs"]
+mod errors;
+pub use errors::{PersistenceError, storage_error};
 
 #[cfg(test)]
 #[path = "types/creation_contract_tests.rs"]

@@ -1054,17 +1054,28 @@ impl crate::state::ServerState {
                         .with_temper_data_service(data, read, write, &budgets);
                 } else if let Some(binding) = data_binding {
                     let budgets = binding.grant.budgets.clone();
-                    let data: TemperDataCallFn = Arc::new(|_| {
-                        Box::pin(async {
-                            serde_json::to_vec(&temper_wasm_sdk::data::DataResponseV1::error(
-                                temper_wasm_sdk::data::ModuleDataError::new(
-                                    temper_wasm_sdk::data::ModuleDataErrorKind::AuthorizationDenied,
-                                    "AuthorizationDenied",
-                                    "module invocation has no originating security context",
-                                    temper_wasm_sdk::data::Retryability::Never,
+                    let abi = binding.abi;
+                    let data: TemperDataCallFn = Arc::new(move |_| {
+                        Box::pin(async move {
+                            let error = temper_wasm_sdk::data::ModuleDataError::new(
+                                temper_wasm_sdk::data::ModuleDataErrorKind::AuthorizationDenied,
+                                "AuthorizationDenied",
+                                "module invocation has no originating security context",
+                                temper_wasm_sdk::FailureRetryability::AfterAuthorization,
+                                temper_wasm_sdk::FailureOutcome::NotApplied,
+                            )
+                            .expect("static authorization failure contract must be valid");
+                            let response = match abi {
+                                temper_wasm_sdk::data::DATA_ABI_VERSION_V2 => serde_json::to_value(
+                                    temper_wasm_sdk::data::DataResponseV2::error(error),
                                 ),
-                            ))
-                            .map_err(|error| error.to_string())
+                                _ => serde_json::to_value(
+                                    temper_wasm_sdk::data::DataResponseV1::error(error),
+                                ),
+                            };
+                            response
+                                .and_then(|response| serde_json::to_vec(&response))
+                                .map_err(|error| error.to_string())
                         })
                     });
                     let read: TemperFileReadFn = Arc::new(|_, _| Err(-3));

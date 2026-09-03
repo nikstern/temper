@@ -6,7 +6,8 @@ use temper_wasm_sdk::data::{
 };
 
 use super::super::{
-    ApplicationDataInvocation, ModuleDataTarget, data_error, internal_error, short_type,
+    ApplicationDataInvocation, ModuleDataTarget, not_applied_error, not_applied_internal_error,
+    short_type,
 };
 
 impl ApplicationDataInvocation {
@@ -51,11 +52,14 @@ impl ApplicationDataInvocation {
                 value: serde_json::Map::new(),
             },
         };
-        let envelope_bytes = serde_json::to_vec(&DataResponseV1::ok(candidate))
-            .map_err(|error| internal_error(error.to_string()))?
-            .len();
+        let envelope_bytes = super::super::encode_response(
+            self.authority.binding.abi,
+            &DataResponseV1::ok(candidate),
+        )
+        .map_err(|error| not_applied_internal_error(error.to_string()))?
+        .len();
         let encoded_entity_id = serde_json::to_vec(&entity_id)
-            .map_err(|error| internal_error(error.to_string()))?
+            .map_err(|error| not_applied_internal_error(error.to_string()))?
             .len();
         let lifecycle_value_bytes = table
             .states
@@ -63,14 +67,14 @@ impl ApplicationDataInvocation {
             .chain(std::iter::once(&table.initial_state))
             .map(|state| serde_json::to_vec(state).map(|encoded| encoded.len()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| internal_error(error.to_string()))?
+            .map_err(|error| not_applied_internal_error(error.to_string()))?
             .into_iter()
             .max()
             .unwrap_or(4);
         let mut value_bytes = 0usize;
         for (index, property) in manifest.properties.iter().enumerate() {
             let key_bytes = serde_json::to_vec(&property.canonical_name)
-                .map_err(|error| internal_error(error.to_string()))?
+                .map_err(|error| not_applied_internal_error(error.to_string()))?
                 .len();
             let property_bytes = match property.source {
                 temper_wasm_sdk::data::ManifestValueSourceV1::EntityId => encoded_entity_id,
@@ -90,12 +94,12 @@ impl ApplicationDataInvocation {
                         .as_ref()
                         .map(|value| serde_json::to_vec(value).map(|encoded| encoded.len()))
                         .transpose()
-                        .map_err(|error| internal_error(error.to_string()))?
+                        .map_err(|error| not_applied_internal_error(error.to_string()))?
                         .unwrap_or(0);
                     inline_bytes.max(512).max(default_bytes)
                 }
                 temper_wasm_sdk::data::ManifestValueSourceV1::Input => {
-                    return Err(data_error(
+                    return Err(not_applied_error(
                         ModuleDataErrorKind::SchemaMismatch,
                         "InvalidEntityPropertySource",
                         "entity property has an input-only manifest source",
@@ -111,7 +115,7 @@ impl ApplicationDataInvocation {
         if envelope_bytes.saturating_add(value_bytes)
             > self.authority.binding.grant.budgets.max_response_bytes as usize
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "ResponseReservationExceeded",
                 "create-or-verify success response exceeds the invocation budget",
@@ -125,7 +129,7 @@ impl ApplicationDataInvocation {
         entity_type: &str,
     ) -> Result<std::sync::Arc<temper_jit::TransitionTable>, ModuleDataError> {
         let registry = self.state.registry.read().map_err(|_| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::Internal,
                 "RegistryUnavailable",
                 "schema registry is unavailable",
@@ -143,7 +147,7 @@ impl ApplicationDataInvocation {
             ),
         };
         table.ok_or_else(|| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::VerificationFailed,
                 "VerificationGateRejected",
                 "entity specification is not verified",

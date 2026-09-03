@@ -114,7 +114,7 @@ async fn typed_current_and_version_reads_survive_restart_and_reject_cross_file()
     .unwrap();
     let db_path = std::env::temp_dir().join(format!(
         "temper-typed-stream-restart-{}.db",
-        uuid::Uuid::new_v4()
+        uuid::Uuid::new_v4() // determinism-ok: unique isolated database path
     ));
     let store = TursoEventStore::new(&format!("file:{}", db_path.display()), None)
         .await
@@ -208,9 +208,9 @@ async fn typed_current_and_version_reads_survive_restart_and_reject_cross_file()
                     "idempotency_key": null
                 }),
                 metadata: EventMetadata {
-                    event_id: uuid::Uuid::new_v4(),
-                    causation_id: uuid::Uuid::new_v4(),
-                    correlation_id: uuid::Uuid::new_v4(),
+                    event_id: uuid::Uuid::new_v4(), // determinism-ok: fixed replay fixture identity is not observed
+                    causation_id: uuid::Uuid::new_v4(), // determinism-ok: fixed replay fixture identity is not observed
+                    correlation_id: uuid::Uuid::new_v4(), // determinism-ok: fixed replay fixture identity is not observed
                     timestamp: temper_runtime::scheduler::sim_now(),
                     actor_id: "default:FileVersion:version-1".into(),
                     kernel: None,
@@ -408,8 +408,8 @@ pub extern "C" fn run(_ctx_ptr: i32, _ctx_len: i32) -> i32 {
         let mismatch = client
             .open_file_version_read("file-2", "version-1")
             .expect_err("cross-File version must be rejected");
-        if mismatch.code != "FileVersionMismatch" {
-            return Err(format!("unexpected cross-File error: {}", mismatch.code));
+        if mismatch.code().as_str() != "FileVersionMismatch" {
+            return Err(format!("unexpected cross-File error: {}", mismatch.code().as_str()));
         }
         Ok(())
     })();

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{DATA_ABI_VERSION_V1, ModuleSdkCompatibilityProof};
+use super::{DATA_ABI_VERSION_V1, DATA_ABI_VERSION_V2, ModuleSdkCompatibilityProof};
 
 mod hashes;
 mod nullability;
@@ -350,7 +350,7 @@ impl ModuleSdkManifest {
         let grant_digest = grant.digest()?;
         let used_symbols_digest = digest_json(&used_symbols)?;
         Ok(Self {
-            abi: DATA_ABI_VERSION_V1,
+            abi: DATA_ABI_VERSION_V2,
             contract_version: Some(MODULE_SDK_MANIFEST_CONTRACT_VERSION_V2),
             module_name: module_name.into(),
             dependency_lock_digest: metadata.dependency_lock,
@@ -377,7 +377,7 @@ impl ModuleSdkManifest {
 
     /// Recompute and verify the embedded grant digest and ABI version.
     pub fn verify_binding(&self) -> Result<(), String> {
-        if self.abi != DATA_ABI_VERSION_V1 {
+        if !matches!(self.abi, DATA_ABI_VERSION_V1 | DATA_ABI_VERSION_V2) {
             return Err(format!("unsupported module data ABI {}", self.abi));
         }
         self.grant.validate()?;

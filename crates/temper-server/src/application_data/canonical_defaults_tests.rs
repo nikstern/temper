@@ -224,6 +224,6 @@ async fn canonical_read_fails_closed_when_required_property_has_no_value_or_defa
     )
     .await;
     let error = response_error(response);
-    assert_eq!(error.kind, ModuleDataErrorKind::SchemaMismatch);
-    assert_eq!(error.code, "MissingRequiredProperty");
+    assert_eq!(error.kind(), ModuleDataErrorKind::SchemaMismatch);
+    assert_eq!(error.code().as_str(), "MissingRequiredProperty");
 }

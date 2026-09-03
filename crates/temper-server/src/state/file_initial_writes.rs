@@ -1,12 +1,19 @@
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
-use temper_runtime::scheduler::{sim_now, sim_uuid};
+use temper_runtime::persistence::PersistenceError;
+use temper_runtime::scheduler::sim_now;
 
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
 use crate::events::EntityStateChange;
 
 use super::{FileStreamContentError, ServerState, validate_global_entity_id};
+
+#[path = "file_initial_writes/envelope.rs"]
+mod envelope;
+#[cfg(test)]
+#[path = "file_initial_writes_tests.rs"]
+mod tests;
+use envelope::synthetic_envelope;
 
 impl ServerState {
     /// Create a brand-new TemperFS `File` and persist its first stream bytes as
@@ -206,14 +213,30 @@ impl ServerState {
         match store.append(&persistence_id, 0, &envelopes).await {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
-                return Err(FileStreamContentError::ActionRejected(format!(
+                return Err(FileStreamContentError::PersistenceNotApplied(format!(
                     "File('{file_id}') already exists; use File $value update for existing content"
                 )));
             }
             Err(error) => {
-                return Err(FileStreamContentError::State(format!(
-                    "failed to persist atomic File initial content events for File('{file_id}'): {error}"
-                )));
+                let phase = FileStreamContentError::from_persistence(error);
+                return Err(match phase {
+                    FileStreamContentError::PersistenceNotApplied(error) => {
+                        FileStreamContentError::PersistenceNotApplied(format!(
+                            "failed to persist atomic File initial content events for File('{file_id}'): {error}"
+                        ))
+                    }
+                    FileStreamContentError::PersistenceApplied(error) => {
+                        FileStreamContentError::PersistenceApplied(format!(
+                            "failed after persisting atomic File initial content events for File('{file_id}'): {error}"
+                        ))
+                    }
+                    FileStreamContentError::PersistenceUnknown(error) => {
+                        FileStreamContentError::PersistenceUnknown(format!(
+                            "could not acknowledge atomic File initial content events for File('{file_id}'): {error}"
+                        ))
+                    }
+                    _ => unreachable!("persistence conversion returns a persistence phase"),
+                });
             }
         }
 
@@ -232,7 +255,7 @@ impl ServerState {
                 )
                 .await
                 .map_err(|error| {
-                    FileStreamContentError::State(format!(
+                    FileStreamContentError::PersistenceApplied(format!(
                         "query projection write failed during atomic File initial content create: {error}"
                     ))
                 })?;
@@ -253,6 +276,7 @@ impl ServerState {
             success: true,
             state,
             error: None,
+            failure_outcome: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
@@ -461,27 +485,4 @@ fn push_synthetic_event(
     state.sequence_nr = state.sequence_nr.saturating_add(1);
     state.push_event_bounded(event.clone());
     events.push(event);
-}
-
-fn synthetic_envelope(
-    persistence_id: &str,
-    sequence_nr: u64,
-    event: &EntityEvent,
-    kernel_metadata: Option<&temper_runtime::persistence::KernelEventMetadata>,
-) -> Result<PersistenceEnvelope, FileStreamContentError> {
-    let payload = serde_json::to_value(event)
-        .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
-    Ok(PersistenceEnvelope {
-        sequence_nr,
-        event_type: event.action.clone(),
-        payload,
-        metadata: EventMetadata {
-            event_id: sim_uuid(),
-            causation_id: sim_uuid(),
-            correlation_id: sim_uuid(),
-            timestamp: event.timestamp,
-            actor_id: persistence_id.to_string(),
-            kernel: kernel_metadata.cloned(),
-        },
-    })
 }

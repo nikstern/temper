@@ -95,7 +95,13 @@ async fn committed_reply_loss_retries_after_server_restart() {
         durable_invocation_with_store(operations.clone(), SecurityContext::system(), store.clone());
     let mut first_changes = first.state.event_tx.subscribe();
     let response = call(&first, operation(id, "request-85", "Ada")).await;
-    assert_eq!(response_error(response).kind, ModuleDataErrorKind::Internal);
+    let error = response_error(response);
+    assert_eq!(error.kind(), ModuleDataErrorKind::TransientUnavailable);
+    assert_eq!(error.outcome(), temper_wasm_sdk::FailureOutcome::Unknown);
+    assert_eq!(
+        error.retryability(),
+        temper_wasm_sdk::FailureRetryability::Reconcile
+    );
     assert_eq!(store.dump_journal(&persistence_id).len(), 1);
     assert!(matches!(
         first_changes.try_recv(),
@@ -298,7 +304,7 @@ async fn redis_create_projection_is_consumed_by_filtered_odata() {
             template.authority.target.clone(),
         ),
     );
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::new_v4().to_string(); // determinism-ok: unique external Redis test identity
     assert!(matches!(
         call(&invocation, operation(&id, &format!("redis-{id}"), "Ada"))
             .await
@@ -353,7 +359,10 @@ async fn divergent_request_and_idempotency_reuse_return_closed_conflicts() {
 async fn capability_and_idempotency_validation_fail_before_storage_resolution() {
     let denied = durable_invocation(BTreeSet::new(), SecurityContext::system());
     let denied_response = call(&denied, operation("missing", "request", "Ada")).await;
-    assert_eq!(response_error(denied_response).code, "CapabilityDenied");
+    assert_eq!(
+        response_error(denied_response).code().as_str(),
+        "CapabilityDenied"
+    );
 
     let admitted = durable_invocation(
         BTreeSet::from([DataOperationKind::EntityCreateOrVerify]),
@@ -362,8 +371,8 @@ async fn capability_and_idempotency_validation_fail_before_storage_resolution() 
     for key in [String::new(), "x".repeat(257)] {
         let response = call(&admitted, operation("candidate", &key, "Ada")).await;
         let error = response_error(response);
-        assert_eq!(error.kind, ModuleDataErrorKind::InvalidRequest);
-        assert_eq!(error.code, "InvalidIdentifier");
+        assert_eq!(error.kind(), ModuleDataErrorKind::InvalidRequest);
+        assert_eq!(error.code().as_str(), "InvalidIdentifier");
     }
 }
 
@@ -411,8 +420,8 @@ async fn cedar_authorizes_materialized_defaults_and_denies_before_lookup() {
         ),
     ] {
         let error = response_error(call(&invocation, candidate).await);
-        assert_eq!(error.kind, ModuleDataErrorKind::AuthorizationDenied);
-        assert_eq!(error.code, "AuthorizationDenied");
+        assert_eq!(error.kind(), ModuleDataErrorKind::AuthorizationDenied);
+        assert_eq!(error.code().as_str(), "AuthorizationDenied");
     }
     assert_eq!(
         store.dump_journal(&format!("default:Customer:{id}")).len(),
