@@ -79,7 +79,10 @@ impl ObserveError {
         let category = match error {
             PersistenceError::ConcurrencyViolation { .. } => "storage_conflict",
             PersistenceError::Serialization(_) => "corrupt_workflow_record",
-            PersistenceError::Storage(_) => "storage_unavailable",
+            PersistenceError::PreCommit(_)
+            | PersistenceError::PostCommit(_)
+            | PersistenceError::AcknowledgementUnknown(_)
+            | PersistenceError::Storage(_) => "storage_unavailable",
         };
         Self::new(StatusCode::SERVICE_UNAVAILABLE, category)
     }

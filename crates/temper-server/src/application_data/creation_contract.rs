@@ -10,7 +10,7 @@ use temper_wasm_sdk::data::{
     ModuleDataError, ModuleDataErrorKind,
 };
 
-use super::{data_error, schema::effective_write_policy};
+use super::{not_applied_error, schema::effective_write_policy};
 
 /// Materialize every caller-admitted optional create field before policy
 /// evaluation, contract hashing, key derivation, and event construction.
@@ -154,7 +154,7 @@ fn compile_field(
         .or_else(|| property.default_value.clone())
         .or_else(|| property.nullable.then_some(serde_json::Value::Null))
         .ok_or_else(|| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::SchemaMismatch,
                 "MissingRequiredProperty",
                 "required creation-contract property is absent",
@@ -234,7 +234,7 @@ fn canonical_value(
         _ => Some(canonical_json(value)),
     };
     normalized.ok_or_else(|| {
-        data_error(
+        not_applied_error(
             ModuleDataErrorKind::SchemaMismatch,
             "PropertyTypeMismatch",
             "creation-contract value does not match its canonical type",
@@ -283,7 +283,7 @@ fn normalize_decimal(value: &str) -> Result<String, ModuleDataError> {
 }
 
 fn invalid_decimal() -> ModuleDataError {
-    data_error(
+    not_applied_error(
         ModuleDataErrorKind::SchemaMismatch,
         "PropertyTypeMismatch",
         "decimal creation-contract value is invalid",
@@ -311,7 +311,7 @@ fn digest_value(
     value: &serde_json::Value,
 ) -> Result<String, ModuleDataError> {
     let encoded = serde_json::to_vec(value).map_err(|error| {
-        data_error(
+        not_applied_error(
             ModuleDataErrorKind::Internal,
             "CreationContractEncodingFailed",
             &error.to_string(),

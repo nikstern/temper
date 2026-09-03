@@ -18,9 +18,9 @@ use crate::authz::{observe_tenant_scope, require_authenticated_context, require_
 use crate::state::ServerState;
 
 mod replay;
-pub(crate) use replay::{
-    durable_entity_change_stream, replay_durable_entity_changes, replay_durable_tenant_changes,
-};
+#[cfg(any(test, feature = "observe"))]
+pub(crate) use replay::replay_durable_entity_changes;
+pub(crate) use replay::{durable_entity_change_stream, replay_durable_tenant_changes};
 
 /// A notification emitted when an entity transitions to a new state.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

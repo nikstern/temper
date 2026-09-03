@@ -313,7 +313,7 @@ pub(super) async fn run(
 
     let write_failure_probability = inner.faults.write_failure_prob;
     if inner.rng.chance(write_failure_probability) {
-        return Err(PersistenceError::Storage(
+        return Err(PersistenceError::PreCommit(
             "SimEventStore: injected create-or-verify write failure".into(),
         ));
     }
@@ -329,7 +329,7 @@ pub(super) async fn run(
     );
     let reply_loss_probability = inner.faults.create_or_verify_reply_loss_prob;
     if inner.rng.chance(reply_loss_probability) {
-        return Err(PersistenceError::Storage(
+        return Err(PersistenceError::AcknowledgementUnknown(
             "SimEventStore: injected create-or-verify reply loss after commit".into(),
         ));
     }

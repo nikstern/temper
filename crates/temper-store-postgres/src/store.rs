@@ -26,6 +26,15 @@ use crate::segments;
 
 const EVENT_APPEND_OPERATION: &str = "event_append";
 
+fn pre_commit_error(error: PersistenceError) -> PersistenceError {
+    match error {
+        PersistenceError::PreCommit(_)
+        | PersistenceError::ConcurrencyViolation { .. }
+        | PersistenceError::Serialization(_) => error,
+        error => PersistenceError::PreCommit(error.to_string()),
+    }
+}
+
 /// A PostgreSQL-backed event store.
 ///
 /// Persistence IDs follow `"tenant:entity_type:entity_id"` (with legacy
@@ -304,7 +313,7 @@ impl EventStore for PostgresEventStore {
         reconcile_vectors: bool,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::PreCommit)?;
 
         let mut transaction_timer = PostgresTransactionTimer::start(EVENT_APPEND_OPERATION);
         let acquire_started = Instant::now();
@@ -323,7 +332,7 @@ impl EventStore for PostgresEventStore {
                     EVENT_APPEND_OPERATION,
                     "error",
                 );
-                return Err(PersistenceError::Storage(e.to_string()));
+                return Err(PersistenceError::PreCommit(e.to_string()));
             }
         };
         let begin_started = Instant::now();
@@ -342,13 +351,16 @@ impl EventStore for PostgresEventStore {
                     EVENT_APPEND_OPERATION,
                     "error",
                 );
-                return Err(PersistenceError::Storage(e.to_string()));
+                return Err(PersistenceError::PreCommit(e.to_string()));
             }
         };
 
-        assert_scoped_journal_write_fence(&mut tx, tenant, entity_type, entity_id, events).await?;
+        assert_scoped_journal_write_fence(&mut tx, tenant, entity_type, entity_id, events)
+            .await
+            .map_err(pre_commit_error)?;
         assert_unscoped_stream_publication_fence(&mut tx, tenant, entity_type, entity_id, events)
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
 
         let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
             "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
@@ -359,7 +371,7 @@ impl EventStore for PostgresEventStore {
         .bind(entity_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
 
         let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
         if current_seq != expected_sequence {
@@ -384,11 +396,11 @@ impl EventStore for PostgresEventStore {
             .bind(&key.key_hash)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
             if let Some((existing,)) = holder
                 && existing != entity_id
             {
-                return Err(PersistenceError::Storage(format!(
+                return Err(PersistenceError::PreCommit(format!(
                     "duplicate declared key '{}' for {entity_type}: held by {existing}",
                     key.key_name
                 )));
@@ -397,7 +409,8 @@ impl EventStore for PostgresEventStore {
 
         let segment_index =
             segments::open_segment_for_append(&mut tx, tenant, entity_type, entity_id, current_seq)
-                .await?;
+                .await
+                .map_err(pre_commit_error)?;
 
         let mut new_seq = expected_sequence;
         for event in events {
@@ -428,7 +441,7 @@ impl EventStore for PostgresEventStore {
                         actual: new_seq,
                     });
                 } else {
-                    return Err(PersistenceError::Storage(msg));
+                    return Err(PersistenceError::PreCommit(msg));
                 }
             }
         }
@@ -442,7 +455,8 @@ impl EventStore for PostgresEventStore {
                 segment_index,
                 new_seq,
             )
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
             if let Some((revision, schema, signature)) =
                 crate::create_or_verify::touch_creation_contract(
                     &mut tx,
@@ -451,7 +465,8 @@ impl EventStore for PostgresEventStore {
                     entity_id,
                     new_seq,
                 )
-                .await?
+                .await
+                .map_err(pre_commit_error)?
             {
                 crate::create_or_verify::advance_coverage_if_complete(
                     &mut tx,
@@ -465,7 +480,8 @@ impl EventStore for PostgresEventStore {
                         declared_key_signature: &signature,
                     },
                 )
-                .await?;
+                .await
+                .map_err(pre_commit_error)?;
             }
         }
 
@@ -481,7 +497,7 @@ impl EventStore for PostgresEventStore {
         .bind(entity_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+        .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
         for key in key_rows {
             crate::dbm::postgres_query!(
                 "INSERT INTO entity_key_index \
@@ -496,7 +512,7 @@ impl EventStore for PostgresEventStore {
             .bind(new_seq as i64)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
         }
 
         // ADR-0155: co-commit the derived vector-index rows in THIS transaction.
@@ -515,7 +531,7 @@ impl EventStore for PostgresEventStore {
             .bind(entity_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
             for row in vector_rows {
                 crate::dbm::postgres_query!(
                     "INSERT INTO entity_vector_index \
@@ -531,7 +547,7 @@ impl EventStore for PostgresEventStore {
                 .bind(new_seq as i64)
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+                .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
             }
         }
 
@@ -542,7 +558,7 @@ impl EventStore for PostgresEventStore {
                 EVENT_APPEND_OPERATION,
                 "error",
             );
-            PersistenceError::Storage(e.to_string())
+            PersistenceError::AcknowledgementUnknown(e.to_string())
         })?;
         record_postgres_transaction_commit_duration(
             commit_started.elapsed(),
@@ -881,7 +897,7 @@ impl EventStore for PostgresEventStore {
         let mut seen = std::collections::BTreeSet::new();
         for append in appends {
             if !seen.insert(append.persistence_id.as_str()) {
-                return Err(PersistenceError::Storage(format!(
+                return Err(PersistenceError::PreCommit(format!(
                     "duplicate persistence_id '{}' in append_batch",
                     append.persistence_id
                 )));
@@ -905,7 +921,7 @@ impl EventStore for PostgresEventStore {
                     EVENT_APPEND_OPERATION,
                     "error",
                 );
-                return Err(PersistenceError::Storage(e.to_string()));
+                return Err(PersistenceError::PreCommit(e.to_string()));
             }
         };
         let begin_started = Instant::now();
@@ -924,7 +940,7 @@ impl EventStore for PostgresEventStore {
                     EVENT_APPEND_OPERATION,
                     "error",
                 );
-                return Err(PersistenceError::Storage(e.to_string()));
+                return Err(PersistenceError::PreCommit(e.to_string()));
             }
         };
 
@@ -932,7 +948,7 @@ impl EventStore for PostgresEventStore {
         for append in appends {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
-                    .map_err(PersistenceError::Storage)?;
+                    .map_err(PersistenceError::PreCommit)?;
             assert_scoped_journal_write_fence(
                 &mut tx,
                 tenant,
@@ -940,7 +956,8 @@ impl EventStore for PostgresEventStore {
                 entity_id,
                 &append.events,
             )
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
             assert_unscoped_stream_publication_fence(
                 &mut tx,
                 tenant,
@@ -948,7 +965,8 @@ impl EventStore for PostgresEventStore {
                 entity_id,
                 &append.events,
             )
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
             let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
                 "SELECT COALESCE(MAX(sequence_nr), 0) FROM events \
                  WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
@@ -958,7 +976,7 @@ impl EventStore for PostgresEventStore {
             .bind(entity_id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+            .map_err(|e| PersistenceError::PreCommit(e.to_string()))?;
 
             let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
             if current_seq != append.expected_sequence {
@@ -970,14 +988,14 @@ impl EventStore for PostgresEventStore {
             }
             if let Some(first_event) = &append.first_event {
                 if append.expected_sequence != 0 || append.events.is_empty() {
-                    return Err(PersistenceError::Storage(
+                    return Err(PersistenceError::PreCommit(
                         "first-event metadata requires a non-empty sequence-0 append".to_string(),
                     ));
                 }
                 if first_event.contract_revision != first_event.contract.version
                     || first_event.schema_identity != first_event.contract.schema_digest
                 {
-                    return Err(PersistenceError::Storage(
+                    return Err(PersistenceError::PreCommit(
                         "invalid first-event metadata".to_string(),
                     ));
                 }
@@ -989,7 +1007,8 @@ impl EventStore for PostgresEventStore {
                 entity_id,
                 current_seq,
             )
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
             parsed.push((
                 tenant.to_string(),
                 entity_type.to_string(),
@@ -1031,7 +1050,7 @@ impl EventStore for PostgresEventStore {
                             actual: new_seq,
                         });
                     }
-                    return Err(PersistenceError::Storage(msg));
+                    return Err(PersistenceError::PreCommit(msg));
                 }
             }
             if new_seq > append.expected_sequence {
@@ -1043,7 +1062,8 @@ impl EventStore for PostgresEventStore {
                     *segment_index,
                     new_seq,
                 )
-                .await?;
+                .await
+                .map_err(pre_commit_error)?;
             }
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
@@ -1079,11 +1099,11 @@ impl EventStore for PostgresEventStore {
                 .bind(&first_event.schema_identity)
                 .bind(&first_event.declared_key_signature)
                 .bind(i64::try_from(result.sequence_nr).map_err(|error| {
-                    PersistenceError::Storage(error.to_string())
+                    PersistenceError::PreCommit(error.to_string())
                 })?)
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                .map_err(|error| PersistenceError::PreCommit(error.to_string()))?;
             }
             if result.sequence_nr > append.expected_sequence
                 && let Some((revision, schema, signature)) =
@@ -1094,7 +1114,8 @@ impl EventStore for PostgresEventStore {
                         entity_id,
                         result.sequence_nr,
                     )
-                    .await?
+                    .await
+                    .map_err(pre_commit_error)?
             {
                 let entry = coverage_changes
                     .entry((tenant.clone(), entity_type.clone()))
@@ -1114,9 +1135,9 @@ impl EventStore for PostgresEventStore {
                 .bind(&key.key_hash)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                .map_err(|error| PersistenceError::PreCommit(error.to_string()))?;
                 if holder.is_some_and(|(existing,)| existing != *entity_id) {
-                    return Err(PersistenceError::Storage(format!(
+                    return Err(PersistenceError::PreCommit(format!(
                         "duplicate declared key '{}' for {entity_type}",
                         key.key_name
                     )));
@@ -1131,7 +1152,7 @@ impl EventStore for PostgresEventStore {
             .bind(entity_id)
             .execute(&mut *tx)
             .await
-            .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+            .map_err(|error| PersistenceError::PreCommit(error.to_string()))?;
             for key in &append.key_rows {
                 crate::dbm::postgres_query!(
                     "INSERT INTO entity_key_index \
@@ -1146,7 +1167,7 @@ impl EventStore for PostgresEventStore {
                 .bind(result.sequence_nr as i64)
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                .map_err(|error| PersistenceError::PreCommit(error.to_string()))?;
             }
             if append.reconcile_vectors {
                 crate::dbm::postgres_query!(
@@ -1158,7 +1179,7 @@ impl EventStore for PostgresEventStore {
                 .bind(entity_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                .map_err(|error| PersistenceError::PreCommit(error.to_string()))?;
                 for row in &append.vector_rows {
                     crate::dbm::postgres_query!(
                         "INSERT INTO entity_vector_index \
@@ -1174,7 +1195,7 @@ impl EventStore for PostgresEventStore {
                     .bind(&row.vector)
                     .execute(&mut *tx)
                     .await
-                    .map_err(|error| PersistenceError::Storage(error.to_string()))?;
+                    .map_err(|error| PersistenceError::PreCommit(error.to_string()))?;
                 }
             }
         }
@@ -1192,7 +1213,8 @@ impl EventStore for PostgresEventStore {
                         declared_key_signature: &signature,
                     },
                 )
-                .await?;
+                .await
+                .map_err(pre_commit_error)?;
             }
         }
 
@@ -1203,7 +1225,7 @@ impl EventStore for PostgresEventStore {
                 EVENT_APPEND_OPERATION,
                 "error",
             );
-            PersistenceError::Storage(e.to_string())
+            PersistenceError::AcknowledgementUnknown(e.to_string())
         })?;
         record_postgres_transaction_commit_duration(
             commit_started.elapsed(),
@@ -2053,6 +2075,21 @@ mod create_or_verify_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_body_errors_are_structurally_pre_commit() {
+        assert!(matches!(
+            pre_commit_error(PersistenceError::Storage("connection lost".into())),
+            PersistenceError::PreCommit(_)
+        ));
+        assert!(matches!(
+            pre_commit_error(PersistenceError::ConcurrencyViolation {
+                expected: 1,
+                actual: 2,
+            }),
+            PersistenceError::ConcurrencyViolation { .. }
+        ));
+    }
     use crate::migration::run_migrations;
     use temper_runtime::tenant::parse_persistence_id_parts;
 

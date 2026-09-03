@@ -79,7 +79,10 @@ async fn sdk_call_span_records_adapter_operation_result_and_consistency() {
         },
     )
     .await;
-    assert_eq!(response_error(response).kind, ModuleDataErrorKind::NotFound);
+    assert_eq!(
+        response_error(response).kind(),
+        ModuleDataErrorKind::NotFound
+    );
     drop(_guard);
     let spans = captured.0.lock().unwrap();
     let fields = &spans
@@ -88,7 +91,7 @@ async fn sdk_call_span_records_adapter_operation_result_and_consistency() {
         .expect("call span")
         .1;
     for (field, expected) in [
-        ("abi_version", "1"),
+        ("abi_version", "2"),
         ("adapter", "module_sdk"),
         ("operation_kind", "entity_get"),
         ("entity_type", "Temper.Example.Customer"),

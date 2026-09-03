@@ -3,12 +3,15 @@
 use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 
-use super::{DataRequestV1, DataResponseV1, ModuleDataError, ModuleDataErrorKind, Retryability};
+use super::{
+    DataRequestV2, DataResponseV1, DataResponseV2, FailureOutcome, FailureRetryability,
+    ModuleDataError, ModuleDataErrorKind,
+};
 
 #[derive(Default)]
 struct NativeDataHost {
-    responses: VecDeque<DataResponseV1>,
-    requests: Vec<DataRequestV1>,
+    responses: VecDeque<DataResponseV2>,
+    requests: Vec<DataRequestV2>,
 }
 
 static HOST: LazyLock<Mutex<NativeDataHost>> =
@@ -21,12 +24,12 @@ pub fn install_native_data_host_for_test(responses: Vec<DataResponseV1>) {
         host.responses.is_empty(),
         "native data test host still has unconsumed responses"
     );
-    host.responses = responses.into();
+    host.responses = responses.into_iter().map(DataResponseV2::from).collect();
     host.requests.clear();
 }
 
 /// Remove and return every request observed by the native test host.
-pub fn take_native_data_requests_for_test() -> Vec<DataRequestV1> {
+pub fn take_native_data_requests_for_test() -> Vec<DataRequestV2> {
     let mut host = HOST.lock().expect("native data test host lock poisoned");
     assert!(
         host.responses.is_empty(),
@@ -35,14 +38,16 @@ pub fn take_native_data_requests_for_test() -> Vec<DataRequestV1> {
     std::mem::take(&mut host.requests)
 }
 
-pub(super) fn call(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
+pub(super) fn call(request: &[u8]) -> Result<DataResponseV2, ModuleDataError> {
     let request = serde_json::from_slice(request).map_err(|error| {
         ModuleDataError::new(
             ModuleDataErrorKind::InvalidRequest,
             "NativeTestRequestMismatch",
             error.to_string(),
-            Retryability::Never,
+            FailureRetryability::Never,
+            FailureOutcome::NotApplied,
         )
+        .expect("static native-test failure contract must be valid")
     })?;
     let mut host = HOST.lock().expect("native data test host lock poisoned");
     host.requests.push(request);
@@ -51,7 +56,9 @@ pub(super) fn call(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
             ModuleDataErrorKind::Internal,
             "NativeTestResponseExhausted",
             "native data test host has no scripted response",
-            Retryability::Never,
+            FailureRetryability::Never,
+            FailureOutcome::NotApplied,
         )
+        .expect("static native-test failure contract must be valid")
     })
 }

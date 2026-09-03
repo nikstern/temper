@@ -156,7 +156,7 @@ async fn typed_module_data_is_isolated_by_exact_scope_and_bundle() {
     )
     .await;
     assert_eq!(
-        response_error(global_read).kind,
+        response_error(global_read).kind(),
         ModuleDataErrorKind::NotFound,
         "scoped writes must never leak into tenant-global application data"
     );
@@ -176,7 +176,7 @@ async fn typed_module_data_is_isolated_by_exact_scope_and_bundle() {
     )
     .await;
     assert_eq!(
-        response_error(missing).kind,
+        response_error(missing).kind(),
         ModuleDataErrorKind::SchemaMismatch,
         "a missing exact bundle must fail instead of falling back"
     );

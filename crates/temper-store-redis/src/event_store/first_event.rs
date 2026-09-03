@@ -2,8 +2,28 @@ use serde::Serialize;
 use temper_runtime::persistence::schema_deployment::split_scoped_journal_entity_id;
 use temper_runtime::persistence::{FirstEventCommit, PersistenceError, storage_error};
 
-use super::{EntityRef, RedisEventStore, SegmentRecord, contract_record_json};
+use super::{
+    EntityRef, RedisEventStore, SegmentRecord, contract_record_json, redis_acknowledgement_unknown,
+    redis_malformed_result, redis_post_commit, redis_pre_commit,
+};
 use crate::keys::encode_lex_component;
+
+fn decode_commit_first_event_result(result: &[i64]) -> Result<u64, PersistenceError> {
+    match result {
+        [1, sequence] => u64::try_from(*sequence).map_err(redis_post_commit),
+        [0, actual] => Err(PersistenceError::ConcurrencyViolation {
+            expected: 0,
+            actual: u64::try_from(*actual).map_err(redis_pre_commit)?,
+        }),
+        [-1, _] => Err(redis_pre_commit("stream descriptor publication fence")),
+        [-2, _] => Err(redis_pre_commit("duplicate declared key")),
+        _ => Err(redis_malformed_result(
+            result,
+            &[0, -1, -2],
+            "first-event Lua",
+        )),
+    }
+}
 
 /// Ordinary first-event transaction. This intentionally has no idempotency
 /// key and never compares an existing owner: a non-empty stream returns the
@@ -391,22 +411,52 @@ impl RedisEventStore {
             .commit_first_event_script
             .evalsha_with_reload(&self.client, keys, args)
             .await
-            .map_err(storage_error)?;
-        match result.as_slice() {
-            [1, sequence] => u64::try_from(*sequence).map_err(storage_error),
-            [0, actual] => Err(PersistenceError::ConcurrencyViolation {
+            .map_err(redis_acknowledgement_unknown)?;
+        decode_commit_first_event_result(&result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_event_result_preserves_every_causal_phase() {
+        assert!(matches!(decode_commit_first_event_result(&[1, 1]), Ok(1)));
+        assert!(matches!(
+            decode_commit_first_event_result(&[1, -1]),
+            Err(PersistenceError::PostCommit(_))
+        ));
+        assert!(matches!(
+            decode_commit_first_event_result(&[0, 1]),
+            Err(PersistenceError::ConcurrencyViolation {
                 expected: 0,
-                actual: u64::try_from(*actual).map_err(storage_error)?,
-            }),
-            [-1, _] => Err(PersistenceError::Storage(
-                "stream descriptor publication fence".to_string(),
-            )),
-            [-2, _] => Err(PersistenceError::Storage(
-                "duplicate declared key".to_string(),
-            )),
-            other => Err(PersistenceError::Storage(format!(
-                "unexpected first-event Lua result: {other:?}"
-            ))),
+                actual: 1
+            })
+        ));
+        assert!(matches!(
+            decode_commit_first_event_result(&[0, -1]),
+            Err(PersistenceError::PreCommit(_))
+        ));
+        for result in [&[0][..], &[0, 1, 2], &[-1], &[-1, 0, 0], &[-2], &[-2, 0, 0]] {
+            assert!(matches!(
+                decode_commit_first_event_result(result),
+                Err(PersistenceError::PreCommit(_))
+            ));
         }
+        for result in [&[1][..], &[1, 1, 2]] {
+            assert!(matches!(
+                decode_commit_first_event_result(result),
+                Err(PersistenceError::PostCommit(_))
+            ));
+        }
+        assert!(matches!(
+            decode_commit_first_event_result(&[99]),
+            Err(PersistenceError::AcknowledgementUnknown(_))
+        ));
+        assert!(matches!(
+            decode_commit_first_event_result(&[]),
+            Err(PersistenceError::AcknowledgementUnknown(_))
+        ));
     }
 }

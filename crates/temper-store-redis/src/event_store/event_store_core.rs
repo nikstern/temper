@@ -7,7 +7,7 @@ macro_rules! redis_event_store_core_methods {
             events: &[PersistenceEnvelope],
         ) -> Result<u64, PersistenceError> {
             let (tenant, entity_type, entity_id) =
-                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+                parse_persistence_id_parts(persistence_id).map_err(PersistenceError::PreCommit)?;
             let seq_key = Self::seq_key(tenant, entity_type, entity_id);
             let events_key = Self::events_key(tenant, entity_type, entity_id);
             let entities_key = Self::tenant_entities_key(tenant);
@@ -55,11 +55,11 @@ macro_rules! redis_event_store_core_methods {
                 .append_script
                 .evalsha_with_reload(&self.client, keys, args)
                 .await
-                .map_err(storage_error)?;
+                .map_err(redis_acknowledgement_unknown)?;
 
             match result.as_slice() {
                 [1, new_seq] => {
-                    let new_seq = *new_seq as u64;
+                    let new_seq = u64::try_from(*new_seq).map_err(redis_post_commit)?;
                     self.update_segment_after_append(
                         tenant,
                         entity_type,
@@ -67,19 +67,18 @@ macro_rules! redis_event_store_core_methods {
                         expected_sequence,
                         new_seq,
                     )
-                    .await?;
+                    .await
+                    .map_err(redis_post_commit)?;
                     Ok(new_seq)
                 }
                 [0, actual] => Err(PersistenceError::ConcurrencyViolation {
                     expected: expected_sequence,
-                    actual: *actual as u64,
+                    actual: u64::try_from(*actual).map_err(redis_pre_commit)?,
                 }),
-                [-1, _] => Err(PersistenceError::Storage(
+                [-1, _] => Err(PersistenceError::PreCommit(
                     "stream descriptor publication fence".into(),
                 )),
-                other => Err(PersistenceError::Storage(format!(
-                    "unexpected Lua script result: {other:?}"
-                ))),
+                _ => Err(redis_malformed_result(&result, &[0, -1], "append Lua")),
             }
         }
 

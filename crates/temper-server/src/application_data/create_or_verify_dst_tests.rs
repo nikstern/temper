@@ -4,6 +4,7 @@ use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use temper_store_sim::{DeterministicRng, SimEventStore, SimFaultConfig};
 use temper_wasm_sdk::data::{DataOperationKind, DataOutcomeV1};
+use temper_wasm_sdk::{FailureOutcome, FailureRetryability};
 
 use super::create_or_verify_tests::{durable_invocation_with_store, operation};
 use super::tests::call;
@@ -43,15 +44,46 @@ async fn run_generated_history(seed: u64) -> Vec<String> {
                     operation(IDS[slot], &format!("seed-{seed}-slot-{slot}"), name),
                 )
                 .await;
-                let outcome = outcome_tag(response.outcome);
+                let outcome = outcome_tag(&response.outcome);
                 trace.push(format!("{step}:create:{slot}:{outcome}"));
                 if outcome == "err" {
                     let persistence_id = format!("default:Customer:{}", IDS[slot]);
-                    let boundary = if store.dump_journal(&persistence_id).is_empty() {
-                        "precommit-write-failure"
-                    } else {
+                    let committed = !store.dump_journal(&persistence_id).is_empty();
+                    let boundary = if committed {
                         "postcommit-reply-loss"
+                    } else {
+                        "precommit-write-failure"
                     };
+                    let DataOutcomeV1::Error { error } = &response.outcome else {
+                        unreachable!("error outcome tag must contain an error")
+                    };
+                    assert_eq!(
+                        error.outcome(),
+                        if committed {
+                            FailureOutcome::Unknown
+                        } else {
+                            FailureOutcome::NotApplied
+                        },
+                        "seed {seed}, step {step}: {boundary}"
+                    );
+                    assert_eq!(
+                        error.retryability(),
+                        if committed {
+                            FailureRetryability::Reconcile
+                        } else {
+                            FailureRetryability::Never
+                        },
+                        "seed {seed}, step {step}: {boundary}"
+                    );
+                    assert_eq!(
+                        error.code().as_str(),
+                        if committed {
+                            "DataAcknowledgementUnknown"
+                        } else {
+                            "DataServiceFailure"
+                        },
+                        "seed {seed}, step {step}: {boundary}"
+                    );
                     invocation = durable_invocation_with_store(
                         operations.clone(),
                         SecurityContext::system(),
@@ -102,8 +134,8 @@ async fn run_generated_history(seed: u64) -> Vec<String> {
                 );
                 trace.push(format!(
                     "{step}:concurrent:{left_slot}:{right_slot}:{}:{}",
-                    outcome_tag(left.outcome),
-                    outcome_tag(right.outcome)
+                    outcome_tag(&left.outcome),
+                    outcome_tag(&right.outcome)
                 ));
             }
             5 => {
@@ -122,7 +154,7 @@ async fn run_generated_history(seed: u64) -> Vec<String> {
                     .await;
                     trace.push(format!(
                         "{step}:projection-lag:{slot}:{}",
-                        outcome_tag(response.outcome)
+                        outcome_tag(&response.outcome)
                     ));
                     store.upsert_query_projection("default", "Customer", IDS[slot], projection);
                 } else {
@@ -145,7 +177,7 @@ async fn run_generated_history(seed: u64) -> Vec<String> {
                 );
                 trace.push(format!(
                     "{step}:backfill-race:{slot}:{}",
-                    outcome_tag(response.outcome)
+                    outcome_tag(&response.outcome)
                 ));
             }
         }
@@ -160,7 +192,7 @@ async fn run_generated_history(seed: u64) -> Vec<String> {
             operation(id, &format!("seed-{seed}-slot-{slot}"), "Ada"),
         )
         .await;
-        trace.push(format!("final:{slot}:{}", outcome_tag(response.outcome)));
+        trace.push(format!("final:{slot}:{}", outcome_tag(&response.outcome)));
         let journal = store.dump_journal(&format!("default:Customer:{id}"));
         assert!(
             journal.len() <= 1,
@@ -176,7 +208,7 @@ async fn run_generated_history(seed: u64) -> Vec<String> {
     trace
 }
 
-fn outcome_tag(outcome: DataOutcomeV1) -> &'static str {
+fn outcome_tag(outcome: &DataOutcomeV1) -> &'static str {
     match outcome {
         DataOutcomeV1::Ok { .. } => "ok",
         DataOutcomeV1::Error { .. } => "err",

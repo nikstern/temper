@@ -137,7 +137,7 @@ macro_rules! impl_sim_append_methods {
             // Fault injection: write failure.
             let wf_prob = inner.faults.write_failure_prob;
             if inner.rng.chance(wf_prob) {
-                return Err(PersistenceError::Storage(
+                return Err(PersistenceError::PreCommit(
                     "SimEventStore: injected write failure".into(),
                 ));
             }
@@ -308,6 +308,18 @@ macro_rules! impl_sim_append_methods {
                     prior,
                     new_seq,
                 )?;
+            }
+            let post_commit_failure_prob = inner.faults.append_post_commit_failure_prob;
+            if inner.rng.chance(post_commit_failure_prob) {
+                return Err(PersistenceError::PostCommit(
+                    "SimEventStore: injected post-commit failure".into(),
+                ));
+            }
+            let acknowledgement_loss_prob = inner.faults.append_acknowledgement_loss_prob;
+            if inner.rng.chance(acknowledgement_loss_prob) {
+                return Err(PersistenceError::AcknowledgementUnknown(
+                    "SimEventStore: injected append acknowledgement loss".into(),
+                ));
             }
             Ok(new_seq)
         }

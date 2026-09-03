@@ -26,6 +26,36 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::keys::{decode_lex_component, encode_lex_component};
 
+fn redis_pre_commit(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::PreCommit(error.to_string())
+}
+
+fn redis_post_commit(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::PostCommit(error.to_string())
+}
+
+fn redis_acknowledgement_unknown(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::AcknowledgementUnknown(error.to_string())
+}
+
+fn redis_malformed_result(
+    result: &[i64],
+    rejection_tags: &[i64],
+    operation: &str,
+) -> PersistenceError {
+    match result.first() {
+        Some(1) => redis_post_commit(format!(
+            "malformed committed Redis {operation} result: {result:?}"
+        )),
+        Some(tag) if rejection_tags.contains(tag) => redis_pre_commit(format!(
+            "malformed rejected Redis {operation} result: {result:?}"
+        )),
+        _ => redis_acknowledgement_unknown(format!(
+            "unexpected Redis {operation} result: {result:?}"
+        )),
+    }
+}
+
 #[macro_use]
 #[path = "event_store/event_store_core.rs"]
 mod event_store_core;
@@ -36,6 +66,8 @@ mod event_store_schema;
 mod batch;
 #[path = "event_store/create_or_verify.rs"]
 mod create_or_verify;
+#[path = "event_store/create_or_verify_result.rs"]
+mod create_or_verify_result;
 #[path = "event_store/first_event.rs"]
 mod first_event;
 #[path = "event_store/first_event_mutation.rs"]
@@ -223,13 +255,13 @@ impl RedisEventStore {
         }
 
         let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::PreCommit)?;
         let contracts_key = Self::create_or_verify_hash_key(tenant, entity_type, "contracts");
         let stored_contract: Option<String> = self
             .client
             .hget(&contracts_key, entity_id)
             .await
-            .map_err(storage_error)?;
+            .map_err(redis_pre_commit)?;
         let coverage_metadata = stored_contract
             .as_deref()
             .map(serde_json::from_str::<serde_json::Value>)
@@ -323,10 +355,10 @@ impl RedisEventStore {
             .append_with_keys_script
             .evalsha_with_reload(&self.client, keys, args)
             .await
-            .map_err(storage_error)?;
+            .map_err(redis_acknowledgement_unknown)?;
         match result.as_slice() {
             [1, new_sequence] => {
-                let new_sequence = u64::try_from(*new_sequence).map_err(storage_error)?;
+                let new_sequence = u64::try_from(*new_sequence).map_err(redis_post_commit)?;
                 self.update_segment_after_append(
                     tenant,
                     entity_type,
@@ -334,22 +366,25 @@ impl RedisEventStore {
                     expected_sequence,
                     new_sequence,
                 )
-                .await?;
+                .await
+                .map_err(redis_post_commit)?;
                 Ok(new_sequence)
             }
             [0, actual] => Err(PersistenceError::ConcurrencyViolation {
                 expected: expected_sequence,
-                actual: u64::try_from(*actual).map_err(storage_error)?,
+                actual: u64::try_from(*actual).map_err(redis_pre_commit)?,
             }),
-            [-1, _] => Err(PersistenceError::Storage(
+            [-1, _] => Err(PersistenceError::PreCommit(
                 "stream descriptor publication fence".to_string(),
             )),
-            [-2, _] => Err(PersistenceError::Storage(
+            [-2, _] => Err(PersistenceError::PreCommit(
                 "duplicate declared key".to_string(),
             )),
-            other => Err(PersistenceError::Storage(format!(
-                "unexpected append-with-keys Lua result: {other:?}"
-            ))),
+            _ => Err(redis_malformed_result(
+                &result,
+                &[0, -1, -2],
+                "append-with-keys Lua",
+            )),
         }
     }
 }

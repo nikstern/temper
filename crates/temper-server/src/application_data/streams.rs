@@ -7,7 +7,7 @@ use temper_wasm_sdk::data::{
     ModuleDataBudgets, ModuleDataError, ModuleDataErrorKind,
 };
 
-use super::{ApplicationDataInvocation, data_error};
+use super::{ApplicationDataInvocation, not_applied_error};
 
 #[path = "streams/descriptor_error.rs"]
 mod descriptor_error;
@@ -67,7 +67,7 @@ impl ApplicationDataInvocation {
             .iter()
             .find(|capability| capability.subject_type == file_type)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "StreamCapabilityUnavailable",
                     "Artifact is not bound to verified stream descriptor semantics",
@@ -78,7 +78,7 @@ impl ApplicationDataInvocation {
             .rsplit('.')
             .next()
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "StreamCapabilityInvalid",
                     "Artifact stream subject type is invalid",
@@ -94,7 +94,7 @@ impl ApplicationDataInvocation {
             .await
             .map_err(stream_descriptor_error)?
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "StreamDescriptorContractInactive",
                 "Stream descriptor admission is not activated for this tenant schema",
@@ -107,7 +107,7 @@ impl ApplicationDataInvocation {
                 .as_deref()
                 .and_then(|qualified| qualified.rsplit('.').next())
                 .ok_or_else(|| {
-                    data_error(
+                    not_applied_error(
                         ModuleDataErrorKind::SchemaMismatch,
                         "VersionStreamCapabilityUnavailable",
                         "Artifact has no verified immutable version capability",
@@ -123,7 +123,7 @@ impl ApplicationDataInvocation {
                 .await
                 .map_err(stream_descriptor_error)?
             {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::ConsistencyUnavailable,
                     "StreamDescriptorContractInactive",
                     "Version stream descriptor admission is not activated for this tenant schema",
@@ -150,7 +150,7 @@ impl ApplicationDataInvocation {
                 &descriptor,
             )
             .map_err(|error| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "StreamDescriptorCapabilityMismatch",
                     &error,
@@ -163,7 +163,7 @@ impl ApplicationDataInvocation {
                     parent.entity_type() != current_runtime_type || parent.entity_id() != file_id
                 })
             {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::InvalidRequest,
                     "FileVersionMismatch",
                     "File version does not belong to the requested File",
@@ -172,7 +172,7 @@ impl ApplicationDataInvocation {
         } else if descriptor.mutability() != temper_runtime::persistence::StreamMutability::Mutable
             || descriptor.authorization_parent().is_some()
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "StreamDescriptorCapabilityMismatch",
                 "Committed stream descriptor differs from verified schema semantics",
@@ -194,7 +194,7 @@ impl ApplicationDataInvocation {
             .streams
             .lock()
             .map_err(|_| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::Internal,
                     "InvocationStatePoisoned",
                     "File stream registry unavailable",
@@ -230,7 +230,7 @@ impl ApplicationDataInvocation {
         if expected_length
             .is_some_and(|length| length > self.authority.binding.grant.budgets.max_stream_bytes)
         {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "FileSizeBudgetExceeded",
                 "declared File length exceeds stream budget",
@@ -240,7 +240,7 @@ impl ApplicationDataInvocation {
             .streams
             .lock()
             .map_err(|_| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::Internal,
                     "InvocationStatePoisoned",
                     "File stream registry unavailable",
@@ -280,30 +280,45 @@ impl ApplicationDataInvocation {
             )
             .await?;
             self.state
-                .put_file_stream_content(
+                .put_file_stream_content_checked(
                     &self.authority.tenant,
                     &attempt.file_id,
                     &attempt.bytes,
                     "application/octet-stream",
                     &agent,
+                    None,
                 )
                 .await
-                .map_err(super::internal_error)
+                .map_err(file_commit_error)
+                .and_then(validate_file_commit_response)
         }
         .await;
         let response = match result {
             Ok(response) => {
                 self.streams
                     .lock()
-                    .map_err(|_| stream_registry_unavailable())?
-                    .finish_commit(handle, true)?;
+                    .map_err(|_| {
+                        super::applied_internal_error(
+                            "file stream registry unavailable after commit".to_string(),
+                        )
+                    })?
+                    .finish_commit(handle, true)
+                    .map_err(|error| super::applied_internal_error(error.to_string()))?;
                 response
             }
             Err(error) => {
-                self.streams
-                    .lock()
-                    .map_err(|_| stream_registry_unavailable())?
-                    .finish_commit(handle, false)?;
+                match self.streams.lock() {
+                    Ok(mut streams) => {
+                        if let Err(cleanup_error) = streams.finish_commit(handle, false) {
+                            tracing::error!(%cleanup_error, "failed to release unsuccessful File commit attempt");
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "failed to acquire File stream registry while preserving unsuccessful commit result"
+                        );
+                    }
+                }
                 return Err(error);
             }
         };
@@ -326,7 +341,7 @@ impl ApplicationDataInvocation {
         self.streams
             .lock()
             .map_err(|_| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::Internal,
                     "InvocationStatePoisoned",
                     "File stream registry unavailable",
@@ -334,7 +349,7 @@ impl ApplicationDataInvocation {
             })?
             .take(handle)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::InvalidRequest,
                     "InvalidFileStream",
                     "File stream handle is invalid",
@@ -349,6 +364,50 @@ impl ApplicationDataInvocation {
 
     pub(super) fn stream_write(&self, handle: u32, bytes: &[u8]) -> Result<usize, i32> {
         self.streams.lock().map_err(|_| -4)?.write(handle, bytes)
+    }
+}
+
+pub(super) fn file_commit_error(error: crate::state::FileStreamContentError) -> ModuleDataError {
+    match error {
+        crate::state::FileStreamContentError::ActionRejected(diagnostic)
+        | crate::state::FileStreamContentError::PersistenceNotApplied(diagnostic) => {
+            super::not_applied_error(
+                ModuleDataErrorKind::Conflict,
+                "FileCommitRejected",
+                &diagnostic,
+            )
+        }
+        crate::state::FileStreamContentError::PersistenceApplied(diagnostic) => {
+            super::applied_internal_error(diagnostic)
+        }
+        crate::state::FileStreamContentError::PersistenceUnknown(diagnostic) => {
+            super::unknown_internal_error(diagnostic)
+        }
+        error => super::unknown_internal_error(error.to_string()),
+    }
+}
+
+fn validate_file_commit_response(
+    response: crate::entity_actor::EntityResponse,
+) -> Result<crate::entity_actor::EntityResponse, ModuleDataError> {
+    if response.success {
+        return Ok(response);
+    }
+    let diagnostic = response
+        .error
+        .unwrap_or_else(|| "File commit action failed without a diagnostic".into());
+    match response.failure_outcome {
+        Some(temper_wasm_sdk::FailureOutcome::Applied) => {
+            Err(super::applied_internal_error(diagnostic))
+        }
+        Some(temper_wasm_sdk::FailureOutcome::NotApplied) => Err(super::not_applied_error(
+            ModuleDataErrorKind::Conflict,
+            "FileCommitRejected",
+            &diagnostic,
+        )),
+        Some(temper_wasm_sdk::FailureOutcome::Unknown) | None => {
+            Err(super::unknown_internal_error(diagnostic))
+        }
     }
 }
 
@@ -380,14 +439,14 @@ impl FileStreamRegistry {
             return Err(invalid_stream());
         };
         if *committing {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::Conflict,
                 "FileCommitInProgress",
                 "File stream commit is already in progress",
             ));
         }
         if expected_length.is_some_and(|expected| expected != bytes.len() as u64) {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::Conflict,
                 "FileLengthMismatch",
                 "written File length does not match declaration",
@@ -397,7 +456,7 @@ impl FileStreamRegistry {
             use sha2::{Digest, Sha256};
             let actual = format!("sha256:{:x}", Sha256::digest(bytes));
             if &actual != expected_hash {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::Conflict,
                     "FileHashMismatch",
                     "written File hash does not match declaration",

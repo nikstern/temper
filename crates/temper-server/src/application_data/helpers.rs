@@ -2,8 +2,9 @@
 
 use temper_wasm_sdk::data::{
     BatchItemV1, CommitToken, DataOperationV1, DataResponseV1, DataResultV1, ModuleDataError,
-    ModuleDataErrorKind, Retryability,
+    ModuleDataErrorKind,
 };
+use temper_wasm_sdk::{FailureOutcome, FailureRetryability};
 
 pub(super) const MAX_CANONICAL_IDENTIFIER_BYTES: usize = 256;
 const COMPACT_OUTCOME_BYTES: usize = 3_840;
@@ -20,7 +21,7 @@ pub(super) fn reserve_compact_response(
         .saturating_mul(COMPACT_OUTCOME_BYTES)
         .saturating_add(256);
     if required > response_budget {
-        return Err(data_error(
+        return Err(not_applied_error(
             ModuleDataErrorKind::BudgetExceeded,
             "ResponseReservationExceeded",
             "compact operation acknowledgement exceeds the response budget",
@@ -34,7 +35,7 @@ pub(super) fn validate_operation_identifiers(
 ) -> Result<(), ModuleDataError> {
     fn identifier(value: &str) -> Result<(), ModuleDataError> {
         if value.is_empty() || value.len() > MAX_CANONICAL_IDENTIFIER_BYTES {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::InvalidRequest,
                 "InvalidIdentifier",
                 "canonical identifiers must contain between 1 and 256 UTF-8 bytes",
@@ -153,14 +154,14 @@ pub(super) fn validate_value_budget(
 ) -> Result<(), ModuleDataError> {
     *nodes = nodes.saturating_add(1);
     if depth > 16 || *nodes > byte_budget / 2 {
-        return Err(data_error(
+        return Err(not_applied_error(
             ModuleDataErrorKind::BudgetExceeded,
             "PayloadStructureBudgetExceeded",
             "request object depth or element budget exceeded",
         ));
     }
     match value {
-        serde_json::Value::String(value) if value.len() > byte_budget => Err(data_error(
+        serde_json::Value::String(value) if value.len() > byte_budget => Err(not_applied_error(
             ModuleDataErrorKind::BudgetExceeded,
             "StringBudgetExceeded",
             "request string exceeds the byte budget",
@@ -174,7 +175,7 @@ pub(super) fn validate_value_budget(
         serde_json::Value::Object(values) => {
             for (name, value) in values {
                 if name.len() > byte_budget {
-                    return Err(data_error(
+                    return Err(not_applied_error(
                         ModuleDataErrorKind::BudgetExceeded,
                         "StringBudgetExceeded",
                         "request property name exceeds the byte budget",
@@ -239,7 +240,7 @@ pub(super) fn extract_id(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::InvalidRequest,
                 "MissingEntityId",
                 "entity create value must contain a string Id",
@@ -268,133 +269,147 @@ pub(super) fn write_result(
     }
 }
 
-pub(super) fn internal_error(error: String) -> ModuleDataError {
+pub(super) fn not_applied_internal_error(error: String) -> ModuleDataError {
     tracing::error!(%error, "application-data internal operation failed");
-    let normalized = error.to_ascii_lowercase();
-    let (kind, code, retryability) =
-        if normalized.contains("sequenceconflict") || normalized.contains("concurrency") {
-            (
-                ModuleDataErrorKind::Conflict,
-                "SequenceConflict",
-                Retryability::AfterRefresh,
-            )
-        } else if normalized.contains("not found") || normalized.contains("notfound") {
-            (
-                ModuleDataErrorKind::NotFound,
-                "EntityNotFound",
-                Retryability::Never,
-            )
-        } else if normalized.contains("already exists") {
-            (
-                ModuleDataErrorKind::AlreadyExists,
-                "EntityAlreadyExists",
-                Retryability::Never,
-            )
-        } else if normalized.contains("guard") || normalized.contains("invalid transition") {
-            (
-                ModuleDataErrorKind::GuardRejected,
-                "ActionRejected",
-                Retryability::Never,
-            )
-        } else {
-            (
-                ModuleDataErrorKind::Internal,
-                "DataServiceFailure",
-                Retryability::Never,
-            )
-        };
     ModuleDataError::new(
-        kind,
-        code,
+        ModuleDataErrorKind::Internal,
+        "DataServiceFailure",
         "application-data operation failed",
-        retryability,
+        FailureRetryability::Never,
+        FailureOutcome::NotApplied,
     )
+    .expect("static module-data failure contract must be valid")
 }
 
-pub(super) fn data_error(kind: ModuleDataErrorKind, code: &str, message: &str) -> ModuleDataError {
+pub(super) fn not_applied_error(
+    kind: ModuleDataErrorKind,
+    code: &str,
+    message: &str,
+) -> ModuleDataError {
     ModuleDataError::new(
         kind,
         code,
         message.chars().take(256).collect::<String>(),
-        Retryability::Never,
+        FailureRetryability::Never,
+        FailureOutcome::NotApplied,
     )
+    .expect("static module-data failure contract must be valid")
+}
+
+pub(super) fn applied_internal_error(error: String) -> ModuleDataError {
+    tracing::error!(%error, "application-data post-commit operation failed");
+    ModuleDataError::new(
+        ModuleDataErrorKind::Internal,
+        "PostCommitDataServiceFailure",
+        "application-data response failed after commit",
+        FailureRetryability::Never,
+        FailureOutcome::Applied,
+    )
+    .expect("static post-commit module-data failure contract must be valid")
+}
+
+pub(super) fn error_with_outcome(
+    kind: ModuleDataErrorKind,
+    code: &str,
+    message: &str,
+    outcome: FailureOutcome,
+) -> ModuleDataError {
+    let retryability = if outcome == FailureOutcome::Unknown {
+        FailureRetryability::Reconcile
+    } else {
+        FailureRetryability::Never
+    };
+    ModuleDataError::new(
+        kind,
+        code,
+        message.chars().take(256).collect::<String>(),
+        retryability,
+        outcome,
+    )
+    .expect("static outcome-aware module-data failure contract must be valid")
+}
+
+pub(super) fn unknown_internal_error(error: String) -> ModuleDataError {
+    tracing::error!(%error, "application-data acknowledgement is unknown");
+    ModuleDataError::new(
+        ModuleDataErrorKind::TransientUnavailable,
+        "DataAcknowledgementUnknown",
+        "application-data commit acknowledgement was not observed",
+        FailureRetryability::Reconcile,
+        FailureOutcome::Unknown,
+    )
+    .expect("static unknown-outcome module-data failure contract must be valid")
+}
+
+pub(super) fn read_service_error(
+    error: super::service::ApplicationDataReadError,
+) -> ModuleDataError {
+    match error {
+        super::service::ApplicationDataReadError::NotFound => not_applied_error(
+            ModuleDataErrorKind::NotFound,
+            "EntityNotFound",
+            "application-data operation failed",
+        ),
+        super::service::ApplicationDataReadError::Internal(diagnostic) => {
+            not_applied_internal_error(diagnostic)
+        }
+    }
+}
+
+pub(super) fn write_service_error(
+    error: super::service::ApplicationDataWriteError,
+) -> ModuleDataError {
+    use super::service::{ApplicationDataRejection, ApplicationDataWriteError};
+    match error {
+        ApplicationDataWriteError::Applied(diagnostic) => applied_internal_error(diagnostic),
+        ApplicationDataWriteError::Unknown(diagnostic) => unknown_internal_error(diagnostic),
+        ApplicationDataWriteError::NotApplied { reason, diagnostic } => {
+            tracing::error!(%diagnostic, ?reason, "application-data write rejected before commit");
+            let (kind, code, retryability) = match reason {
+                ApplicationDataRejection::Conflict => (
+                    ModuleDataErrorKind::Conflict,
+                    "SequenceConflict",
+                    FailureRetryability::AfterRefresh,
+                ),
+                ApplicationDataRejection::AuthorizationDenied => (
+                    ModuleDataErrorKind::AuthorizationDenied,
+                    "AuthorizationDenied",
+                    FailureRetryability::AfterAuthorization,
+                ),
+                ApplicationDataRejection::BudgetExceeded => (
+                    ModuleDataErrorKind::BudgetExceeded,
+                    "BudgetExceeded",
+                    FailureRetryability::Never,
+                ),
+                ApplicationDataRejection::SchemaMismatch => (
+                    ModuleDataErrorKind::SchemaMismatch,
+                    "SchemaMismatch",
+                    FailureRetryability::Never,
+                ),
+                ApplicationDataRejection::Internal => (
+                    ModuleDataErrorKind::Internal,
+                    "DataServiceFailure",
+                    FailureRetryability::Never,
+                ),
+            };
+            ModuleDataError::new(
+                kind,
+                code,
+                "application-data write was rejected",
+                retryability,
+                FailureOutcome::NotApplied,
+            )
+            .expect("static write-rejection contract must be valid")
+        }
+    }
+}
+
+pub(super) fn mark_applied(error: ModuleDataError) -> ModuleDataError {
+    error
+        .with_outcome(FailureOutcome::Applied)
+        .expect("canonical module-data error remains valid with a known applied outcome")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compacting_committed_action_preserves_token_and_marks_omission() {
-        let commit = commit("Temper.Example.Customer", "customer-1", 7);
-        let mut response = DataResponseV1::ok(DataResultV1::Action {
-            commit: commit.clone(),
-            result: Some(serde_json::json!({"Id": "customer-1"})),
-            result_omitted: false,
-        });
-
-        compact_committed_results(&mut response);
-
-        let temper_wasm_sdk::data::DataOutcomeV1::Ok {
-            result:
-                DataResultV1::Action {
-                    commit: compacted_commit,
-                    result: None,
-                    result_omitted: true,
-                },
-        } = response.outcome
-        else {
-            panic!("compacted action must remain a successful commit")
-        };
-        assert_eq!(compacted_commit, commit);
-    }
-
-    #[test]
-    fn compacting_void_actions_preserves_their_non_omitted_shape_directly_and_in_batches() {
-        let direct_commit = commit("Temper.Example.Customer", "customer-1", 7);
-        let batch_commit = commit("Temper.Example.Customer", "customer-2", 8);
-        let void = |commit| DataResultV1::Action {
-            commit,
-            result: None,
-            result_omitted: false,
-        };
-        let mut direct = DataResponseV1::ok(void(direct_commit.clone()));
-        let mut batch = DataResponseV1::ok(DataResultV1::Batch {
-            outcomes: vec![temper_wasm_sdk::data::DataOutcomeV1::Ok {
-                result: void(batch_commit.clone()),
-            }],
-        });
-
-        compact_committed_results(&mut direct);
-        compact_committed_results(&mut batch);
-
-        let temper_wasm_sdk::data::DataOutcomeV1::Ok {
-            result:
-                DataResultV1::Action {
-                    commit,
-                    result: None,
-                    result_omitted: false,
-                },
-        } = direct.outcome
-        else {
-            panic!("direct void action must remain distinguishable from an omitted result")
-        };
-        assert_eq!(commit, direct_commit);
-        let temper_wasm_sdk::data::DataOutcomeV1::Ok {
-            result: DataResultV1::Batch { outcomes },
-        } = batch.outcome
-        else {
-            panic!("batch response must retain its outcome list")
-        };
-        assert!(matches!(
-            outcomes.as_slice(),
-            [temper_wasm_sdk::data::DataOutcomeV1::Ok {
-                result: DataResultV1::Action {
-                    commit,
-                    result: None,
-                    result_omitted: false,
-                },
-            }] if commit == &batch_commit
-        ));
-    }
-}
+#[path = "helpers_tests.rs"]
+mod tests;

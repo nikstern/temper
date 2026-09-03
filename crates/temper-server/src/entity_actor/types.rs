@@ -273,6 +273,9 @@ pub struct EntityResponse {
     pub state: EntityState,
     /// Error message if the action failed.
     pub error: Option<String>,
+    /// Causal outcome for a failed durable mutation, when the actor knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_outcome: Option<temper_failure::FailureOutcome>,
     /// Custom effects emitted during this transition (for hook dispatch).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_effects: Vec<String>,
@@ -423,6 +426,7 @@ mod tests {
             success: true,
             state,
             error: None,
+            failure_outcome: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],

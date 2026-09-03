@@ -23,7 +23,7 @@ async fn unrelated_entity_file_operations_cannot_authorize_file_content() {
     )
     .await;
     assert_eq!(
-        response_error(response).code,
+        response_error(response).code().as_str(),
         "FileCapabilityDenied",
         "a non-File entity grant must not authorize hard-coded File actors"
     );
@@ -56,8 +56,8 @@ async fn file_metadata_reads_require_metadata_capability_before_cedar() {
     )
     .await;
     let get_error = response_error(get);
-    assert_eq!(get_error.kind, ModuleDataErrorKind::AuthorizationDenied);
-    assert_eq!(get_error.code, "CapabilityDenied");
+    assert_eq!(get_error.kind(), ModuleDataErrorKind::AuthorizationDenied);
+    assert_eq!(get_error.code().as_str(), "CapabilityDenied");
 
     let query = call(
         &invocation,
@@ -73,8 +73,8 @@ async fn file_metadata_reads_require_metadata_capability_before_cedar() {
     )
     .await;
     let query_error = response_error(query);
-    assert_eq!(query_error.kind, ModuleDataErrorKind::AuthorizationDenied);
-    assert_eq!(query_error.code, "CapabilityDenied");
+    assert_eq!(query_error.kind(), ModuleDataErrorKind::AuthorizationDenied);
+    assert_eq!(query_error.code().as_str(), "CapabilityDenied");
 
     std::sync::Arc::get_mut(&mut invocation)
         .expect("unshared fixture")

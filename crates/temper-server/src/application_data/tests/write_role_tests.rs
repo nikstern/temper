@@ -21,7 +21,7 @@ async fn schema_validation_rejects_noncanonical_guid_before_dispatch() {
     )
     .await;
     assert_eq!(
-        response_error(response).kind,
+        response_error(response).kind(),
         ModuleDataErrorKind::SchemaMismatch
     );
 }
@@ -70,7 +70,10 @@ async fn handcrafted_create_and_patch_cannot_bypass_write_roles() {
             },
         )
         .await;
-        assert_eq!(response_error(response).code, "ForbiddenCreateProperty");
+        assert_eq!(
+            response_error(response).code().as_str(),
+            "ForbiddenCreateProperty"
+        );
     }
 
     let created = call(
@@ -101,6 +104,9 @@ async fn handcrafted_create_and_patch_cannot_bypass_write_roles() {
             },
         )
         .await;
-        assert_eq!(response_error(response).code, "ForbiddenPatchProperty");
+        assert_eq!(
+            response_error(response).code().as_str(),
+            "ForbiddenPatchProperty"
+        );
     }
 }

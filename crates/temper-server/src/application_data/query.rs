@@ -15,8 +15,8 @@ use crate::storage::QueryFieldIndexOrderTarget;
 use crate::storage::{QueryFieldIndexOrder, QueryFieldIndexOrderDirection};
 
 use super::{
-    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget, data_error,
-    internal_error, short_type,
+    ApplicationDataInvocation, GovernedApplicationDataService, ModuleDataTarget, not_applied_error,
+    not_applied_internal_error, short_type,
 };
 
 #[path = "query/decimal.rs"]
@@ -37,7 +37,7 @@ impl ApplicationDataInvocation {
         self.require(DataOperationKind::EntityQuery, entity_type, None)?;
         self.authorize("list", entity_type, None)?;
         if page.limit == 0 || page.limit > self.authority.binding.grant.budgets.max_page_items {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "PageBudgetExceeded",
                 "query page limit exceeds the module grant",
@@ -51,7 +51,7 @@ impl ApplicationDataInvocation {
             .iter()
             .find(|entity| entity.entity_type == entity_type)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::AuthorizationDenied,
                     "CapabilityDenied",
                     "entity is not granted",
@@ -65,7 +65,7 @@ impl ApplicationDataInvocation {
             .iter()
             .find(|entity| entity.entity_type == entity_type)
             .ok_or_else(|| {
-                data_error(
+                not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "UnknownEntityType",
                     "entity type is absent from the bound schema",
@@ -83,14 +83,14 @@ impl ApplicationDataInvocation {
                 OrderV1::Property { field, .. }
                     if !entity_grant.query_order_fields.contains(field) =>
                 {
-                    return Err(data_error(
+                    return Err(not_applied_error(
                         ModuleDataErrorKind::AuthorizationDenied,
                         "QueryFieldDenied",
                         "query ordering field is not granted",
                     ));
                 }
                 OrderV1::EntityCommitSequence { .. } if !entity_grant.query_order_by_sequence => {
-                    return Err(data_error(
+                    return Err(not_applied_error(
                         ModuleDataErrorKind::AuthorizationDenied,
                         "QuerySequenceDenied",
                         "query ordering by entity commit sequence is not granted",
@@ -138,14 +138,14 @@ impl ApplicationDataInvocation {
                     )
                     .await
                     .map_err(|_| {
-                        data_error(
+                        not_applied_error(
                             ModuleDataErrorKind::ConsistencyUnavailable,
                             "BoundedQueryFallbackUnavailable",
                             "scoped authoritative query cannot be bounded",
                         )
                     })?;
                 if ids.len() > scan_budget {
-                    return Err(data_error(
+                    return Err(not_applied_error(
                         ModuleDataErrorKind::BudgetExceeded,
                         "QueryFallbackBudgetExceeded",
                         "scoped authoritative query exceeds the bounded scan budget",
@@ -176,7 +176,7 @@ impl ApplicationDataInvocation {
                     scan_budget.saturating_add(1),
                 )
                 .await
-                .map_err(internal_error)?
+                .map_err(not_applied_internal_error)?
             {
                 Some(ids) => {
                     tracing::Span::current().record("consistency_path", "query_plane");
@@ -191,14 +191,14 @@ impl ApplicationDataInvocation {
                             scan_budget,
                         )
                         .map_err(|_| {
-                            data_error(
+                            not_applied_error(
                                 ModuleDataErrorKind::ConsistencyUnavailable,
                                 "BoundedQueryFallbackUnavailable",
                                 "authoritative query fallback cannot be bounded",
                             )
                         })?;
                     if ids.len() > scan_budget {
-                        return Err(data_error(
+                        return Err(not_applied_error(
                             ModuleDataErrorKind::BudgetExceeded,
                             "QueryFallbackBudgetExceeded",
                             "authoritative query fallback exceeds the bounded scan budget",
@@ -269,7 +269,7 @@ fn validate_filter_fields(
     let Some(filter) = filter else { return Ok(()) };
     *nodes = nodes.saturating_add(1);
     if depth > 8 || *nodes > 64 {
-        return Err(data_error(
+        return Err(not_applied_error(
             ModuleDataErrorKind::BudgetExceeded,
             "FilterBudgetExceeded",
             "query filter depth or node budget exceeded",
@@ -282,7 +282,7 @@ fn validate_filter_fields(
             value,
         } => {
             if !granted.contains(field) {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::AuthorizationDenied,
                     "QueryFieldDenied",
                     "query filter field is not granted",
@@ -293,7 +293,7 @@ fn validate_filter_fields(
                 .iter()
                 .find(|property| property.canonical_name == *field)
                 .ok_or_else(|| {
-                    data_error(
+                    not_applied_error(
                         ModuleDataErrorKind::SchemaMismatch,
                         "UnknownQueryProperty",
                         "query property is absent from the bound schema",
@@ -308,7 +308,7 @@ fn validate_filter_fields(
                         | CompareOperatorV1::Ge
                 ) && property.type_name == "Edm.Boolean"
             {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "QueryTypeMismatch",
                     "query scalar or operator is incompatible with the property type",
@@ -317,7 +317,7 @@ fn validate_filter_fields(
         }
         FilterV1::IsNull { field, .. } => {
             if !granted.contains(field) {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::AuthorizationDenied,
                     "QueryFieldDenied",
                     "query filter field is not granted",
@@ -328,14 +328,14 @@ fn validate_filter_fields(
                 .iter()
                 .find(|property| property.canonical_name == *field)
                 .ok_or_else(|| {
-                    data_error(
+                    not_applied_error(
                         ModuleDataErrorKind::SchemaMismatch,
                         "UnknownQueryProperty",
                         "query property is absent from the bound schema",
                     )
                 })?;
             if !property.nullable {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::SchemaMismatch,
                     "NonNullableQueryProperty",
                     "is_null is not valid for a non-nullable property",
@@ -344,7 +344,7 @@ fn validate_filter_fields(
         }
         FilterV1::And { operands } | FilterV1::Or { operands } => {
             if operands.is_empty() {
-                return Err(data_error(
+                return Err(not_applied_error(
                     ModuleDataErrorKind::InvalidRequest,
                     "EmptyFilter",
                     "and/or filters require at least one operand",
@@ -389,7 +389,7 @@ fn query_digest(
     order_by: &[OrderV1],
 ) -> Result<String, ModuleDataError> {
     let canonical = serde_json::to_vec(&(entity_type, filter, order_by)).map_err(|error| {
-        data_error(
+        not_applied_error(
             ModuleDataErrorKind::InvalidRequest,
             "InvalidQuery",
             &error.to_string(),
@@ -402,7 +402,7 @@ fn parse_cursor(cursor: Option<&str>, digest: &str) -> Result<usize, ModuleDataE
     let Some(cursor) = cursor else { return Ok(0) };
     let mut parts = cursor.split(':');
     if parts.next() != Some("v1") || parts.next() != Some(digest) {
-        return Err(data_error(
+        return Err(not_applied_error(
             ModuleDataErrorKind::InvalidRequest,
             "CursorQueryMismatch",
             "cursor does not belong to this query",
@@ -410,7 +410,7 @@ fn parse_cursor(cursor: Option<&str>, digest: &str) -> Result<usize, ModuleDataE
     }
     let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
     if parts.next().is_some() || offset.is_none() {
-        return Err(data_error(
+        return Err(not_applied_error(
             ModuleDataErrorKind::InvalidRequest,
             "InvalidCursor",
             "query cursor is invalid",

@@ -6,7 +6,10 @@ use std::time::Duration;
 use temper_authz::SecurityContext;
 use temper_runtime::ActorSystem;
 use temper_runtime::persistence::schema_deployment::{
-    SchemaExecutionPin, SchemaScope, SchemaScopeKind,
+    ActivateSchemaBundle, ClaimSchemaVerification, ClaimSchemaVerificationOutcome,
+    SchemaBundleRecord, SchemaDeploymentStore, SchemaExecutionPin, SchemaOperationIdentity,
+    SchemaScope, SchemaScopeKind, SchemaVerificationReceipt, ScopedModuleDataBinding,
+    SubmitSchemaBundle,
 };
 use temper_runtime::tenant::TenantId;
 use temper_spec::bundle::{
@@ -25,6 +28,9 @@ use crate::request_context::AgentContext;
 use crate::state::{DispatchExtOptions, ServerState};
 use crate::storage::StorageStack;
 
+mod historical;
+use historical::seed_active_historical_bundle;
+
 const MODULE_NAME: &str = "scoped_client";
 const CUSTOMER_ID: &str = "018f1f80-7b2d-7000-8000-000000000076";
 const CSDL: &str = include_str!(
@@ -36,8 +42,10 @@ const CUSTOMER_IOA: &str = include_str!(
 const WORKER_IOA: &str = include_str!(
     "../../../temper-wasm/tests/fixtures/generated-scoped-data-integration-src/worker.ioa.toml"
 );
-const UNBOUND_GUEST: &[u8] =
+const UNBOUND_GUEST_V1: &[u8] =
     include_bytes!("../../../temper-wasm/tests/fixtures/generated_scoped_data_integration.wasm");
+const UNBOUND_GUEST_V2: &[u8] =
+    include_bytes!("../../../temper-wasm/tests/fixtures/generated_scoped_data_integration_v2.wasm");
 
 fn ioa_sources() -> Vec<IoaSourceInput> {
     vec![
@@ -131,8 +139,10 @@ async fn reopen_turso_after_actor_shutdown(
     unreachable!("bounded Turso reopen loop returns or panics")
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn generated_client_survives_submission_activation_and_cold_restart() {
+async fn generated_client_survives_submission_activation_and_cold_restart(
+    unbound_guest: &[u8],
+    abi: u32,
+) {
     let temp = tempfile::tempdir().expect("temporary Turso directory");
     let database_url = format!("file:{}", temp.path().join("scoped-data.db").display());
     let store = temper_store_turso::TursoEventStore::new(&database_url, None)
@@ -171,8 +181,13 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         grant(),
     )
     .expect("fixture client should generate");
-    let packaged = temper_codegen::package_generated_module_sdk(UNBOUND_GUEST, generated)
-        .expect("generated client should bind to its real guest artifact");
+    let mut runtime_generated = generated.clone();
+    runtime_generated.manifest.abi = abi;
+    let runtime_packaged =
+        temper_codegen::package_generated_module_sdk(unbound_guest, runtime_generated)
+            .expect("generated client should bind to its real guest artifact");
+    let packaged = runtime_packaged.clone();
+    let runtime_artifact_hash = runtime_packaged.manifest.artifact_digest.clone();
     let artifact_hash = packaged.manifest.artifact_digest.clone();
     let artifact_digest = format!("sha256:{artifact_hash}");
     state
@@ -185,7 +200,6 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         )
         .await
         .expect("scoped artifact should persist before submission");
-
     let scope_id = "generated-client-e2e";
     let binding_digest = packaged
         .manifest
@@ -231,7 +245,7 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         cedar_policies: Vec::new(),
         wasm_modules: vec![SchemaWasmArtifactV1 {
             name: MODULE_NAME.into(),
-            artifact_digest,
+            artifact_digest: artifact_digest.clone(),
             data_binding: Some(packaged.manifest.clone()),
         }],
         migration: None,
@@ -259,55 +273,71 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         error.message()
     );
 
-    let submitted = service
-        .submit(
-            TenantId::default().as_str(),
-            &SecurityContext::system(),
-            submit_request,
+    let persistent_scope = SchemaScope {
+        kind: SchemaScopeKind::Task,
+        id: scope_id.into(),
+    };
+    if abi == temper_wasm_sdk::data::DATA_ABI_VERSION_V1 {
+        seed_active_historical_bundle(
+            &store,
+            &compiled,
+            &persistent_scope,
+            &runtime_packaged.manifest,
+            &transport_budgets(&budgets),
         )
-        .await
-        .expect("bundle submission should persist the exact generated-client binding");
-    assert_eq!(submitted.status, "submitted");
-    let verified = service
-        .verify(
-            TenantId::default().as_str(),
-            &SecurityContext::system(),
-            VerifySchemaBundleRequestV1 {
-                request_id: "generated-client-verify".into(),
-                idempotency_key: "generated-client-verify".into(),
-                scope: scope.clone(),
-                bundle_digest: digest.clone(),
-            },
-        )
-        .await
-        .expect("host verification should regenerate and validate the client binding");
-    let verification_receipt_id = verified
-        .verification_receipt_id
-        .clone()
-        .expect("verified bundle should have a receipt");
-    service
-        .activate(
-            TenantId::default().as_str(),
-            &SecurityContext::system(),
-            ActivateSchemaBundleRequestV1 {
-                request_id: "generated-client-activate".into(),
-                idempotency_key: "generated-client-activate".into(),
-                scope: scope.clone(),
-                bundle_digest: digest.clone(),
-                expected_predecessor: None,
-                expected_fence: verified.fence,
-                verification_receipt_id,
-                stream_descriptor_completion_receipt_id: None,
-            },
-        )
-        .await
-        .expect("verified generated-client bundle should activate");
+        .await;
+        service
+            .recover_registry_pointer(TenantId::default().as_str(), &persistent_scope)
+            .await
+            .expect("production recovery should stage the persisted historical bundle");
+    } else {
+        let submitted = service
+            .submit(
+                TenantId::default().as_str(),
+                &SecurityContext::system(),
+                submit_request,
+            )
+            .await
+            .expect("bundle submission should persist the exact generated-client binding");
+        assert_eq!(submitted.status, "submitted");
+        let verified = service
+            .verify(
+                TenantId::default().as_str(),
+                &SecurityContext::system(),
+                VerifySchemaBundleRequestV1 {
+                    request_id: "generated-client-verify".into(),
+                    idempotency_key: "generated-client-verify".into(),
+                    scope: scope.clone(),
+                    bundle_digest: digest.clone(),
+                },
+            )
+            .await
+            .expect("host verification should regenerate and validate the client binding");
+        let verification_receipt_id = verified
+            .verification_receipt_id
+            .clone()
+            .expect("verified bundle should have a receipt");
+        service
+            .activate(
+                TenantId::default().as_str(),
+                &SecurityContext::system(),
+                ActivateSchemaBundleRequestV1 {
+                    request_id: "generated-client-activate".into(),
+                    idempotency_key: "generated-client-activate".into(),
+                    scope: scope.clone(),
+                    bundle_digest: digest.clone(),
+                    expected_predecessor: None,
+                    expected_fence: verified.fence,
+                    verification_receipt_id,
+                    stream_descriptor_completion_receipt_id: None,
+                },
+            )
+            .await
+            .expect("verified generated-client bundle should activate");
+    }
 
     let pin = SchemaExecutionPin {
-        scope: SchemaScope {
-            kind: SchemaScopeKind::Task,
-            id: scope_id.into(),
-        },
+        scope: persistent_scope,
         bundle_digest: digest.clone(),
     };
     let response = dispatch_worker(&state, &pin, "worker-before-restart").await;
@@ -354,7 +384,7 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         "restart must begin with a cold scoped registry"
     );
     assert!(
-        !restarted.wasm_engine.is_cached(&artifact_hash),
+        !restarted.wasm_engine.is_cached(&runtime_artifact_hash),
         "restart must begin with a cold artifact cache"
     );
     GovernedSchemaDeploymentService::new(&restarted)
@@ -371,13 +401,13 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         "cold registry recovery must restore the exact active digest"
     );
     assert!(
-        !restarted.wasm_engine.is_cached(&artifact_hash),
+        !restarted.wasm_engine.is_cached(&runtime_artifact_hash),
         "registry recovery must not hide eager artifact-cache state"
     );
     let response = dispatch_worker(&restarted, &pin, "worker-after-restart").await;
     assert_eq!(response.state.status, "Done");
     assert!(
-        restarted.wasm_engine.is_cached(&artifact_hash),
+        restarted.wasm_engine.is_cached(&runtime_artifact_hash),
         "guest dispatch must recover and compile the exact persisted artifact"
     );
     let recovered = crate::application_data::GovernedApplicationDataService::new(&restarted)
@@ -385,4 +415,22 @@ async fn generated_client_survives_submission_activation_and_cold_restart() {
         .await
         .expect("cold restart should recover the exact scoped Customer");
     assert_eq!(recovered.state.fields["Name"], "generated-scoped-client");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn historical_v1_client_survives_submission_activation_and_cold_restart() {
+    generated_client_survives_submission_activation_and_cold_restart(
+        UNBOUND_GUEST_V1,
+        temper_wasm_sdk::data::DATA_ABI_VERSION_V1,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v2_client_survives_submission_activation_and_cold_restart() {
+    generated_client_survives_submission_activation_and_cold_restart(
+        UNBOUND_GUEST_V2,
+        temper_wasm_sdk::data::DATA_ABI_VERSION_V2,
+    )
+    .await;
 }

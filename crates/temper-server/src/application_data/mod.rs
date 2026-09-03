@@ -7,6 +7,7 @@ mod create_or_verify;
 mod creation_contract;
 mod helpers;
 mod invocation;
+mod protocol;
 mod query;
 mod schema;
 mod schema_deployment;
@@ -25,8 +26,8 @@ pub(crate) use schema::{validate_manifest_action_params, validate_manifest_entit
 pub(crate) use service::GovernedApplicationDataService;
 
 use temper_wasm_sdk::data::{
-    DATA_ABI_VERSION_V1, DataOperationKind, DataOperationV1, DataRequestV1, DataResponseV1,
-    DataResultV1, ModuleDataError, ModuleDataErrorKind,
+    DATA_ABI_VERSION_V1, DATA_ABI_VERSION_V2, DataOperationKind, DataOperationV1, DataRequestV1,
+    DataRequestV2, DataResponseV1, DataResultV1, ModuleDataError, ModuleDataErrorKind,
 };
 
 pub(crate) use creation_contract::{
@@ -34,12 +35,14 @@ pub(crate) use creation_contract::{
     materialize_creation_fields,
 };
 use helpers::{
-    commit, compact_committed_results, data_error, extract_id, internal_error, short_type,
-    validate_value_budget, write_result,
+    applied_internal_error, commit, compact_committed_results, error_with_outcome, extract_id,
+    mark_applied, not_applied_error, not_applied_internal_error, read_service_error, short_type,
+    unknown_internal_error, validate_value_budget, write_result, write_service_error,
 };
 pub(crate) use invocation::{
     ApplicationDataInvocation, ModuleDataTarget, ModuleInvocationAuthority,
 };
+use protocol::{abi_mismatch, decode_request, encode_response, response_outcome};
 use telemetry::{record_operation_fields, result_kind};
 
 #[cfg(test)]
@@ -50,6 +53,10 @@ mod create_or_verify_dst_tests;
 mod create_or_verify_fault_tests;
 #[cfg(all(test, feature = "sim"))]
 mod create_or_verify_tests;
+#[cfg(test)]
+mod create_reconciliation_fault_tests;
+#[cfg(test)]
+mod delete_fault_tests;
 #[cfg(test)]
 mod entity_action_result_tests;
 #[cfg(test)]
@@ -75,7 +82,7 @@ impl ApplicationDataInvocation {
             artifact = %self.authority.artifact_digest,
             grant = %self.authority.grant_digest,
             request_bytes = bytes.len(),
-            abi_version = DATA_ABI_VERSION_V1,
+            abi_version = tracing::field::Empty,
             adapter = "module_sdk",
             operation_kind = tracing::field::Empty,
             entity_type = tracing::field::Empty,
@@ -96,25 +103,28 @@ impl ApplicationDataInvocation {
                 .call_schema_deployment_encoded(bytes.len(), request)
                 .await;
         }
+        let abi = self.authority.binding.abi;
+        tracing::Span::current().record("abi_version", abi);
         let mut response = match self.admit_call(bytes) {
-            Ok(request) => {
-                record_operation_fields(&request.operation);
-                self.execute(request.operation).await
+            Ok(operation) => {
+                record_operation_fields(&operation);
+                self.execute(operation).await
             }
             Err(error) => DataResponseV1::error(error),
         };
-        let mut encoded = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+        let mut encoded = encode_response(abi, &response)?;
         if encoded.len() > self.authority.binding.grant.budgets.max_response_bytes as usize {
             compact_committed_results(&mut response);
-            encoded = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+            encoded = encode_response(abi, &response)?;
         }
         if encoded.len() > self.authority.binding.grant.budgets.max_response_bytes as usize {
-            return serde_json::to_vec(&DataResponseV1::error(data_error(
+            let error = error_with_outcome(
                 ModuleDataErrorKind::BudgetExceeded,
                 "ResponseBudgetExceeded",
                 "application-data response exceeded the invocation budget",
-            )))
-            .map_err(|error| error.to_string());
+                response_outcome(&response),
+            );
+            return encode_response(abi, &DataResponseV1::error(error));
         }
         let span = tracing::Span::current();
         span.record("result_kind", result_kind(&response));
@@ -133,16 +143,16 @@ impl ApplicationDataInvocation {
         Ok(encoded)
     }
 
-    fn admit_call(&self, bytes: &[u8]) -> Result<DataRequestV1, ModuleDataError> {
+    fn admit_call(&self, bytes: &[u8]) -> Result<DataOperationV1, ModuleDataError> {
         if bytes.len() > self.authority.binding.grant.budgets.max_request_bytes as usize {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "RequestBudgetExceeded",
                 "application-data request exceeded the invocation budget",
             ));
         }
         let mut calls = self.calls.lock().map_err(|_| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::Internal,
                 "InvocationStatePoisoned",
                 "application-data invocation state is unavailable",
@@ -150,28 +160,31 @@ impl ApplicationDataInvocation {
         })?;
         *calls = calls.saturating_add(1);
         if *calls > self.authority.binding.grant.budgets.max_calls {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "CallBudgetExceeded",
                 "application-data call budget exhausted",
             ));
         }
-        let request: DataRequestV1 = serde_json::from_slice(bytes).map_err(|error| {
-            data_error(
-                ModuleDataErrorKind::InvalidRequest,
-                "InvalidRequest",
-                &error.to_string(),
-            )
-        })?;
-        if request.abi != DATA_ABI_VERSION_V1 {
-            return Err(data_error(
-                ModuleDataErrorKind::SchemaMismatch,
-                "AbiMismatch",
-                "unsupported application-data ABI",
-            ));
-        }
-        let operation_value = serde_json::to_value(&request.operation).map_err(|_| {
-            data_error(
+        let operation = match self.authority.binding.abi {
+            DATA_ABI_VERSION_V1 => {
+                let request: DataRequestV1 = decode_request(bytes)?;
+                if request.abi != DATA_ABI_VERSION_V1 {
+                    return Err(abi_mismatch());
+                }
+                request.operation
+            }
+            DATA_ABI_VERSION_V2 => {
+                let request: DataRequestV2 = decode_request(bytes)?;
+                if request.abi != DATA_ABI_VERSION_V2 {
+                    return Err(abi_mismatch());
+                }
+                request.operation
+            }
+            _ => return Err(abi_mismatch()),
+        };
+        let operation_value = serde_json::to_value(&operation).map_err(|_| {
+            not_applied_error(
                 ModuleDataErrorKind::InvalidRequest,
                 "InvalidRequest",
                 "request payload could not be validated",
@@ -184,12 +197,12 @@ impl ApplicationDataInvocation {
             &mut nodes,
             self.authority.binding.grant.budgets.max_request_bytes as usize,
         )?;
-        helpers::validate_operation_identifiers(&request.operation)?;
+        helpers::validate_operation_identifiers(&operation)?;
         helpers::reserve_compact_response(
-            &request.operation,
+            &operation,
             self.authority.binding.grant.budgets.max_response_bytes as usize,
         )?;
-        Ok(request)
+        Ok(operation)
     }
 
     async fn execute(&self, operation: DataOperationV1) -> DataResponseV1 {
@@ -308,7 +321,7 @@ impl ApplicationDataInvocation {
         let value = self.canonical_entity_value(entity_type, &response.state)?;
         self.authorize_value("read", entity_type, Some(entity_id), Some(&value))?;
         if minimum.is_some_and(|minimum| response.state.sequence_nr < minimum) {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::ConsistencyUnavailable,
                 "ConsistencyUnavailable",
                 "requested commit is not visible",
@@ -330,7 +343,7 @@ impl ApplicationDataInvocation {
         let entity_id = extract_id(&value)?;
         self.authorize_value("create", entity_type, Some(&entity_id), Some(&value))?;
         if self.target_entity_exists(entity_type, &entity_id).await? {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::AlreadyExists,
                 "EntityAlreadyExists",
                 "entity already exists",
@@ -357,7 +370,7 @@ impl ApplicationDataInvocation {
         let response = match &self.authority.target {
             ModuleDataTarget::TenantGlobal => {
                 service
-                    .create(
+                    .create_typed(
                         &self.authority.tenant,
                         short_type(entity_type),
                         &entity_id,
@@ -367,7 +380,7 @@ impl ApplicationDataInvocation {
             }
             ModuleDataTarget::Scoped(pin) => {
                 service
-                    .create_scoped(
+                    .create_scoped_typed(
                         &self.authority.tenant,
                         short_type(entity_type),
                         &entity_id,
@@ -377,12 +390,15 @@ impl ApplicationDataInvocation {
                     .await
             }
         }
-        .map_err(internal_error)?;
+        .map_err(write_service_error)?;
+        let canonical = self
+            .canonical_entity_value(entity_type, &response.state)
+            .map_err(|error| applied_internal_error(error.to_string()))?;
         Ok(write_result(
             entity_type,
             &entity_id,
             response.state.sequence_nr,
-            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)?),
+            serde_json::Value::Object(canonical),
         ))
     }
 
@@ -396,6 +412,16 @@ impl ApplicationDataInvocation {
         self.require(DataOperationKind::EntityPatch, entity_type, None)?;
         self.validate_entity_object(entity_type, &value, EntityWriteOperation::Patch)?;
         let current = self.get_target_entity(entity_type, entity_id).await?;
+        if expected.is_some_and(|sequence| sequence != current.state.sequence_nr) {
+            return Err(ModuleDataError::new(
+                ModuleDataErrorKind::Conflict,
+                "SequenceConflict",
+                "entity sequence does not match expected_sequence",
+                temper_wasm_sdk::FailureRetryability::AfterRefresh,
+                temper_wasm_sdk::FailureOutcome::NotApplied,
+            )
+            .expect("static sequence-conflict contract must be valid"));
+        }
         let current_value = current
             .state
             .fields
@@ -426,41 +452,46 @@ impl ApplicationDataInvocation {
         let response = match &self.authority.target {
             ModuleDataTarget::TenantGlobal => {
                 service
-                    .patch(
+                    .patch_typed(
                         &self.authority.tenant,
                         short_type(entity_type),
                         entity_id,
                         value.into(),
                         expected,
+                        current.state.sequence_nr,
                     )
                     .await
             }
             ModuleDataTarget::Scoped(pin) => {
                 service
-                    .patch_scoped(
+                    .patch_scoped_typed(
                         &self.authority.tenant,
                         short_type(entity_type),
                         entity_id,
                         value.into(),
                         expected,
                         pin.clone(),
+                        current.state.sequence_nr,
                     )
                     .await
             }
         }
-        .map_err(internal_error)?;
+        .map_err(write_service_error)?;
         if !response.success {
-            return Err(internal_error(
+            return Err(not_applied_internal_error(
                 response
                     .error
                     .unwrap_or_else(|| "FieldUpdateFailed".to_string()),
             ));
         }
+        let canonical = self
+            .canonical_entity_value(entity_type, &response.state)
+            .map_err(|error| applied_internal_error(error.to_string()))?;
         Ok(write_result(
             entity_type,
             entity_id,
             response.state.sequence_nr,
-            serde_json::Value::Object(self.canonical_entity_value(entity_type, &response.state)?),
+            serde_json::Value::Object(canonical),
         ))
     }
 }

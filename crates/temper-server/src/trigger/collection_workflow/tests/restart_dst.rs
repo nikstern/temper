@@ -106,6 +106,8 @@ async fn generated_faults_and_crashes_reconstruct_every_collection_boundary() {
             seed,
             SimFaultConfig {
                 write_failure_prob: 0.2,
+                append_post_commit_failure_prob: 0.0,
+                append_acknowledgement_loss_prob: 0.0,
                 concurrency_violation_prob: 0.2,
                 read_truncation_prob: 0.0,
                 snapshot_failure_prob: 0.0,

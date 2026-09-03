@@ -28,6 +28,14 @@ pub(crate) enum FileStreamContentError {
     Wasm(String),
     /// The verified File action rejected the content update.
     ActionRejected(String),
+    /// Dispatch failed without a causal acknowledgement.
+    DispatchUnknown(String),
+    /// Persistence rejected the new-file write before commit.
+    PersistenceNotApplied(String),
+    /// Persistence committed the new-file write before a later failure.
+    PersistenceApplied(String),
+    /// Persistence could not prove whether the new-file write committed.
+    PersistenceUnknown(String),
 }
 
 impl std::fmt::Display for FileStreamContentError {
@@ -37,7 +45,28 @@ impl std::fmt::Display for FileStreamContentError {
             | Self::BlobStore(error)
             | Self::StreamRegistry(error)
             | Self::Wasm(error)
-            | Self::ActionRejected(error) => f.write_str(error),
+            | Self::ActionRejected(error)
+            | Self::DispatchUnknown(error)
+            | Self::PersistenceNotApplied(error)
+            | Self::PersistenceApplied(error)
+            | Self::PersistenceUnknown(error) => f.write_str(error),
+        }
+    }
+}
+
+impl FileStreamContentError {
+    /// Preserve the causal persistence phase at the File stream boundary.
+    pub(super) fn from_persistence(error: temper_runtime::persistence::PersistenceError) -> Self {
+        use temper_runtime::persistence::PersistenceError;
+        let diagnostic = error.to_string();
+        match error {
+            PersistenceError::PreCommit(_)
+            | PersistenceError::ConcurrencyViolation { .. }
+            | PersistenceError::Serialization(_) => Self::PersistenceNotApplied(diagnostic),
+            PersistenceError::PostCommit(_) => Self::PersistenceApplied(diagnostic),
+            PersistenceError::AcknowledgementUnknown(_) | PersistenceError::Storage(_) => {
+                Self::PersistenceUnknown(diagnostic)
+            }
         }
     }
 }
@@ -299,7 +328,7 @@ impl ServerState {
             kernel_metadata,
         })
         .await
-        .map_err(|error| FileStreamContentError::ActionRejected(error.to_string()))
+        .map_err(|error| FileStreamContentError::DispatchUnknown(error.to_string()))
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -409,7 +438,7 @@ impl ServerState {
             kernel_metadata: None,
         })
         .await
-        .map_err(FileStreamContentError::ActionRejected)
+        .map_err(FileStreamContentError::DispatchUnknown)
     }
 
     async fn dispatch_file_stream_action(

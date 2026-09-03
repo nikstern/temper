@@ -423,6 +423,8 @@ async fn deterministic_across_seeds() {
 async fn fault_injection_produces_errors() {
     let faults = SimFaultConfig {
         write_failure_prob: 1.0, // always fail
+        append_post_commit_failure_prob: 0.0,
+        append_acknowledgement_loss_prob: 0.0,
         concurrency_violation_prob: 0.0,
         read_truncation_prob: 0.0,
         snapshot_failure_prob: 0.0,

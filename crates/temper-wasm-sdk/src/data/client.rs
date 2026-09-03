@@ -3,10 +3,15 @@
 use std::collections::BTreeMap;
 
 use super::{
-    CommitToken, CreateOrVerifyResultV1, DataOperationV1, DataOutcomeV1, DataRequestV1,
-    DataResponseV1, DataResultV1, FileMetadataV1, ModuleDataError, ModuleDataErrorKind,
-    Retryability,
+    CommitToken, CreateOrVerifyResultV1, DataOperationV1, DataOutcomeV1, DataOutcomeV2,
+    DataRequestV2, DataResponseV2, DataResultV1, FailureOutcome, FailureRetryability,
+    FileMetadataV1, ModuleDataError, ModuleDataErrorKind,
 };
+
+#[path = "client_stream_result.rs"]
+mod stream_result;
+#[cfg(target_arch = "wasm32")]
+use stream_result::decode_stream_result;
 
 #[path = "client/create_or_verify.rs"]
 mod create_or_verify;
@@ -177,8 +182,10 @@ fn decode_object<T: serde::de::DeserializeOwned>(
             ModuleDataErrorKind::SchemaMismatch,
             "GeneratedResultTypeMismatch",
             error.to_string(),
-            Retryability::Never,
+            FailureRetryability::Never,
+            FailureOutcome::NotApplied,
         )
+        .expect("static generated-result failure contract must be valid")
     })
 }
 
@@ -190,8 +197,10 @@ fn decode_json<T: serde::de::DeserializeOwned>(
             ModuleDataErrorKind::SchemaMismatch,
             "GeneratedResultTypeMismatch",
             error.to_string(),
-            Retryability::Never,
+            FailureRetryability::Never,
+            FailureOutcome::NotApplied,
         )
+        .expect("static generated-result failure contract must be valid")
     })
 }
 
@@ -200,8 +209,10 @@ fn result_shape_error(expected: &str) -> ModuleDataError {
         ModuleDataErrorKind::Internal,
         "UnexpectedDataResult",
         format!("host returned a result other than {expected}"),
-        Retryability::Never,
+        FailureRetryability::Never,
+        FailureOutcome::NotApplied,
     )
+    .expect("static result-shape failure contract must be valid")
 }
 
 /// Typed entry point used by generated module clients.
@@ -217,7 +228,7 @@ impl DataClient {
         mut operation: DataOperationV1,
     ) -> Result<DataResultV1, ModuleDataError> {
         self.apply_observed_sequence(&mut operation);
-        let request = DataRequestV1::new(operation);
+        let request = DataRequestV2::new(operation);
         let bytes = serde_json::to_vec(&request).map_err(|error| {
             sdk_error(
                 "RequestEncodingFailed",
@@ -225,18 +236,19 @@ impl DataClient {
             )
         })?;
         let response = call_host(&bytes)?;
-        if response.abi != super::DATA_ABI_VERSION_V1 {
+        if response.abi != super::DATA_ABI_VERSION_V2 {
             return Err(sdk_error(
                 "ResponseAbiMismatch",
                 format!("host returned unsupported ABI {}", response.abi),
             ));
         }
         match response.outcome {
-            DataOutcomeV1::Ok { result } => {
+            DataOutcomeV2::Ok { result } => {
+                let result = DataResultV1::from(result);
                 self.observe_result(&result);
                 Ok(result)
             }
-            DataOutcomeV1::Error { error } => Err(error),
+            DataOutcomeV2::Error { error } => Err(error),
         }
     }
 
@@ -368,8 +380,10 @@ fn sdk_error(code: &str, message: String) -> ModuleDataError {
         ModuleDataErrorKind::Internal,
         code,
         message,
-        Retryability::Never,
+        FailureRetryability::Never,
+        FailureOutcome::NotApplied,
     )
+    .expect("static SDK failure contract must be valid")
 }
 
 fn stream_error(code: &str, message: &str) -> ModuleDataError {
@@ -377,12 +391,14 @@ fn stream_error(code: &str, message: &str) -> ModuleDataError {
         ModuleDataErrorKind::InvalidRequest,
         code,
         message,
-        Retryability::Never,
+        FailureRetryability::Never,
+        FailureOutcome::NotApplied,
     )
+    .expect("static stream failure contract must be valid")
 }
 
 #[cfg(target_arch = "wasm32")]
-fn call_host(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
+fn call_host(request: &[u8]) -> Result<DataResponseV2, ModuleDataError> {
     let handle = unsafe {
         crate::host::host_temper_data_call(request.as_ptr() as i32, request.len() as i32)
     };
@@ -420,12 +436,12 @@ fn call_host(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-helpers"))]
-fn call_host(request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
+fn call_host(request: &[u8]) -> Result<DataResponseV2, ModuleDataError> {
     super::test_host::call(request)
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "test-helpers")))]
-fn call_host(_request: &[u8]) -> Result<DataResponseV1, ModuleDataError> {
+fn call_host(_request: &[u8]) -> Result<DataResponseV2, ModuleDataError> {
     Err(sdk_error(
         "HostUnavailable",
         "application-data host is only available on wasm32".into(),
@@ -470,28 +486,6 @@ fn file_stream_write(_handle: u32, _bytes: &[u8]) -> Result<usize, ModuleDataErr
         "HostUnavailable",
         "File stream host is only available on wasm32".into(),
     ))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn decode_stream_result(result: i32) -> Result<usize, ModuleDataError> {
-    match result {
-        value if value >= 0 => Ok(value as usize),
-        -1 => Err(ModuleDataError::new(
-            ModuleDataErrorKind::TransientUnavailable,
-            "WouldBlock",
-            "File stream would block",
-            Retryability::WithBackoff,
-        )),
-        -2 => Err(stream_error("FileStreamClosed", "File stream is closed")),
-        -3 => Err(stream_error(
-            "InvalidFileStream",
-            "File stream handle is invalid",
-        )),
-        _ => Err(sdk_error(
-            "FileStreamHostFailure",
-            "File stream host failed".into(),
-        )),
-    }
 }
 
 #[cfg(test)]

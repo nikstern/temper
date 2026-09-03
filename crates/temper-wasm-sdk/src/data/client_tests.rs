@@ -93,5 +93,5 @@ fn native_client_fails_without_fabricating_authority() {
             at_least_sequence: None,
         })
         .unwrap_err();
-    assert_eq!(error.code, "HostUnavailable");
+    assert_eq!(error.code().as_str(), "HostUnavailable");
 }

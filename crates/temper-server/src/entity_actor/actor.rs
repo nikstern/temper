@@ -47,6 +47,20 @@ use super::types::{
     MAX_ITEMS_PER_ENTITY,
 };
 
+pub(super) fn persistence_failure_outcome(
+    error: &PersistenceError,
+) -> temper_failure::FailureOutcome {
+    match error {
+        PersistenceError::PostCommit(_) => temper_failure::FailureOutcome::Applied,
+        PersistenceError::AcknowledgementUnknown(_) | PersistenceError::Storage(_) => {
+            temper_failure::FailureOutcome::Unknown
+        }
+        PersistenceError::PreCommit(_)
+        | PersistenceError::ConcurrencyViolation { .. }
+        | PersistenceError::Serialization(_) => temper_failure::FailureOutcome::NotApplied,
+    }
+}
+
 /// Reserved state/event field holding immutable scoped schema evidence.
 pub const SCHEMA_PIN_FIELD: &str = "_temper_schema_pin_v1";
 
@@ -182,6 +196,8 @@ pub struct EntityActor {
     initial_reference_evidence: BTreeMap<String, bool>,
     /// Durable identity attached only to the first Created event.
     creation_idempotency_key: Option<String>,
+    /// One-shot structural result for a bootstrap append that prevents actor startup.
+    startup_failure_outcome: Option<Arc<std::sync::Mutex<Option<temper_failure::FailureOutcome>>>>,
     /// Optional event journal for persistence. None = in-memory only.
     pub(super) event_journal: Option<BoxedEventStore>,
     /// Optional async snapshot writer. Event appends remain synchronous.
@@ -323,6 +339,7 @@ impl EntityActor {
             initial_fields,
             initial_reference_evidence: BTreeMap::new(),
             creation_idempotency_key: None,
+            startup_failure_outcome: None,
             event_journal: None,
             snapshot_queue: None,
             event_backend: None,
@@ -351,6 +368,7 @@ impl EntityActor {
             initial_fields,
             initial_reference_evidence: BTreeMap::new(),
             creation_idempotency_key: None,
+            startup_failure_outcome: None,
             event_journal: Some(store),
             snapshot_queue: None,
             event_backend: Some(backend),
@@ -404,6 +422,15 @@ impl EntityActor {
             "creation idempotency key must not be empty"
         );
         self.creation_idempotency_key = Some(key);
+        self
+    }
+
+    /// Publish the structural bootstrap persistence phase if startup fails.
+    pub(crate) fn with_startup_failure_outcome(
+        mut self,
+        outcome: Arc<std::sync::Mutex<Option<temper_failure::FailureOutcome>>>,
+    ) -> Self {
+        self.startup_failure_outcome = Some(outcome);
         self
     }
 
@@ -1663,23 +1690,28 @@ impl Actor for EntityActor {
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
+                && let Err(error) = self
+                    .persist_event(
+                        store,
+                        backend,
+                        &self.persistence_id(),
+                        &mut state,
+                        &created,
+                        None,
+                        None,
+                    )
+                    .await
             {
-                self.persist_event(
-                    store,
-                    backend,
-                    &self.persistence_id(),
-                    &mut state,
-                    &created,
-                    None,
-                    None,
-                )
-                .await
-                .map_err(|e| {
-                    ActorError::custom(format!(
-                        "failed to persist bootstrap Created event for {}:{}: {}",
-                        self.entity_type, self.entity_id, e
-                    ))
-                })?;
+                if let Some(outcome) = &self.startup_failure_outcome {
+                    *outcome
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(persistence_failure_outcome(&error));
+                }
+                return Err(ActorError::custom(format!(
+                    "failed to persist bootstrap Created event for {}:{}: {}",
+                    self.entity_type, self.entity_id, error
+                )));
             }
             let committed_sequence = state.sequence_nr.max(1);
             state.record_committed_event(created, committed_sequence);
@@ -1729,6 +1761,7 @@ impl Actor for EntityActor {
                         error: Some(format!(
                             "action name `{name}` is reserved for journaled field updates"
                         )),
+                        failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -1773,6 +1806,7 @@ impl Actor for EntityActor {
                         success: true,
                         state: response_state,
                         error: None,
+                        failure_outcome: None,
                         custom_effects,
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -1785,6 +1819,7 @@ impl Actor for EntityActor {
                         success: false,
                         state: state.clone(),
                         error: Some("SequenceConflict".into()),
+                        failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -1803,6 +1838,7 @@ impl Actor for EntityActor {
                             "action authorization became stale; retry against current state"
                                 .to_string(),
                         ),
+                        failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -1859,6 +1895,7 @@ impl Actor for EntityActor {
                         error: Some(format!(
                             "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
                         )),
+                        failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -1911,6 +1948,7 @@ impl Actor for EntityActor {
                             success: false,
                             state: state.clone(),
                             error: Some(format!("field-overflow blob persistence failed: {e}")),
+                            failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                             custom_effects: vec![],
                             scheduled_actions: vec![],
                             spawn_requests: vec![],
@@ -1953,6 +1991,9 @@ impl Actor for EntityActor {
                                         success: false,
                                         state: state.clone(),
                                         error: Some("SequenceConflict".into()),
+                                        failure_outcome: Some(
+                                            temper_failure::FailureOutcome::NotApplied,
+                                        ),
                                         custom_effects: vec![],
                                         scheduled_actions: vec![],
                                         spawn_requests: vec![],
@@ -1989,6 +2030,7 @@ impl Actor for EntityActor {
                                 let mut retry_final: Option<(
                                     crate::runtime_metrics::ConcurrencyRetryOutcome,
                                     Option<String>,
+                                    Option<temper_failure::FailureOutcome>,
                                 )> = None;
                                 // ADR-0046 Sub-Decision 4: track the most
                                 // recent authoritative sequence across retries
@@ -2060,6 +2102,7 @@ impl Actor for EntityActor {
                                                     "action {name} no longer legal after concurrency replay"
                                                 )
                                             })),
+                                            Some(temper_failure::FailureOutcome::NotApplied),
                                         ));
                                         break;
                                     }
@@ -2088,6 +2131,7 @@ impl Actor for EntityActor {
                                             Some(format!(
                                                 "field-overflow blob persistence failed during retry: {e}"
                                             )),
+                                            Some(temper_failure::FailureOutcome::NotApplied),
                                         ));
                                         break;
                                     }
@@ -2119,6 +2163,7 @@ impl Actor for EntityActor {
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Success,
                                                 None,
+                                                None,
                                             ));
                                             break;
                                         }
@@ -2148,15 +2193,38 @@ impl Actor for EntityActor {
                                                     "persistence failed: optimistic concurrency retry exhausted"
                                                         .to_string(),
                                                 ),
+                                                Some(temper_failure::FailureOutcome::NotApplied),
                                             ));
                                             break;
                                         }
                                         Err(e) => {
+                                            let failure_outcome = persistence_failure_outcome(&e);
+                                            if failure_outcome
+                                                == temper_failure::FailureOutcome::Applied
+                                            {
+                                                let committed_sequence = state.sequence_nr.max(
+                                                    state_before.sequence_nr.saturating_add(1),
+                                                );
+                                                state.record_committed_event(
+                                                    retry_event.clone(),
+                                                    committed_sequence,
+                                                );
+                                            } else if failure_outcome
+                                                == temper_failure::FailureOutcome::Unknown
+                                                && super::field_updates::reconcile_from_store(
+                                                    self, state,
+                                                )
+                                                .await
+                                                .is_err()
+                                            {
+                                                *state = state_before.clone();
+                                            }
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
                                                 Some(format!(
                                                     "persistence failed during retry: {e}"
                                                 )),
+                                                Some(failure_outcome),
                                             ));
                                             break;
                                         }
@@ -2166,7 +2234,7 @@ impl Actor for EntityActor {
                                 // Record the retry outcome. `total_attempts` is
                                 // 1-based; `retry_idx` counts completed retries.
                                 let total_attempts = u64::from(1 + retry_idx);
-                                if let Some((outcome, err_msg)) = retry_final {
+                                if let Some((outcome, err_msg, failure_outcome)) = retry_final {
                                     // Close the ADR-0046 APM span with the
                                     // final attempt count + outcome so APM
                                     // views can filter by either.
@@ -2178,11 +2246,16 @@ impl Actor for EntityActor {
                                         total_attempts,
                                     );
                                     if let Some(msg) = err_msg {
-                                        *state = state_before;
+                                        if failure_outcome
+                                            == Some(temper_failure::FailureOutcome::NotApplied)
+                                        {
+                                            *state = state_before;
+                                        }
                                         ctx.reply(EntityResponse {
                                             success: false,
                                             state: state.clone(),
                                             error: Some(msg),
+                                            failure_outcome,
                                             custom_effects: vec![],
                                             scheduled_actions: vec![],
                                             spawn_requests: vec![],
@@ -2193,13 +2266,28 @@ impl Actor for EntityActor {
                                 }
                             }
                             Err(e) => {
-                                // Non-concurrency persistence error — unchanged:
-                                // roll back and fail.
-                                *state = state_before;
+                                let failure_outcome = persistence_failure_outcome(&e);
+                                if failure_outcome == temper_failure::FailureOutcome::Applied {
+                                    let committed_sequence = state
+                                        .sequence_nr
+                                        .max(state_before.sequence_nr.saturating_add(1));
+                                    state.record_committed_event(event.clone(), committed_sequence);
+                                } else if failure_outcome == temper_failure::FailureOutcome::Unknown
+                                {
+                                    if super::field_updates::reconcile_from_store(self, state)
+                                        .await
+                                        .is_err()
+                                    {
+                                        *state = state_before;
+                                    }
+                                } else {
+                                    *state = state_before;
+                                }
                                 ctx.reply(EntityResponse {
                                     success: false,
                                     state: state.clone(),
                                     error: Some(format!("persistence failed: {e}")),
+                                    failure_outcome: Some(failure_outcome),
                                     custom_effects: vec![],
                                     scheduled_actions: vec![],
                                     spawn_requests: vec![],
@@ -2297,6 +2385,7 @@ impl Actor for EntityActor {
                         success: true,
                         state: state.clone(),
                         error: None,
+                        failure_outcome: None,
                         custom_effects: result.custom_effects,
                         scheduled_actions: result.scheduled_actions,
                         spawn_requests: result.spawn_requests,
@@ -2338,6 +2427,7 @@ impl Actor for EntityActor {
                         success: false,
                         state: state.clone(),
                         error: result.error,
+                        failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -2359,6 +2449,7 @@ impl Actor for EntityActor {
                     success: true,
                     state: state.clone(),
                     error: None,
+                    failure_outcome: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
@@ -2393,10 +2484,15 @@ impl Actor for EntityActor {
                     expected_precondition,
                 )
                 .await;
+                let (error, failure_outcome) = match outcome {
+                    Ok(()) => (None, None),
+                    Err(error) => (Some(error.diagnostic), Some(error.outcome)),
+                };
                 ctx.reply(EntityResponse {
-                    success: outcome.is_ok(),
+                    success: error.is_none(),
                     state: state.clone(),
-                    error: outcome.err(),
+                    error,
+                    failure_outcome,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
@@ -2417,6 +2513,7 @@ impl Actor for EntityActor {
                             "delete authorization became stale; retry against current state"
                                 .to_string(),
                         ),
+                        failure_outcome: Some(temper_failure::FailureOutcome::NotApplied),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -2447,10 +2544,35 @@ impl Actor for EntityActor {
                         )
                         .await
                 {
+                    let failure_outcome = persistence_failure_outcome(&e);
+                    if failure_outcome == temper_failure::FailureOutcome::Applied {
+                        state.status = deleted.to_status.clone();
+                        if let Some(fields) = state.fields.as_object_mut() {
+                            fields.insert(
+                                "Status".to_string(),
+                                serde_json::Value::String(state.status.clone()),
+                            );
+                        }
+                        let committed_sequence = state.sequence_nr.saturating_add(1);
+                        state.record_committed_event(deleted.clone(), committed_sequence);
+                    } else if failure_outcome == temper_failure::FailureOutcome::Unknown
+                        && let Err(reconcile_error) =
+                            super::field_updates::reconcile_from_store(self, state).await
+                    {
+                        tracing::warn!(
+                            tenant = %self.tenant,
+                            entity_type = %self.entity_type,
+                            entity_id = %self.entity_id,
+                            persistence_error = %e,
+                            reconciliation_error = %reconcile_error,
+                            "delete acknowledgement was unknown and durable reconciliation failed"
+                        );
+                    }
                     ctx.reply(EntityResponse {
                         success: false,
                         state: state.clone(),
                         error: Some(format!("persistence failed: {e}")),
+                        failure_outcome: Some(failure_outcome),
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
@@ -2477,6 +2599,7 @@ impl Actor for EntityActor {
                     success: true,
                     state: state.clone(),
                     error: None,
+                    failure_outcome: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],

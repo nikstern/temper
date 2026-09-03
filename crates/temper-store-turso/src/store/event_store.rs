@@ -23,6 +23,23 @@ use crate::retry::{is_transient_write_error, retry_delay_ms};
 
 const APPEND_BATCH_INSERT_CHUNK_ROWS: usize = 400;
 
+fn pre_commit_storage(error: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::PreCommit(error.to_string())
+}
+
+fn pre_commit_error(error: PersistenceError) -> PersistenceError {
+    match error {
+        PersistenceError::PreCommit(_)
+        | PersistenceError::ConcurrencyViolation { .. }
+        | PersistenceError::Serialization(_) => error,
+        error => PersistenceError::PreCommit(error.to_string()),
+    }
+}
+
+fn is_retryable_append_error(error: &PersistenceError) -> bool {
+    matches!(error, PersistenceError::PreCommit(message) if is_transient_write_error(message))
+}
+
 struct PreparedEventInsert {
     tenant: String,
     entity_type: String,
@@ -268,7 +285,7 @@ impl EventStore for TursoEventStore {
                     timeout_ms = attempt_timeout.as_millis() as u64,
                     "turso.append attempt timed out"
                 );
-                Err(PersistenceError::Storage(format!(
+                Err(PersistenceError::AcknowledgementUnknown(format!(
                     "turso.append timed out after {}ms",
                     attempt_timeout.as_millis()
                 )))
@@ -282,10 +299,7 @@ impl EventStore for TursoEventStore {
                     return Ok(seq);
                 }
                 Err(err) => {
-                    let transient = match &err {
-                        PersistenceError::Storage(msg) => is_transient_write_error(msg),
-                        _ => false,
-                    };
+                    let transient = is_retryable_append_error(&err);
                     if !transient {
                         return Err(err);
                     }
@@ -677,7 +691,7 @@ impl EventStore for TursoEventStore {
                             timeout_ms = attempt_timeout.as_millis() as u64,
                             "turso.append_batch attempt timed out"
                         );
-                        Err(PersistenceError::Storage(format!(
+                        Err(PersistenceError::AcknowledgementUnknown(format!(
                             "turso.append_batch timed out after {}ms",
                             attempt_timeout.as_millis()
                         )))
@@ -691,7 +705,7 @@ impl EventStore for TursoEventStore {
                     return Ok(result);
                 }
                 Err(err) => {
-                    let transient = matches!(&err, PersistenceError::Storage(msg) if is_transient_write_error(msg));
+                    let transient = is_retryable_append_error(&err);
                     if !transient {
                         return Err(err);
                     }
@@ -710,8 +724,11 @@ impl EventStore for TursoEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let conn = self.configured_connection().await?;
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::PreCommit)?;
+        let conn = self
+            .configured_connection()
+            .await
+            .map_err(pre_commit_error)?;
 
         let mut rows = conn
             .query(
@@ -1695,16 +1712,22 @@ impl TursoEventStore {
         }
 
         let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-        let conn = self.configured_connection().await?;
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::PreCommit)?;
+        let conn = self
+            .configured_connection()
+            .await
+            .map_err(pre_commit_error)?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
-            .map_err(storage_error)?;
+            .map_err(pre_commit_storage)?;
 
-        assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id, events).await?;
+        assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id, events)
+            .await
+            .map_err(pre_commit_error)?;
         assert_unscoped_stream_publication_fence(&tx, tenant, entity_type, entity_id, events)
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
 
         let select_start = std::time::Instant::now();
         let rows_result = tx
@@ -1721,10 +1744,10 @@ impl TursoEventStore {
             "transaction",
             rows_result.is_ok(),
         );
-        let mut rows = rows_result.map_err(storage_error)?;
+        let mut rows = rows_result.map_err(pre_commit_storage)?;
 
-        let current_seq = match rows.next().await.map_err(storage_error)? {
-            Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
+        let current_seq = match rows.next().await.map_err(pre_commit_storage)? {
+            Some(row) => row.get::<i64>(0).map_err(pre_commit_storage)? as u64,
             None => 0,
         };
         drop(rows);
@@ -1753,9 +1776,9 @@ impl TursoEventStore {
                     params![tenant, entity_type, entity_id],
                 )
                 .await
-                .map_err(storage_error)?;
-            if let Some(row) = segment_rows.next().await.map_err(storage_error)? {
-                row.get::<i64>(0).map_err(storage_error)?
+                .map_err(pre_commit_storage)?;
+            if let Some(row) = segment_rows.next().await.map_err(pre_commit_storage)? {
+                row.get::<i64>(0).map_err(pre_commit_storage)?
             } else {
                 drop(segment_rows);
                 let mut max_rows = tx
@@ -1766,9 +1789,9 @@ impl TursoEventStore {
                         params![tenant, entity_type, entity_id],
                     )
                     .await
-                    .map_err(storage_error)?;
-                let idx = match max_rows.next().await.map_err(storage_error)? {
-                    Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+                    .map_err(pre_commit_storage)?;
+                let idx = match max_rows.next().await.map_err(pre_commit_storage)? {
+                    Some(row) => row.get::<i64>(0).map_err(pre_commit_storage)?,
                     None => 0,
                 };
                 drop(max_rows);
@@ -1786,7 +1809,7 @@ impl TursoEventStore {
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(pre_commit_storage)?;
                 idx
             }
         };
@@ -1838,7 +1861,7 @@ impl TursoEventStore {
                         actual: new_seq,
                     });
                 }
-                return Err(PersistenceError::Storage(msg));
+                return Err(PersistenceError::PreCommit(msg));
             }
         }
 
@@ -1856,10 +1879,12 @@ impl TursoEventStore {
                 ],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(pre_commit_storage)?;
         }
 
-        tx.commit().await.map_err(storage_error)?;
+        tx.commit()
+            .await
+            .map_err(|error| PersistenceError::AcknowledgementUnknown(error.to_string()))?;
         Ok(new_seq)
     }
 
@@ -1870,26 +1895,30 @@ impl TursoEventStore {
         let mut seen = std::collections::BTreeSet::new();
         for append in appends {
             if !seen.insert(append.persistence_id.as_str()) {
-                return Err(PersistenceError::Storage(format!(
+                return Err(PersistenceError::PreCommit(format!(
                     "duplicate persistence_id '{}' in append_batch",
                     append.persistence_id
                 )));
             }
         }
 
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .configured_connection()
+            .await
+            .map_err(pre_commit_error)?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
-            .map_err(storage_error)?;
+            .map_err(pre_commit_storage)?;
 
         let mut parsed = Vec::with_capacity(appends.len());
         for append in appends {
             let (tenant, entity_type, entity_id) =
                 parse_persistence_id_parts(&append.persistence_id)
-                    .map_err(PersistenceError::Storage)?;
+                    .map_err(PersistenceError::PreCommit)?;
             assert_scoped_journal_write_fence(&tx, tenant, entity_type, entity_id, &append.events)
-                .await?;
+                .await
+                .map_err(pre_commit_error)?;
             assert_unscoped_stream_publication_fence(
                 &tx,
                 tenant,
@@ -1897,7 +1926,8 @@ impl TursoEventStore {
                 entity_id,
                 &append.events,
             )
-            .await?;
+            .await
+            .map_err(pre_commit_error)?;
 
             if append.expected_sequence == 0 && !append.events.is_empty() {
                 parsed.push((
@@ -1923,10 +1953,10 @@ impl TursoEventStore {
                 "transaction",
                 rows_result.is_ok(),
             );
-            let mut rows = rows_result.map_err(storage_error)?;
+            let mut rows = rows_result.map_err(pre_commit_storage)?;
 
-            let current_seq = match rows.next().await.map_err(storage_error)? {
-                Some(row) => row.get::<i64>(0).map_err(storage_error)? as u64,
+            let current_seq = match rows.next().await.map_err(pre_commit_storage)? {
+                Some(row) => row.get::<i64>(0).map_err(pre_commit_storage)? as u64,
                 None => 0,
             };
             drop(rows);
@@ -1946,14 +1976,14 @@ impl TursoEventStore {
             }
             if let Some(first_event) = &append.first_event {
                 if append.expected_sequence != 0 || append.events.is_empty() {
-                    return Err(PersistenceError::Storage(
+                    return Err(PersistenceError::PreCommit(
                         "first-event metadata requires a non-empty sequence-0 append".to_string(),
                     ));
                 }
                 if first_event.contract_revision != first_event.contract.version
                     || first_event.schema_identity != first_event.contract.schema_digest
                 {
-                    return Err(PersistenceError::Storage(
+                    return Err(PersistenceError::PreCommit(
                         "invalid first-event metadata".to_string(),
                     ));
                 }
@@ -2044,7 +2074,7 @@ impl TursoEventStore {
                         actual: first.sequence_nr,
                     });
                 }
-                return Err(PersistenceError::Storage(msg));
+                return Err(PersistenceError::PreCommit(msg));
             }
         }
 
@@ -2076,11 +2106,11 @@ impl TursoEventStore {
                         i64::from(first_event.contract_revision),
                         first_event.schema_identity.as_str(),
                         first_event.declared_key_signature.as_str(),
-                        i64::try_from(result.sequence_nr).map_err(storage_error)?
+                        i64::try_from(result.sequence_nr).map_err(pre_commit_storage)?
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(pre_commit_storage)?;
             }
             if result.sequence_nr > append.expected_sequence
                 && let Some((revision, schema, signature)) =
@@ -2091,7 +2121,8 @@ impl TursoEventStore {
                         entity_id,
                         result.sequence_nr,
                     )
-                    .await?
+                    .await
+                    .map_err(pre_commit_error)?
             {
                 let entry = coverage_changes
                     .entry((tenant.clone(), entity_type.clone()))
@@ -2114,11 +2145,11 @@ impl TursoEventStore {
                         ],
                     )
                     .await
-                    .map_err(storage_error)?;
-                if let Some(row) = rows.next().await.map_err(storage_error)? {
-                    let holder = row.get::<String>(0).map_err(storage_error)?;
+                    .map_err(pre_commit_storage)?;
+                if let Some(row) = rows.next().await.map_err(pre_commit_storage)? {
+                    let holder = row.get::<String>(0).map_err(pre_commit_storage)?;
                     if holder != *entity_id {
-                        return Err(PersistenceError::Storage(format!(
+                        return Err(PersistenceError::PreCommit(format!(
                             "duplicate declared key '{}' for {entity_type}",
                             key.key_name
                         )));
@@ -2131,7 +2162,7 @@ impl TursoEventStore {
                 params![tenant.as_str(), entity_type.as_str(), entity_id.as_str()],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(pre_commit_storage)?;
             for key in &append.key_rows {
                 tx.execute(
                     "INSERT INTO entity_key_index
@@ -2147,7 +2178,7 @@ impl TursoEventStore {
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(pre_commit_storage)?;
             }
             if !append.reconcile_vectors {
                 continue;
@@ -2158,7 +2189,7 @@ impl TursoEventStore {
                 params![tenant.clone(), entity_type.clone(), entity_id.clone()],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(pre_commit_storage)?;
             for row in &append.vector_rows {
                 tx.execute(
                     "INSERT INTO entity_vector_index \
@@ -2175,7 +2206,7 @@ impl TursoEventStore {
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(pre_commit_storage)?;
             }
         }
         for ((tenant, entity_type), (write_delta, signatures, cursor)) in coverage_changes {
@@ -2192,11 +2223,14 @@ impl TursoEventStore {
                         declared_key_signature: &signature,
                     },
                 )
-                .await?;
+                .await
+                .map_err(pre_commit_error)?;
             }
         }
 
-        tx.commit().await.map_err(storage_error)?;
+        tx.commit()
+            .await
+            .map_err(|error| PersistenceError::AcknowledgementUnknown(error.to_string()))?;
         Ok(results)
     }
 
@@ -2210,7 +2244,7 @@ impl TursoEventStore {
         event: &PersistenceEnvelope,
     ) -> Result<u64, PersistenceError> {
         let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::PreCommit)?;
         let new_seq = expected_sequence + 1;
         let payload_json = serde_json::to_string(&event.payload).map_err(|e| {
             tracing::error!(error = %e, "failed to serialize event payload");
@@ -2221,7 +2255,10 @@ impl TursoEventStore {
             PersistenceError::Serialization(e.to_string())
         })?;
 
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .configured_connection()
+            .await
+            .map_err(pre_commit_error)?;
         let segment_index = {
             let mut rows = conn
                 .query(
@@ -2233,9 +2270,9 @@ impl TursoEventStore {
                     params![tenant, entity_type, entity_id],
                 )
                 .await
-                .map_err(storage_error)?;
-            if let Some(row) = rows.next().await.map_err(storage_error)? {
-                row.get::<i64>(0).map_err(storage_error)?
+                .map_err(pre_commit_storage)?;
+            if let Some(row) = rows.next().await.map_err(pre_commit_storage)? {
+                row.get::<i64>(0).map_err(pre_commit_storage)?
             } else {
                 drop(rows);
                 let mut max_rows = conn
@@ -2246,9 +2283,9 @@ impl TursoEventStore {
                         params![tenant, entity_type, entity_id],
                     )
                     .await
-                    .map_err(storage_error)?;
-                let idx = match max_rows.next().await.map_err(storage_error)? {
-                    Some(row) => row.get::<i64>(0).map_err(storage_error)?,
+                    .map_err(pre_commit_storage)?;
+                let idx = match max_rows.next().await.map_err(pre_commit_storage)? {
+                    Some(row) => row.get::<i64>(0).map_err(pre_commit_storage)?,
                     None => 0,
                 };
                 drop(max_rows);
@@ -2266,7 +2303,7 @@ impl TursoEventStore {
                     ],
                 )
                 .await
-                .map_err(storage_error)?;
+                .map_err(pre_commit_storage)?;
                 idx
             }
         };
@@ -2309,13 +2346,15 @@ impl TursoEventStore {
                 let msg = e.to_string();
                 tracing::error!(error = %e, "single event insert failed");
                 if msg.contains("UNIQUE constraint failed") || msg.contains("UNIQUE") {
-                    let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;
+                    let actual = current_sequence(&conn, tenant, entity_type, entity_id)
+                        .await
+                        .map_err(pre_commit_error)?;
                     return Err(PersistenceError::ConcurrencyViolation {
                         expected: expected_sequence,
                         actual,
                     });
                 }
-                return Err(PersistenceError::Storage(msg));
+                return Err(PersistenceError::AcknowledgementUnknown(msg));
             }
         };
 
@@ -2333,7 +2372,7 @@ impl TursoEventStore {
                 ],
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(|error| PersistenceError::PostCommit(error.to_string()))?;
             return Ok(new_seq);
         }
 
@@ -2350,15 +2389,17 @@ impl TursoEventStore {
                     params![tenant, entity_type, event.event_type.as_str()],
                 )
                 .await
-                .map_err(storage_error)?;
-            if rows.next().await.map_err(storage_error)?.is_some() {
-                return Err(PersistenceError::Storage(
+                .map_err(pre_commit_storage)?;
+            if rows.next().await.map_err(pre_commit_storage)?.is_some() {
+                return Err(PersistenceError::PreCommit(
                     "stream descriptor publication fence".into(),
                 ));
             }
         }
 
-        let actual = current_sequence(&conn, tenant, entity_type, entity_id).await?;
+        let actual = current_sequence(&conn, tenant, entity_type, entity_id)
+            .await
+            .map_err(pre_commit_error)?;
         tracing::error!(
             expected = expected_sequence,
             actual,
@@ -2394,5 +2435,26 @@ async fn current_sequence(
             .map_err(storage_error)
             .map(|seq| seq as u64),
         None => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    #[test]
+    fn only_transient_pre_commit_failures_are_retryable() {
+        assert!(is_retryable_append_error(&PersistenceError::PreCommit(
+            "stream error".into()
+        )));
+        assert!(!is_retryable_append_error(
+            &PersistenceError::AcknowledgementUnknown("stream error".into())
+        ));
+        assert!(!is_retryable_append_error(&PersistenceError::PostCommit(
+            "stream error".into()
+        )));
+        assert!(!is_retryable_append_error(&PersistenceError::Storage(
+            "stream error".into()
+        )));
     }
 }

@@ -1,7 +1,7 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use tracing::{Instrument, instrument};
@@ -22,8 +22,11 @@ use crate::storage::DataOnlyCreateRecord;
 
 mod bootstrap;
 mod creation;
+mod mutation_error;
 mod projection_metrics;
+mod update_wrappers;
 pub(crate) use creation::actor_creation_contract;
+pub(crate) use mutation_error::EntityMutationError;
 use projection_metrics::{
     record_projection_update_error, record_projection_update_started,
     record_projection_update_success,
@@ -705,6 +708,7 @@ impl ServerState {
             None,
             None,
             false,
+            None,
         )
     }
 
@@ -726,6 +730,7 @@ impl ServerState {
             Some(schema_pin),
             None,
             false,
+            None,
         )
     }
 
@@ -743,6 +748,7 @@ impl ServerState {
         schema_pin: Option<SchemaExecutionPin>,
         creation_idempotency_key: Option<String>,
         recovered_stream: bool,
+        startup_failure_outcome: Option<Arc<Mutex<Option<temper_failure::FailureOutcome>>>>,
     ) -> Option<ActorRef<EntityMsg>> {
         if schema_pin.is_none() && validate_global_entity_id(entity_id).is_err() {
             tracing::warn!(
@@ -845,6 +851,10 @@ impl ServerState {
         };
         let actor = match creation_idempotency_key {
             Some(key) => actor.with_creation_idempotency_key(key),
+            None => actor,
+        };
+        let actor = match startup_failure_outcome {
+            Some(outcome) => actor.with_startup_failure_outcome(outcome),
             None => actor,
         };
 
@@ -1411,6 +1421,7 @@ impl ServerState {
             None,
         )
         .await
+        .map_err(|error| error.to_string())
     }
 
     /// Create or recover an entity under one exact immutable scoped bundle.
@@ -1431,6 +1442,46 @@ impl ServerState {
             None,
         )
         .await
+        .map_err(|error| error.to_string())
+    }
+
+    /// Create an entity while preserving causal commit evidence for module data.
+    pub(crate) async fn get_or_create_tenant_entity_typed(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+    ) -> Result<EntityResponse, EntityMutationError> {
+        self.get_or_create_entity_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Create a scoped entity while preserving causal commit evidence for module data.
+    pub(crate) async fn get_or_create_scoped_entity_typed(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        schema_pin: SchemaExecutionPin,
+    ) -> Result<EntityResponse, EntityMutationError> {
+        self.get_or_create_entity_with_schema_pin(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            Some(schema_pin),
+            None,
+        )
+        .await
     }
 
     async fn get_or_create_entity_with_schema_pin(
@@ -1441,24 +1492,27 @@ impl ServerState {
         initial_fields: serde_json::Value,
         schema_pin: Option<SchemaExecutionPin>,
         creation_idempotency_key: Option<String>,
-    ) -> Result<EntityResponse, String> {
+    ) -> Result<EntityResponse, EntityMutationError> {
         let creating = match schema_pin.as_ref() {
             Some(pin) => {
                 let exists = self
                     .scoped_entity_pin_matches(tenant, entity_type, entity_id, pin)
-                    .await?;
+                    .await
+                    .map_err(EntityMutationError::Unknown)?;
                 if !exists {
                     let active_digest = self
                         .registry
                         .read()
-                        .map_err(|_| "registry lock poisoned".to_string())?
+                        .map_err(|_| {
+                            EntityMutationError::NotApplied("registry lock poisoned".to_string())
+                        })?
                         .active_scope_digest(tenant, &pin.scope)
                         .map(str::to_string);
                     if active_digest.as_deref() != Some(pin.bundle_digest.as_str()) {
-                        return Err(format!(
+                        return Err(EntityMutationError::NotApplied(format!(
                             "{SCHEMA_PIN_MISMATCH_PREFIX} bundle {} is not active for new entity '{entity_type}/{entity_id}'",
                             pin.bundle_digest
-                        ));
+                        )));
                     }
                 }
                 !exists
@@ -1471,25 +1525,25 @@ impl ServerState {
         };
         let initial_reference_evidence = if creating {
             let prepared_id = match schema_pin.as_ref() {
-                Some(pin) => {
-                    self.prepare_scoped_reference_contract_create(
+                Some(pin) => self
+                    .prepare_scoped_reference_contract_create(
                         tenant,
                         entity_type,
                         Some(entity_id),
                         &initial_fields,
                         pin,
                     )
-                    .await?
-                }
-                None => {
-                    self.prepare_reference_contract_create(
+                    .await
+                    .map_err(EntityMutationError::NotApplied)?,
+                None => self
+                    .prepare_reference_contract_create(
                         tenant,
                         entity_type,
                         Some(entity_id),
                         &initial_fields,
                     )
-                    .await?
-                }
+                    .await
+                    .map_err(EntityMutationError::NotApplied)?,
             };
             debug_assert_eq!(prepared_id.as_deref(), Some(entity_id));
             self.resolve_reference_evidence(
@@ -1505,6 +1559,7 @@ impl ServerState {
             BTreeMap::new()
         };
         let materialization_pin = schema_pin.clone();
+        let startup_failure_outcome = Arc::new(Mutex::new(None));
         let actor_ref = self
             .get_or_spawn_tenant_actor_with_fields_and_reference_evidence(
                 tenant,
@@ -1515,20 +1570,76 @@ impl ServerState {
                 schema_pin,
                 creation_idempotency_key.clone(),
                 false,
+                Some(Arc::clone(&startup_failure_outcome)),
             )
             .ok_or_else(|| {
-                format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+                EntityMutationError::NotApplied(format!(
+                    "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+                ))
             })?;
 
         let policy = self.dispatch_retry_policy();
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
+        let response_result = retry::ask_with_backoff::<_, EntityResponse, _>(
             &actor_ref,
             || EntityMsg::GetState,
             &policy,
         )
         .await
-        .result
-        .map_err(|e| format!("Actor query failed: {e}"))?;
+        .result;
+        let structural_outcome = *startup_failure_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if creating {
+            let diagnostic = "actor startup persistence failed before the create response".into();
+            match structural_outcome {
+                Some(temper_failure::FailureOutcome::Applied) => {
+                    return Err(EntityMutationError::Applied(diagnostic));
+                }
+                Some(temper_failure::FailureOutcome::NotApplied) => {
+                    return Err(EntityMutationError::NotApplied(diagnostic));
+                }
+                Some(temper_failure::FailureOutcome::Unknown) => {
+                    return Err(EntityMutationError::Unknown(diagnostic));
+                }
+                None => {}
+            }
+        }
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) if creating => {
+                let diagnostic = format!("Actor query failed: {error}");
+                let journal_entity_id = materialization_pin.as_ref().map_or_else(
+                    || entity_id.to_string(),
+                    |pin| {
+                        temper_runtime::persistence::schema_deployment::scoped_journal_entity_id(
+                            entity_id, pin,
+                        )
+                    },
+                );
+                let persistence_id = format!("{tenant}:{entity_type}:{journal_entity_id}");
+                let journal_is_empty = match self.event_journal() {
+                    Some((store, _)) => store
+                        .read_events_limited(&persistence_id, 0, 1)
+                        .await
+                        .is_ok_and(|events| events.is_empty()),
+                    None => false,
+                };
+                if journal_is_empty {
+                    return Err(EntityMutationError::NotApplied(diagnostic));
+                }
+                return Err(EntityMutationError::Unknown(diagnostic));
+            }
+            Err(error) => {
+                return Err(EntityMutationError::Unknown(format!(
+                    "Actor query failed: {error}"
+                )));
+            }
+        };
+        if creating && self.event_journal().is_some() && response.state.sequence_nr == 0 {
+            return Err(EntityMutationError::NotApplied(
+                "entity creation did not produce a durable first event".into(),
+            ));
+        }
         if let Some(key) = creation_idempotency_key.as_deref()
             && !self
                 .bootstrap_creation_is_owned_by(
@@ -1539,11 +1650,12 @@ impl ServerState {
                     &response.state.processed_idempotency_keys,
                     key,
                 )
-                .await?
+                .await
+                .map_err(EntityMutationError::Unknown)?
         {
-            return Err(
+            return Err(EntityMutationError::NotApplied(
                 "BootstrapTargetConflict: existing journal is owned by another creation".into(),
-            );
+            ));
         }
 
         // ADR-0178: the bootstrap Created event may carry a durable timeout
@@ -1560,7 +1672,7 @@ impl ServerState {
                     materialization_pin.as_ref(),
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| EntityMutationError::Applied(error.to_string()))?;
             if !intents.is_empty()
                 && let Some(dispatcher) = self
                     .reaction_dispatcher
@@ -1641,7 +1753,9 @@ impl ServerState {
                     entity_id = %entity_id,
                     "failed to update query projection during create"
                 );
-                return Err(format!("query projection write failed during create: {e}"));
+                return Err(EntityMutationError::Applied(format!(
+                    "query projection write failed during create: {e}"
+                )));
             }
             record_projection_update_success(
                 tenant,
@@ -1955,129 +2069,12 @@ impl ServerState {
             success: true,
             state,
             error: None,
+            failure_outcome: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
             spec_governed: true,
         }))
-    }
-
-    /// Update fields on an existing entity.
-    #[instrument(skip_all, fields(otel.name = "entity.update_tenant_entity_fields", tenant = %tenant, entity_type, entity_id))]
-    pub async fn update_tenant_entity_fields(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-    ) -> Result<EntityResponse, String> {
-        self.update_tenant_entity_fields_if_sequence(
-            tenant,
-            entity_type,
-            entity_id,
-            fields,
-            replace,
-            None,
-        )
-        .await
-    }
-
-    /// Update fields only when the actor is still at `expected_sequence`.
-    #[instrument(skip_all, fields(otel.name = "entity.update_tenant_entity_fields_if_sequence", tenant = %tenant, entity_type, entity_id))]
-    pub async fn update_tenant_entity_fields_if_sequence(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-        expected_sequence: Option<u64>,
-    ) -> Result<EntityResponse, String> {
-        self.update_entity_fields_with_schema_pin(
-            tenant,
-            entity_type,
-            entity_id,
-            fields,
-            replace,
-            expected_sequence,
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// Update fields through one exact immutable scoped actor.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_scoped_entity_fields_if_sequence(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-        expected_sequence: Option<u64>,
-        schema_pin: SchemaExecutionPin,
-    ) -> Result<EntityResponse, String> {
-        self.update_entity_fields_with_schema_pin(
-            tenant,
-            entity_type,
-            entity_id,
-            fields,
-            replace,
-            expected_sequence,
-            Some(schema_pin),
-            None,
-        )
-        .await
-    }
-
-    /// Update fields only if the global actor still matches the state Cedar authorized.
-    pub(crate) async fn update_tenant_entity_fields_if_current(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-        expected_precondition: String,
-    ) -> Result<EntityResponse, String> {
-        self.update_entity_fields_with_schema_pin(
-            tenant,
-            entity_type,
-            entity_id,
-            fields,
-            replace,
-            None,
-            None,
-            Some(expected_precondition),
-        )
-        .await
-    }
-
-    /// Update fields only if an immutable scoped actor still matches the state Cedar authorized.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn update_scoped_entity_fields_if_current(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        fields: serde_json::Value,
-        replace: bool,
-        schema_pin: SchemaExecutionPin,
-        expected_precondition: String,
-    ) -> Result<EntityResponse, String> {
-        self.update_entity_fields_with_schema_pin(
-            tenant,
-            entity_type,
-            entity_id,
-            fields,
-            replace,
-            None,
-            Some(schema_pin),
-            Some(expected_precondition),
-        )
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2091,9 +2088,11 @@ impl ServerState {
         expected_sequence: Option<u64>,
         schema_pin: Option<SchemaExecutionPin>,
         expected_precondition: Option<String>,
-    ) -> Result<EntityResponse, String> {
+    ) -> Result<EntityResponse, EntityMutationError> {
         if !fields.is_object() {
-            return Err("entity field update must be a JSON object".to_string());
+            return Err(EntityMutationError::NotApplied(
+                "entity field update must be a JSON object".to_string(),
+            ));
         }
         let reference_evidence = self
             .resolve_reference_evidence(
@@ -2116,7 +2115,9 @@ impl ServerState {
             None => self.get_or_spawn_tenant_actor(tenant, entity_type, entity_id),
         }
         .ok_or_else(|| {
-            format!("No transition table for tenant '{tenant}', entity type '{entity_type}'")
+            EntityMutationError::NotApplied(format!(
+                "No transition table for tenant '{tenant}', entity type '{entity_type}'"
+            ))
         })?;
 
         let mut policy = self.dispatch_retry_policy();
@@ -2141,13 +2142,25 @@ impl ServerState {
         )
         .await
         .result
-        .map_err(|e| format!("Actor update failed: {e}"))?;
+        .map_err(|e| EntityMutationError::Unknown(format!("Actor update failed: {e}")))?;
 
         if !response.success {
-            return Err(response
+            let diagnostic = response
                 .error
                 .clone()
-                .unwrap_or_else(|| "entity field update was rejected".to_string()));
+                .unwrap_or_else(|| "entity field update was rejected".to_string());
+            return Err(match response.failure_outcome {
+                Some(temper_failure::FailureOutcome::Applied) => {
+                    EntityMutationError::Applied(diagnostic)
+                }
+                Some(temper_failure::FailureOutcome::Unknown) => {
+                    EntityMutationError::Unknown(diagnostic)
+                }
+                Some(temper_failure::FailureOutcome::NotApplied) => {
+                    EntityMutationError::NotApplied(diagnostic)
+                }
+                None => EntityMutationError::Unknown(diagnostic),
+            });
         }
 
         if let Some(query_plane) = self.query_plane_store() {
@@ -2188,7 +2201,9 @@ impl ServerState {
                     entity_id = %entity_id,
                     "failed to update query projection during field update"
                 );
-                return Err(format!("query projection write failed during update: {e}"));
+                return Err(EntityMutationError::Applied(format!(
+                    "query projection write failed during update: {e}"
+                )));
             }
             record_projection_update_success(
                 tenant,
@@ -2370,6 +2385,24 @@ impl ServerState {
             .is_some_and(|ids| ids.contains(entity_id))
     }
 
+    /// Read durable global-journal presence without collapsing store failures into absence.
+    pub(crate) async fn durable_global_entity_exists(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<bool, String> {
+        validate_global_entity_id(entity_id)?;
+        let Some((store, _)) = self.event_journal() else {
+            return Ok(self.entity_exists(tenant, entity_type, entity_id));
+        };
+        let events = store
+            .read_events(&format!("{tenant}:{entity_type}:{entity_id}"), 0)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(!events.is_empty() && !events.last().is_some_and(is_deleted_envelope))
+    }
+
     /// Ensure an entity is present in memory by lazily hydrating from the
     /// event store when needed.
     #[instrument(skip_all, fields(otel.name = "entity.ensure_entity_loaded", tenant = %tenant, entity_type, entity_id))]
@@ -2431,6 +2464,7 @@ impl ServerState {
             None,
             None,
             true,
+            None,
         ) else {
             return false;
         };

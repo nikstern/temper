@@ -94,10 +94,30 @@ Every server error construction site supplies its known outcome:
 - a store or transport failure whose acknowledgement was lost uses `Unknown`
   with `Reconcile` retryability.
 
+Persistence implementations surface `PreCommit`, `PostCommit`, or
+`AcknowledgementUnknown` evidence when they know the phase. A typed state-layer
+mutation boundary likewise preserves causal knowledge that an event was durable
+before a later projection or response failure. Bare sequence comparison is not
+causal evidence: an unchanged actor can be stale after acknowledgement loss, and
+an advance can belong to another concurrent mutation. `Applied` requires causal
+operation identity or structural evidence from the mutation boundary;
+`NotApplied` requires a typed pre-commit result or causally fenced proof such as
+durable absence for a newly allocated identity. If neither source can prove the
+phase, the adapter must retain `Unknown`.
+
+Before-commit PostgreSQL and Turso failures are `PreCommit`; a transaction
+commit error or timed-out write is `AcknowledgementUnknown`; and a failure
+after a non-transactional Turso event insert is `PostCommit`. Turso retries only
+transient `PreCommit` failures. Actor startup carries its one-shot structural
+phase back to the create coordinator, while new-File append and projection
+failures retain their exact phase.
+
 Batch item errors carry their own outcome. Batch-envelope admission errors are
 not applied. Create-or-verify reservations and response compaction preserve a
 known commit token and use applied outcome for failures after that token is
-known. Error classification never parses diagnostics.
+known. If any batch member remains `Unknown`, that uncertainty dominates the
+aggregate response-budget failure even when another member has a known commit.
+Error classification never parses diagnostics.
 
 **Why this approach**: Only the layer adjacent to dispatch and persistence can
 state whether a mutation crossed its commit boundary. Encoding that fact at

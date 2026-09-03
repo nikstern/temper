@@ -102,6 +102,12 @@ macro_rules! impl_sim_creation_methods {
                     actual: current,
                 });
             }
+            let write_failure_probability = inner.faults.write_failure_prob;
+            if inner.rng.chance(write_failure_probability) {
+                return Err(PersistenceError::PreCommit(
+                    "SimEventStore: injected first-event write failure".into(),
+                ));
+            }
             for row in &commit.key_rows {
                 if inner
                     .key_index
@@ -120,6 +126,18 @@ macro_rules! impl_sim_creation_methods {
                 }
             }
             commit_first_event_locked(&mut inner, commit)?;
+            let post_commit_failure_probability = inner.faults.append_post_commit_failure_prob;
+            if inner.rng.chance(post_commit_failure_probability) {
+                return Err(PersistenceError::PostCommit(
+                    "SimEventStore: injected first-event post-commit failure".into(),
+                ));
+            }
+            let acknowledgement_loss_probability = inner.faults.append_acknowledgement_loss_prob;
+            if inner.rng.chance(acknowledgement_loss_probability) {
+                return Err(PersistenceError::AcknowledgementUnknown(
+                    "SimEventStore: injected first-event acknowledgement loss".into(),
+                ));
+            }
             Ok(1)
         }
 

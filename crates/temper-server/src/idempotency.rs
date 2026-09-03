@@ -195,6 +195,7 @@ mod tests {
                 processed_idempotency_keys: BTreeMap::new(),
             },
             error: None,
+            failure_outcome: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],

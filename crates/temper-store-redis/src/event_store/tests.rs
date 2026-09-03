@@ -38,6 +38,44 @@ async fn make_store() -> Option<RedisEventStore> {
     )
 }
 
+#[test]
+fn redis_append_phase_mappers_are_closed_and_distinct() {
+    assert!(matches!(
+        redis_pre_commit("rejected"),
+        PersistenceError::PreCommit(_)
+    ));
+    assert!(matches!(
+        redis_post_commit("projection"),
+        PersistenceError::PostCommit(_)
+    ));
+    assert!(matches!(
+        redis_acknowledgement_unknown("transport"),
+        PersistenceError::AcknowledgementUnknown(_)
+    ));
+}
+
+#[test]
+fn malformed_redis_results_preserve_every_known_leading_tag() {
+    for result in [&[1][..], &[1, 2, 3]] {
+        assert!(matches!(
+            redis_malformed_result(result, &[0, -1, -2, -3], "test"),
+            PersistenceError::PostCommit(_)
+        ));
+    }
+    for result in [&[0][..], &[-1], &[-2], &[-3], &[0, 2, 3]] {
+        assert!(matches!(
+            redis_malformed_result(result, &[0, -1, -2, -3], "test"),
+            PersistenceError::PreCommit(_)
+        ));
+    }
+    for result in [&[][..], &[99]] {
+        assert!(matches!(
+            redis_malformed_result(result, &[0, -1, -2, -3], "test"),
+            PersistenceError::AcknowledgementUnknown(_)
+        ));
+    }
+}
+
 #[tokio::test]
 async fn append_and_read_events_roundtrip() {
     let Some(store) = make_store().await else {

@@ -49,6 +49,10 @@ pub use schema_deployment::SimSchemaFaultPoint;
 pub struct SimFaultConfig {
     /// Probability of a write failure on `append()`.
     pub write_failure_prob: f64,
+    /// Probability that `append()` commits and then reports a known post-commit failure.
+    pub append_post_commit_failure_prob: f64,
+    /// Probability that `append()` commits but loses its acknowledgement.
+    pub append_acknowledgement_loss_prob: f64,
     /// Probability of a spurious concurrency violation on `append()`.
     pub concurrency_violation_prob: f64,
     /// Probability of truncating journal on `read_events()`.
@@ -64,6 +68,8 @@ impl SimFaultConfig {
     pub fn none() -> Self {
         Self {
             write_failure_prob: 0.0,
+            append_post_commit_failure_prob: 0.0,
+            append_acknowledgement_loss_prob: 0.0,
             concurrency_violation_prob: 0.0,
             read_truncation_prob: 0.0,
             snapshot_failure_prob: 0.0,
@@ -75,6 +81,8 @@ impl SimFaultConfig {
     pub fn heavy() -> Self {
         Self {
             write_failure_prob: 0.05,
+            append_post_commit_failure_prob: 0.02,
+            append_acknowledgement_loss_prob: 0.02,
             concurrency_violation_prob: 0.02,
             read_truncation_prob: 0.01,
             snapshot_failure_prob: 0.03,

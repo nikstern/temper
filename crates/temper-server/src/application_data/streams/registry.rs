@@ -19,7 +19,7 @@ impl FileStreamRegistry {
         bytes: Vec<u8>,
     ) -> Result<u32, ModuleDataError> {
         if self.streams.len() >= self.max_open {
-            return Err(data_error(
+            return Err(not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "OpenStreamBudgetExceeded",
                 "File stream budget exhausted",
@@ -27,7 +27,7 @@ impl FileStreamRegistry {
         }
         let handle = self.next_handle;
         self.next_handle = self.next_handle.checked_add(1).ok_or_else(|| {
-            data_error(
+            not_applied_error(
                 ModuleDataErrorKind::BudgetExceeded,
                 "StreamHandleExhausted",
                 "File stream handles exhausted",

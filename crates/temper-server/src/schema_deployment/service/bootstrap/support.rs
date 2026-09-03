@@ -260,52 +260,22 @@ pub(super) fn module_error_failure(
     stage: SchemaBootstrapFailureStage,
     error: temper_wasm_sdk::data::ModuleDataError,
 ) -> SchemaBootstrapFailure {
-    let mut failure = simple_failure(stage, &error.code, &error.message, false);
-    failure.decision_id = error.decision_id;
-    failure.details = error.details.map_or_else(BTreeMap::new, |details| {
-        details
-            .into_iter()
-            .take(64)
-            .map(|(key, value)| {
-                (
-                    key.chars().take(128).collect(),
-                    bounded_detail_value(value, 0),
-                )
-            })
-            .collect()
-    });
+    let mut failure = simple_failure(
+        stage,
+        error.code().as_str(),
+        error.diagnostic().map_or("", |value| value.as_str()),
+        false,
+    );
+    failure.decision_id = error
+        .decision_id()
+        .map(|decision_id| decision_id.as_str().to_string());
+    failure.details = error
+        .details()
+        .values()
+        .iter()
+        .map(|(key, value)| (key.as_str().to_string(), value.to_json_scalar()))
+        .collect();
     failure
-}
-
-fn bounded_detail_value(value: serde_json::Value, depth: usize) -> serde_json::Value {
-    if depth >= 8 {
-        return serde_json::Value::String("detail nesting budget exhausted".into());
-    }
-    match value {
-        serde_json::Value::String(value) => {
-            serde_json::Value::String(value.chars().take(1_024).collect())
-        }
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values
-                .into_iter()
-                .take(64)
-                .map(|value| bounded_detail_value(value, depth + 1))
-                .collect(),
-        ),
-        serde_json::Value::Object(values) => serde_json::Value::Object(
-            values
-                .into_iter()
-                .take(64)
-                .map(|(key, value)| {
-                    (
-                        key.chars().take(128).collect(),
-                        bounded_detail_value(value, depth + 1),
-                    )
-                })
-                .collect(),
-        ),
-        value => value,
-    }
 }
 
 pub(super) fn service_error_failure(
@@ -379,6 +349,8 @@ fn validation_error(
         kind,
         code,
         message,
-        temper_wasm_sdk::data::Retryability::Never,
+        temper_wasm_sdk::FailureRetryability::Never,
+        temper_wasm_sdk::FailureOutcome::NotApplied,
     )
+    .expect("static schema-bootstrap failure contract must be valid")
 }
